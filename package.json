@@ -1,0 +1,25 @@
+{
+  "name": "aiRoute",
+  "version": "1.0.0",
+  "description": "本地 LLM 多模型调度网关",
+  "private": true,
+  "scripts": {
+    "dev:h5": "node scripts/dev-h5.js",
+    "dev:app": "node scripts/dev-app.js",
+    "build": "node scripts/build.js"
+  },
+  "keywords": ["llm", "router", "gateway", "anthropic", "openai", "electron"],
+  "author": "c",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/c347087870/AiRoute"
+  },
+  "homepage": "https://github.com/c347087870/AiRoute#readme",
+  "bugs": {
+    "url": "https://github.com/c347087870/AiRoute/issues"
+  },
+  "dependencies": {
+    "fs-extra": "^11.3.5"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "my-provider": {
+    "baseURL": "https://your-api-endpoint.com/anthropic",
+    "apiKey": "your-api-key-here",
+    "model": "your-model-name",
+    "displayName": "我的模型"
+  }
+}

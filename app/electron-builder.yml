@@ -1,0 +1,13 @@
+appId: com.airoute.app
+productName: AiRoute
+artifactName: AiRoute.exe
+directories:
+  output: dist-electron
+files:
+  - main/
+  - renderer/dist/
+  - server/
+  - package.json
+win:
+  target: portable
+  icon: renderer/public/icon.png

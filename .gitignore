@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 敏感配置（含 API Key）
+server/models.json
+
+# 运行时数据
+server/logs/
+
+# pnpm lockfile（各子目录自行管理）
+pnpm-lock.yaml
+
+# 构建产物
+app/release/
+app/server/
+app/renderer/dist/
+app/dist-electron/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
