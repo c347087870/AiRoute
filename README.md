@@ -1,6 +1,6 @@
 # AiRoute
 
-> 本地 LLM 多模型调度网关 — 把模型选择权从厂商手里拿回来。
+> 本地 LLM 多模型调度网关 — 好钢用在刀刃上，贵的模型做难事，便宜的做杂事。
 
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/c347087870/AiRoute)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
