@@ -37,6 +37,7 @@ const navItems = [
   { path: '/routing', label: '路由规则', icon: '◎' },
   { path: '/providers', label: 'Provider 管理', icon: '◇' },
   { path: '/logs', label: '日志查看', icon: '▤' },
+  { path: '/token-stats', label: 'Token 统计', icon: '◉' },
   { path: '/settings', label: '设置', icon: '⚙' },
   { path: '/tutorial', label: '使用教程', icon: '✎' }
 ]

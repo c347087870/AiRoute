@@ -21,6 +21,9 @@
             <th>模型</th>
             <th>状态</th>
             <th>耗时</th>
+            <th>输入 Token</th>
+            <th>输出 Token</th>
+            <th>总计</th>
             <th>Fallback</th>
             <th>错误</th>
           </tr>
@@ -35,6 +38,9 @@
               </span>
             </td>
             <td>{{ log.responseTime }}ms</td>
+            <td class="token-cell text-blue">{{ formatNumber(log.inputTokens) }}</td>
+            <td class="token-cell text-green">{{ formatNumber(log.outputTokens) }}</td>
+            <td class="token-cell text-purple font-bold">{{ formatNumber(log.totalTokens) }}</td>
             <td>
               <span v-if="log.fallback" class="text-yellow">
                 {{ log.fallbackFrom }} → {{ log.model }}
@@ -65,6 +71,12 @@ function formatTime(ts) {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit'
   })
+}
+
+// 格式化数字（添加千位分隔符）
+function formatNumber(num) {
+  if (!num && num !== 0) return '-'
+  return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 }
 
 // 加载日志
@@ -153,5 +165,26 @@ onMounted(loadLogs)
   color: #999999;
   padding: 40px;
   font-size: 14px;
+}
+
+.token-cell {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.text-blue {
+  color: #0082FC;
+}
+
+.text-green {
+  color: #00B578;
+}
+
+.text-purple {
+  color: #9C27B0;
+}
+
+.font-bold {
+  font-weight: 600;
 }
 </style>

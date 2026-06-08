@@ -5,6 +5,7 @@ const fs = require('fs-extra')
 const path = require('path')
 const logger = require('./logger')
 const engine = require('./router-engine')
+const tokenStats = require('./token-stats')
 
 const app = express()
 app.use(cors())
@@ -90,6 +91,88 @@ function resolveRequestBody(provider, body, isStream) {
   return reqBody
 }
 
+function extractTokensFromResponse(provider, data, isAnthropic) {
+  if (isAnthropic) {
+    // Claude API 响应格式
+    if (data.usage) {
+      return {
+        input: data.usage.input_tokens || 0,
+        output: data.usage.output_tokens || 0
+      }
+    }
+  } else {
+    // OpenAI 兼容 API 响应格式
+    if (data.usage) {
+      return {
+        input: data.usage.prompt_tokens || 0,
+        output: data.usage.completion_tokens || 0
+      }
+    }
+  }
+  return null
+}
+
+// 从流式响应中提取 Token（用于日志记录）
+function extractTokensFromStreamChunk(chunk, isAnthropic) {
+  try {
+    const text = chunk.toString()
+    const lines = text.split('\n').filter(line => line.trim())
+    
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      
+      const dataStr = line.slice(6).trim()
+      if (dataStr === '[DONE]') continue
+      
+      try {
+        const data = JSON.parse(dataStr)
+        
+        if (isAnthropic) {
+          // Claude 流式：在 message_delta 事件中包含 usage
+          if (data.type === 'message_delta' && data.usage) {
+            console.log(`[Token Debug] Found message_delta with usage:`, data.usage)
+            return {
+              input: data.usage.input_tokens || 0,  // ✅ 修复：提取实际的 input_tokens
+              output: data.usage.output_tokens || 0
+            }
+          }
+          // 也在 content_block_delta 中检查
+          if (data.type === 'content_block_delta' && data.usage) {
+            console.log(`[Token Debug] Found content_block_delta with usage:`, data.usage)
+            return {
+              input: data.usage.input_tokens || 0,
+              output: data.usage.output_tokens || 0
+            }
+          }
+          // 也在 message_start 中检查（有时会在这里返回 input_tokens）
+          if (data.type === 'message_start' && data.message?.usage) {
+            console.log(`[Token Debug] Found message_start with usage:`, data.message.usage)
+            return {
+              input: data.message.usage.input_tokens || 0,
+              output: 0  // message_start 时还没有 output
+            }
+          }
+        } else {
+          // OpenAI 流式：在最后一个块中包含 usage
+          if (data.usage) {
+            console.log(`[Token Debug] Found OpenAI usage:`, data.usage)
+            return {
+              input: data.usage.prompt_tokens || 0,
+              output: data.usage.completion_tokens || 0
+            }
+          }
+        }
+      } catch (e) {
+        // 忽略解析错误，继续处理下一行
+      }
+    }
+  } catch (e) {
+    // 忽略整体解析错误
+  }
+  
+  return null
+}
+
 function adaptResponse(provider, data, isAnthropic) {
   if (!isAnthropic) return data
   return {
@@ -169,20 +252,79 @@ async function handleRequest(req, res) {
             continue
           }
 
-          logger.log({
-            model: name,
-            status: 200,
-            responseTime: Date.now() - startTime,
-            fallback: name !== primaryModel,
-            fallbackFrom: name !== primaryModel ? primaryModel : undefined
-          })
-
           res.setHeader('Content-Type', 'text/event-stream')
           res.setHeader('Cache-Control', 'no-cache')
           res.setHeader('Connection', 'keep-alive')
 
-          upstream.data.pipe(res)
-          upstream.data.on('error', () => { try { res.end() } catch {} })
+          // 用于收集流式响应中的 Token 信息（合并策略：保留非零值）
+          let streamTokens = { input: 0, output: 0 }
+          const chunks = []
+
+          upstream.data.on('data', (chunk) => {
+            // 尝试从每个 chunk 中提取 Token（合并策略：非零值覆盖零值）
+            const tokens = extractTokensFromStreamChunk(chunk, isAnthropic)
+            if (tokens) {
+              // 合而非覆盖：只在新值为非零时更新，避免丢失已提取的值
+              if (tokens.input > 0) streamTokens.input = tokens.input
+              if (tokens.output > 0) streamTokens.output = tokens.output
+            }
+            
+            // 保存 chunk 以便后续转发
+            chunks.push(chunk)
+            // 立即转发给客户端
+            res.write(chunk)
+          })
+
+          upstream.data.on('end', () => {
+            // 流结束时记录 Token（只要有任一非零值就记录）
+            if (streamTokens.input > 0 || streamTokens.output > 0) {
+              console.log(`[Token Stats] ✅ Stream request completed - Model: ${name}`)
+              console.log(`  Input Tokens:  ${streamTokens.input}`)
+              console.log(`  Output Tokens: ${streamTokens.output}`)
+              console.log(`  Total Tokens:  ${streamTokens.input + streamTokens.output}`)
+              tokenStats.recordTokens(name, streamTokens.input, streamTokens.output)
+              logger.log({
+                model: name,
+                status: 200,
+                responseTime: Date.now() - startTime,
+                fallback: name !== primaryModel,
+                fallbackFrom: name !== primaryModel ? primaryModel : undefined,
+                inputTokens: streamTokens.input,
+                outputTokens: streamTokens.output,
+                totalTokens: streamTokens.input + streamTokens.output,
+                stream: true
+              })
+            } else {
+              console.log(`[Token Stats] ⚠️ Stream request completed but no tokens found - Model: ${name}`)
+              // 即使没有 Token 数据也记录日志
+              logger.log({
+                model: name,
+                status: 200,
+                responseTime: Date.now() - startTime,
+                fallback: name !== primaryModel,
+                fallbackFrom: name !== primaryModel ? primaryModel : undefined,
+                inputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 0,
+                stream: true
+              })
+            }
+            res.end()
+          })
+
+          upstream.data.on('error', (err) => {
+            logger.log({
+              model: name,
+              status: 500,
+              error: err.message,
+              responseTime: Date.now() - startTime,
+              fallback: true,
+              fallbackFrom: primaryModel,
+              stream: true
+            })
+            try { res.end() } catch {}
+          })
+
           return
         } catch (streamErr) {
           lastError = streamErr
@@ -205,12 +347,21 @@ async function handleRequest(req, res) {
 
       const elapsed = Date.now() - startTime
 
+      // 提取并记录 Token 使用量
+      const tokens = extractTokensFromResponse(provider, response.data, isAnthropic)
+      if (tokens) {
+        tokenStats.recordTokens(name, tokens.input, tokens.output)
+      }
+
       logger.log({
         model: name,
         status: 200,
         responseTime: elapsed,
         fallback: name !== primaryModel,
-        fallbackFrom: name !== primaryModel ? primaryModel : undefined
+        fallbackFrom: name !== primaryModel ? primaryModel : undefined,
+        inputTokens: tokens?.input || 0,
+        outputTokens: tokens?.output || 0,
+        totalTokens: tokens ? (tokens.input + tokens.output) : 0
       })
 
       const adapted = adaptResponse(provider, response.data, isAnthropic)
@@ -344,9 +495,24 @@ app.post('/api/providers/:name/test', async (req, res) => {
     const url = resolveEndpoint(provider, testBody)
     const headers = resolveHeaders(provider, testBody)
     const reqBody = resolveRequestBody(provider, testBody)
+    const isAnthropic = isAnthropicProvider(provider)
     const response = await axios.post(url, reqBody, { headers, timeout: 30000 })
     const latency = Date.now() - start
-    res.json({ ok: true, latency, status: response.status })
+    
+    // 提取并记录 Token 使用量
+    const tokens = extractTokensFromResponse(provider, response.data, isAnthropic)
+    if (tokens) {
+      tokenStats.recordTokens(name, tokens.input, tokens.output)
+    }
+    
+    res.json({ 
+      ok: true, 
+      latency, 
+      status: response.status,
+      inputTokens: tokens?.input || 0,
+      outputTokens: tokens?.output || 0,
+      totalTokens: tokens ? (tokens.input + tokens.output) : 0
+    })
   } catch (err) {
     const latency = Date.now() - start
     const status = err.response?.status || 0
@@ -364,6 +530,49 @@ app.get('/api/stats', (req, res) => {
   res.json({
     totalRequests,
     todayRequests
+  })
+})
+
+// Token 统计 API
+app.get('/api/token-stats', (req, res) => {
+  res.json(tokenStats.getAllStats())
+})
+
+app.get('/api/token-stats/today', (req, res) => {
+  res.json(tokenStats.getTodayStats())
+})
+
+app.get('/api/token-stats/month', (req, res) => {
+  res.json(tokenStats.getMonthStats())
+})
+
+app.get('/api/token-stats/model/:name', (req, res) => {
+  const { name } = req.params
+  res.json(tokenStats.getModelStats(name))
+})
+
+// 按时间段查询 Token 统计
+app.get('/api/token-stats/period/:days', (req, res) => {
+  const days = parseInt(req.params.days)
+  if (days < 1 || days > 30) {
+    return res.status(400).json({ error: '天数必须在 1-30 之间' })
+  }
+  res.json({
+    summary: tokenStats.getStatsByDays(days),
+    details: tokenStats.getRecentDaysDetail(days)
+  })
+})
+
+// 获取某一天的按小时统计
+app.get('/api/token-stats/hourly/:date', (req, res) => {
+  const { date } = req.params
+  // 验证日期格式 YYYY-MM-DD
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: '日期格式必须为 YYYY-MM-DD' })
+  }
+  res.json({
+    date,
+    details: tokenStats.getHourlyDetailForDay(date)
   })
 })
 

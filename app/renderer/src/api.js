@@ -49,6 +49,33 @@ export function getStats() {
   return api.get('/api/stats').then(r => r.data)
 }
 
+// Token 统计 API
+export function getTokenStats() {
+  return api.get('/api/token-stats').then(r => r.data)
+}
+
+export function getTokenStatsToday() {
+  return api.get('/api/token-stats/today').then(r => r.data)
+}
+
+export function getTokenStatsMonth() {
+  return api.get('/api/token-stats/month').then(r => r.data)
+}
+
+export function getTokenStatsByModel(modelName) {
+  return api.get(`/api/token-stats/model/${modelName}`).then(r => r.data)
+}
+
+// 按时间段获取 Token 统计（days: 1, 3, 7, 15, 30）
+export function getTokenStatsByPeriod(days) {
+  return api.get(`/api/token-stats/period/${days}`).then(r => r.data)
+}
+
+// 获取某一天的按小时统计
+export function getTokenStatsHourly(date) {
+  return api.get(`/api/token-stats/hourly/${date}`).then(r => r.data)
+}
+
 // 获取单个 provider 的完整信息（含明文 apiKey）
 export function getProviderFull(name) {
   return api.get(`/api/providers/${name}/full`).then(r => r.data)
