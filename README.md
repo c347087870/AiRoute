@@ -316,7 +316,6 @@ aiRoute/
 │   ├── router.js                # 请求代理入口（Express）
 │   ├── router-engine.js         # 智能路由引擎
 │   ├── logger.js                # 日志模块
-│   ├── test-endpoints.js        # 端点测试脚本
 │   ├── models.example.json      # Provider 配置模板
 │   ├── models.json              # Provider 配置（gitignore）
 │   ├── state.json               # 当前模型状态

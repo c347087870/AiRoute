@@ -1,8 +1,25 @@
 const { Tray, Menu, nativeImage, app } = require('electron')
 const path = require('path')
+const fs = require('fs-extra')
 const axios = require('axios')
 
-const API_BASE = 'http://localhost:3000'
+// 动态读取服务端口，兼容用户修改端口后托盘功能正常
+function getServerPort() {
+  try {
+    const dataDir = app.isPackaged
+      ? path.join(app.getPath('userData'), 'data')
+      : path.join(__dirname, '..', '..', 'server')
+    const configPath = path.join(dataDir, 'server-config.json')
+    if (fs.existsSync(configPath)) {
+      return fs.readJsonSync(configPath).port || 3000
+    }
+  } catch {}
+  return 3000
+}
+
+function getApiBase() {
+  return `http://localhost:${getServerPort()}`
+}
 
 let tray = null
 
@@ -31,9 +48,9 @@ async function updateMenu(tray, mainWindow) {
   let providers = {}
 
   try {
-    const stateRes = await axios.get(`${API_BASE}/api/state`)
+    const stateRes = await axios.get(`${getApiBase()}/api/state`)
     currentModel = stateRes.data.current
-    const provRes = await axios.get(`${API_BASE}/api/providers`)
+    const provRes = await axios.get(`${getApiBase()}/api/providers`)
     providers = provRes.data
   } catch {
     providers = {}
@@ -43,7 +60,7 @@ async function updateMenu(tray, mainWindow) {
     label: `${providers[name].displayName || name}${name === currentModel ? ' ●' : ''}`,
     click: async () => {
       try {
-        await axios.post(`${API_BASE}/api/state`, { current: name })
+        await axios.post(`${getApiBase()}/api/state`, { current: name })
         mainWindow.webContents.send('tray-switch-model', name)
         updateMenu(tray, mainWindow)
       } catch {}
@@ -53,7 +70,7 @@ async function updateMenu(tray, mainWindow) {
   modelItems.push({ label: 'Auto (智能路由)', type: 'radio', checked: currentModel === 'auto',
     click: async () => {
       try {
-        await axios.post(`${API_BASE}/api/state`, { current: 'auto' })
+        await axios.post(`${getApiBase()}/api/state`, { current: 'auto' })
         mainWindow.webContents.send('tray-switch-model', 'auto')
         updateMenu(tray, mainWindow)
       } catch {}

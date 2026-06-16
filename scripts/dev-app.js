@@ -44,7 +44,7 @@ function startServer() {
   server.stdout.on('data', (data) => {
     const msg = data.toString()
     process.stdout.write(`[server] ${msg}`)
-    if (msg.includes('AiRoute running') && !serverReady) {
+    if (msg.includes('running') && !serverReady) {
       serverReady = true
       if (!vite) {
         startVite()
