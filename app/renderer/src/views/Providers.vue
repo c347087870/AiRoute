@@ -17,8 +17,12 @@
 
         <div class="provider-info">
           <div class="info-row">
-            <span class="info-label">端点</span>
-            <span class="info-value">{{ provider.baseURL }}</span>
+            <span class="info-label">Anthropic</span>
+            <span class="info-value">{{ provider.baseURL || '(未配置)' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">OpenAI</span>
+            <span class="info-value">{{ provider.openaiURL || '(未配置)' }}</span>
           </div>
           <div class="info-row">
             <span class="info-label">模型</span>
@@ -62,8 +66,12 @@
             <input v-model="form.displayName" placeholder="如: GLM-4" />
           </label>
           <label>
-            端点 URL
-            <input v-model="form.baseURL" placeholder="https://api.example.com" />
+            Anthropic URL
+            <input v-model="form.baseURL" placeholder="https://api.example.com/anthropic" />
+          </label>
+          <label>
+            OpenAI URL
+            <input v-model="form.openaiURL" placeholder="https://api.example.com/v1" />
           </label>
           <label>
             模型 ID
@@ -103,14 +111,15 @@ const showKey = ref(false) // API Key 密码/明文切换
 const form = ref({
   name: '', // Provider ID
   displayName: '', // 显示名称
-  baseURL: '', // 端点 URL
+  baseURL: '', // Anthropic 端点 URL
+  openaiURL: '', // OpenAI 端点 URL
   model: '', // 模型 ID
   apiKey: '' // API Key
 })
 
 // 重置表单
 function resetForm() {
-  form.value = { name: '', displayName: '', baseURL: '', model: '', apiKey: '' }
+  form.value = { name: '', displayName: '', baseURL: '', openaiURL: '', model: '', apiKey: '' }
   showKey.value = false
 }
 
@@ -129,6 +138,7 @@ async function editProvider(name, provider) {
     name,
     displayName: provider.displayName || '',
     baseURL: provider.baseURL || '',
+    openaiURL: provider.openaiURL || '',
     model: provider.model || '',
     apiKey: '' // 先置空
   }
@@ -160,6 +170,7 @@ async function saveProvider() {
   const data = {
     displayName: form.value.displayName,
     baseURL: form.value.baseURL,
+    openaiURL: form.value.openaiURL,
     model: form.value.model,
     apiKey: form.value.apiKey
   }

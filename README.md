@@ -24,6 +24,7 @@
 - **统一入口** — 所有 AI 客户端只需连接 `http://localhost:3000`，不再关心真实 API 地址
 - **一键切换模型** — Electron 客户端面板点击切换，无需修改任何客户端配置
 - **智能路由** — 中文走国产模型、代码走 Claude、自定义关键词匹配，按任务选最优
+- **双协议支持** — 每个 Provider 可分别配置 Anthropic 和 OpenAI 端点，请求直接走对应协议，不做格式转换
 - **故障自愈** — 主模型挂了自动 fallback，对客户端完全透明
 - **可视化操作** — Electron 桌面应用，所有配置（Provider、规则、Fallback）均在界面完成
 - **开箱即用** — 打包后为单个 exe 文件，内置 Express 服务无需额外安装部署，双击即用
@@ -72,12 +73,15 @@
 {
   "my-provider": {
     "baseURL": "https://your-api.com/anthropic",
+    "openaiURL": "https://your-api.com/v1",
     "apiKey": "your-api-key",
     "model": "your-model",
     "displayName": "我的模型"
   }
 }
 ```
+
+> `baseURL` 用于 Anthropic 协议（`/v1/messages`），`openaiURL` 用于 OpenAI 协议（`/v1/chat/completions`），二者至少填一个。
 
 ### Fallback 机制
 
@@ -148,6 +152,7 @@ cp server/models.example.json server/models.json
 {
   "my-model": {
     "baseURL": "https://your-api-endpoint.com/anthropic",
+    "openaiURL": "https://your-api-endpoint.com/v1",
     "apiKey": "your-api-key",
     "model": "your-model-id",
     "displayName": "我的模型"
@@ -278,6 +283,17 @@ gpt-4-turbo                gpt-3.5-turbo
 |---|---|---|
 | `GET` | `/api/logs?limit=50` | 获取最近 N 条日志 |
 | `GET` | `/api/stats` | 获取请求数统计（今日/总计） |
+
+### Token 统计
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/token-stats` | 获取全部 Token 用量统计 |
+| `GET` | `/api/token-stats/today` | 今日 Token 用量 |
+| `GET` | `/api/token-stats/month` | 本月 Token 用量统计 |
+| `GET` | `/api/token-stats/model/:name` | 指定模型的 Token 用量 |
+| `GET` | `/api/token-stats/period/:days` | 指定天数内用量（1-30天） |
+| `GET` | `/api/token-stats/hourly/:date` | 某一天按小时统计 |
 
 ### 系统
 

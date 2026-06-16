@@ -6,9 +6,12 @@ server/models.json
 
 # 运行时数据
 server/logs/
+server/state.json
+server/token-stats.json
 
-# pnpm lockfile（各子目录自行管理）
+# lockfile
 pnpm-lock.yaml
+app/package-lock.json
 
 # 构建产物
 app/release/

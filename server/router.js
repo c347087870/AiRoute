@@ -58,19 +58,19 @@ function saveFallback(fallback) {
   fs.writeJsonSync(FALLBACK_PATH, fallback, { spaces: 2 })
 }
 
-function isAnthropicProvider(provider) {
-  return provider.baseURL.includes('anthropic')
-}
-
-function resolveEndpoint(provider, body) {
-  if (isAnthropicProvider(provider)) {
+// 根据客户端请求的协议类型返回对应的端点 URL
+function resolveEndpoint(provider, clientIsAnthropic) {
+  if (clientIsAnthropic) {
     return provider.baseURL + '/v1/messages'
   }
-  return provider.baseURL + '/v1/chat/completions'
+  const openaiUrl = provider.openaiURL || ''
+  if (!openaiUrl) return null
+  return openaiUrl + '/chat/completions'
 }
 
-function resolveHeaders(provider, body) {
-  if (isAnthropicProvider(provider)) {
+// 根据客户端请求的协议类型返回对应的请求头
+function resolveHeaders(provider, clientIsAnthropic) {
+  if (clientIsAnthropic) {
     return {
       'x-api-key': provider.apiKey,
       'anthropic-version': '2023-06-01',
@@ -91,9 +91,9 @@ function resolveRequestBody(provider, body, isStream) {
   return reqBody
 }
 
-function extractTokensFromResponse(provider, data, isAnthropic) {
-  if (isAnthropic) {
-    // Claude API 响应格式
+// 非流式响应中提取 Token 用量
+function extractTokensFromResponse(data, isAnthropicFormat) {
+  if (isAnthropicFormat) {
     if (data.usage) {
       return {
         input: data.usage.input_tokens || 0,
@@ -101,7 +101,6 @@ function extractTokensFromResponse(provider, data, isAnthropic) {
       }
     }
   } else {
-    // OpenAI 兼容 API 响应格式
     if (data.usage) {
       return {
         input: data.usage.prompt_tokens || 0,
@@ -112,50 +111,36 @@ function extractTokensFromResponse(provider, data, isAnthropic) {
   return null
 }
 
-// 从流式响应中提取 Token（用于日志记录）
-function extractTokensFromStreamChunk(chunk, isAnthropic) {
+// 从流式响应 chunk 中提取 Token 用量
+function extractTokensFromStreamChunk(chunk, isAnthropicFormat) {
   try {
     const text = chunk.toString()
     const lines = text.split('\n').filter(line => line.trim())
-    
+
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue
-      
+
       const dataStr = line.slice(6).trim()
       if (dataStr === '[DONE]') continue
-      
+
       try {
         const data = JSON.parse(dataStr)
-        
-        if (isAnthropic) {
-          // Claude 流式：在 message_delta 事件中包含 usage
+
+        if (isAnthropicFormat) {
           if (data.type === 'message_delta' && data.usage) {
-            console.log(`[Token Debug] Found message_delta with usage:`, data.usage)
-            return {
-              input: data.usage.input_tokens || 0,  // ✅ 修复：提取实际的 input_tokens
-              output: data.usage.output_tokens || 0
-            }
-          }
-          // 也在 content_block_delta 中检查
-          if (data.type === 'content_block_delta' && data.usage) {
-            console.log(`[Token Debug] Found content_block_delta with usage:`, data.usage)
             return {
               input: data.usage.input_tokens || 0,
               output: data.usage.output_tokens || 0
             }
           }
-          // 也在 message_start 中检查（有时会在这里返回 input_tokens）
           if (data.type === 'message_start' && data.message?.usage) {
-            console.log(`[Token Debug] Found message_start with usage:`, data.message.usage)
             return {
               input: data.message.usage.input_tokens || 0,
-              output: 0  // message_start 时还没有 output
+              output: 0
             }
           }
         } else {
-          // OpenAI 流式：在最后一个块中包含 usage
           if (data.usage) {
-            console.log(`[Token Debug] Found OpenAI usage:`, data.usage)
             return {
               input: data.usage.prompt_tokens || 0,
               output: data.usage.completion_tokens || 0
@@ -163,27 +148,14 @@ function extractTokensFromStreamChunk(chunk, isAnthropic) {
           }
         }
       } catch (e) {
-        // 忽略解析错误，继续处理下一行
+        // 忽略解析错误
       }
     }
   } catch (e) {
     // 忽略整体解析错误
   }
-  
-  return null
-}
 
-function adaptResponse(provider, data, isAnthropic) {
-  if (!isAnthropic) return data
-  return {
-    id: data.id || '',
-    type: 'message',
-    role: 'assistant',
-    content: data.content || [],
-    model: data.model || provider.model,
-    stop_reason: data.stop_reason || 'end_turn',
-    usage: data.usage || {}
-  }
+  return null
 }
 
 app.get('/api/fallback', (req, res) => {
@@ -203,11 +175,11 @@ async function handleRequest(req, res) {
   const state = getState()
   const fallback = getFallback()
   const isStream = !!req.body.stream
+  const clientIsAnthropic = req.path === '/v1/messages'
 
   let primaryModel = state.current
   if (primaryModel === 'auto') {
     const routed = engine.resolveModel(req.body)
-    // 路由规则未配置时，兜底到第一个可用 provider
     primaryModel = routed || Object.keys(config)[0]
   }
 
@@ -225,10 +197,21 @@ async function handleRequest(req, res) {
     if (!provider || !provider.apiKey) continue
 
     try {
-      const url = resolveEndpoint(provider, req.body)
-      const headers = resolveHeaders(provider, req.body)
+      const url = resolveEndpoint(provider, clientIsAnthropic)
+      if (!url) {
+        lastError = new Error(clientIsAnthropic ? '未配置 Anthropic 端点 (baseURL)' : '未配置 OpenAI 端点 (openaiURL)')
+        logger.log({
+          model: name,
+          status: 0,
+          error: lastError.message,
+          responseTime: Date.now() - startTime,
+          fallback: true,
+          fallbackFrom: primaryModel
+        })
+        continue
+      }
+      const headers = resolveHeaders(provider, clientIsAnthropic)
       const reqBody = resolveRequestBody(provider, req.body, isStream)
-      const isAnthropic = isAnthropicProvider(provider)
 
       if (isStream) {
         try {
@@ -256,32 +239,22 @@ async function handleRequest(req, res) {
           res.setHeader('Cache-Control', 'no-cache')
           res.setHeader('Connection', 'keep-alive')
 
-          // 用于收集流式响应中的 Token 信息（合并策略：保留非零值）
           let streamTokens = { input: 0, output: 0 }
           const chunks = []
 
           upstream.data.on('data', (chunk) => {
-            // 尝试从每个 chunk 中提取 Token（合并策略：非零值覆盖零值）
-            const tokens = extractTokensFromStreamChunk(chunk, isAnthropic)
+            const tokens = extractTokensFromStreamChunk(chunk, clientIsAnthropic)
             if (tokens) {
-              // 合而非覆盖：只在新值为非零时更新，避免丢失已提取的值
               if (tokens.input > 0) streamTokens.input = tokens.input
               if (tokens.output > 0) streamTokens.output = tokens.output
             }
-            
-            // 保存 chunk 以便后续转发
             chunks.push(chunk)
-            // 立即转发给客户端
             res.write(chunk)
           })
 
           upstream.data.on('end', () => {
-            // 流结束时记录 Token（只要有任一非零值就记录）
             if (streamTokens.input > 0 || streamTokens.output > 0) {
               console.log(`[Token Stats] ✅ Stream request completed - Model: ${name}`)
-              console.log(`  Input Tokens:  ${streamTokens.input}`)
-              console.log(`  Output Tokens: ${streamTokens.output}`)
-              console.log(`  Total Tokens:  ${streamTokens.input + streamTokens.output}`)
               tokenStats.recordTokens(name, streamTokens.input, streamTokens.output)
               logger.log({
                 model: name,
@@ -296,7 +269,6 @@ async function handleRequest(req, res) {
               })
             } else {
               console.log(`[Token Stats] ⚠️ Stream request completed but no tokens found - Model: ${name}`)
-              // 即使没有 Token 数据也记录日志
               logger.log({
                 model: name,
                 status: 200,
@@ -347,8 +319,7 @@ async function handleRequest(req, res) {
 
       const elapsed = Date.now() - startTime
 
-      // 提取并记录 Token 使用量
-      const tokens = extractTokensFromResponse(provider, response.data, isAnthropic)
+      const tokens = extractTokensFromResponse(response.data, clientIsAnthropic)
       if (tokens) {
         tokenStats.recordTokens(name, tokens.input, tokens.output)
       }
@@ -364,8 +335,7 @@ async function handleRequest(req, res) {
         totalTokens: tokens ? (tokens.input + tokens.output) : 0
       })
 
-      const adapted = adaptResponse(provider, response.data, isAnthropic)
-      return res.json(adapted)
+      return res.json(response.data)
     } catch (err) {
       lastError = err
       logger.log({
@@ -425,7 +395,6 @@ app.get('/api/providers', (req, res) => {
   res.json(safe)
 })
 
-// 获取单个 provider 的完整信息（含明文 apiKey，仅编辑时调用）
 app.get('/api/providers/:name/full', (req, res) => {
   const config = getConfig()
   const { name } = req.params
@@ -442,7 +411,6 @@ app.put('/api/providers/:name', (req, res) => {
     return res.status(404).json({ error: `Provider ${name} not found` })
   }
   const update = { ...req.body }
-  // apiKey 为空则保留原值
   if (!update.apiKey || update.apiKey.trim() === '') {
     delete update.apiKey
   }
@@ -484,6 +452,8 @@ app.post('/api/providers/:name/test', async (req, res) => {
     return res.json({ ok: false, error: 'API Key 未配置', latency: 0 })
   }
 
+  // 测试：优先测 Anthropic 端点，没有则测 OpenAI
+  const testAnthropic = !!provider.baseURL
   const testBody = {
     model: provider.model,
     max_tokens: 32,
@@ -492,22 +462,24 @@ app.post('/api/providers/:name/test', async (req, res) => {
 
   const start = Date.now()
   try {
-    const url = resolveEndpoint(provider, testBody)
-    const headers = resolveHeaders(provider, testBody)
-    const reqBody = resolveRequestBody(provider, testBody)
-    const isAnthropic = isAnthropicProvider(provider)
+    const url = testAnthropic
+      ? provider.baseURL + '/v1/messages'
+      : (provider.openaiURL || provider.baseURL) + '/chat/completions'
+    const headers = testAnthropic
+      ? { 'x-api-key': provider.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
+      : { 'Authorization': `Bearer ${provider.apiKey}`, 'content-type': 'application/json' }
+    const reqBody = { ...testBody, model: provider.model }
     const response = await axios.post(url, reqBody, { headers, timeout: 30000 })
     const latency = Date.now() - start
-    
-    // 提取并记录 Token 使用量
-    const tokens = extractTokensFromResponse(provider, response.data, isAnthropic)
+
+    const tokens = extractTokensFromResponse(response.data, testAnthropic)
     if (tokens) {
       tokenStats.recordTokens(name, tokens.input, tokens.output)
     }
-    
-    res.json({ 
-      ok: true, 
-      latency, 
+
+    res.json({
+      ok: true,
+      latency,
       status: response.status,
       inputTokens: tokens?.input || 0,
       outputTokens: tokens?.output || 0,
@@ -533,7 +505,6 @@ app.get('/api/stats', (req, res) => {
   })
 })
 
-// Token 统计 API
 app.get('/api/token-stats', (req, res) => {
   res.json(tokenStats.getAllStats())
 })
@@ -551,7 +522,6 @@ app.get('/api/token-stats/model/:name', (req, res) => {
   res.json(tokenStats.getModelStats(name))
 })
 
-// 按时间段查询 Token 统计
 app.get('/api/token-stats/period/:days', (req, res) => {
   const days = parseInt(req.params.days)
   if (days < 1 || days > 30) {
@@ -563,10 +533,8 @@ app.get('/api/token-stats/period/:days', (req, res) => {
   })
 })
 
-// 获取某一天的按小时统计
 app.get('/api/token-stats/hourly/:date', (req, res) => {
   const { date } = req.params
-  // 验证日期格式 YYYY-MM-DD
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return res.status(400).json({ error: '日期格式必须为 YYYY-MM-DD' })
   }
@@ -610,5 +578,5 @@ app.get('/api/health', (req, res) => {
 
 const PORT = process.env.PORT || engine.getServerConfig().port || 3000
 const server = app.listen(PORT, () => {
-  console.log(`AiRoute running on http://localhost:${PORT}`)
+  console.log(`[aiRoute] running on http://localhost:${PORT}`)
 })
