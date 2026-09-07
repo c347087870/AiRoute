@@ -3,7 +3,18 @@
     "baseURL": "https://your-api-endpoint.com/anthropic",
     "openaiURL": "https://your-api-endpoint.com/v1",
     "apiKey": "your-api-key-here",
-    "model": "your-model-name",
-    "displayName": "我的模型"
+    "displayName": "我的 Provider",
+    "models": [
+      {
+        "id": "your-model-name",
+        "displayName": "主力模型",
+        "maxContext": 200000,
+        "maxOutput": 8192
+      },
+      {
+        "id": "your-fast-model-name",
+        "displayName": "轻量模型"
+      }
+    ]
   }
 }
