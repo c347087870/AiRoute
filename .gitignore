@@ -8,6 +8,14 @@ server/models.json
 server/logs/
 server/state.json
 server/token-stats.json
+server/benchmark-questions.json
+server/benchmark-runs.json
+server/fallback.json
+server/rules.json
+server/server-config.json
+
+# 工具本地数据
+.codebuddy/
 
 # lockfile
 pnpm-lock.yaml

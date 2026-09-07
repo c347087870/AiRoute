@@ -1,0 +1,22 @@
+{
+  "appId": "com.airoute.app",
+  "productName": "AiRoute",
+  "artifactName": "AiRoute.exe",
+  "directories": {
+    "output": "app/dist-electron"
+  },
+  "files": [
+    "app/main/**/*",
+    "app/renderer/dist/**/*",
+    "app/server/**/*",
+    "package.json",
+    {
+      "from": ".build-node_modules/node_modules",
+      "to": "node_modules"
+    }
+  ],
+  "win": {
+    "target": "portable",
+    "icon": "app/renderer/public/icon.png"
+  }
+}
