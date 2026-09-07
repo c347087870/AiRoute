@@ -13,7 +13,7 @@
           </div>
         </div>
         <div v-if="portChanged" class="warning-box">
-          ⚠ 端口已修改，请重启服务使新端口生效。
+          ⚠ 端口已保存，需要重启服务后生效。请点击下方「重启 Server」。
         </div>
         <div class="config-row">
           <label class="config-label">重启服务</label>
@@ -50,38 +50,95 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getServerConfig, updateServerConfig, restartServer, setServerPort as setApiPort } from '../api.js'
+import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort } from '../api.js'
+import { showToast } from '../composables/useToast.js'
 
-const serverPort = ref(3000)
-const portChanged = ref(false)
-const restarting = ref(false)
-const autoLaunch = ref(false)
+const serverPort = ref(3000) // 端口输入框的值
+const portChanged = ref(false) // 端口已保存但尚未重启生效
+const restarting = ref(false) // 是否正在重启服务
+const autoLaunch = ref(false) // 开机自启开关状态
 
-async function saveServerPort() {
-  try {
-    const result = await updateServerConfig({ port: serverPort.value })
-    setApiPort(serverPort.value)
-    portChanged.value = result.portChanged
-  } catch {}
+// 统一提取接口错误信息用于提示
+function errorText(err) {
+  return err?.response?.data?.error || err?.message || '无法连接服务'
 }
 
+// 等待指定毫秒
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// 保存端口：只写配置，不切换前端 baseURL，避免服务还在旧端口时前端失联
+async function saveServerPort() {
+  const port = Number(serverPort.value)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    showToast('端口必须是 1-65535 的整数', 'error', 3000)
+    return
+  }
+  try {
+    const result = await updateServerConfig({ port })
+    portChanged.value = result.portChanged
+    if (result.portChanged) showToast('端口已保存，需要重启服务后生效', 'info', 4000)
+    else showToast('端口已保存')
+  } catch (err) {
+    showToast('保存失败: ' + errorText(err), 'error', 4000)
+  }
+}
+
+// 轮询探测目标端口，最多 10 次、每次间隔 1 秒
+async function waitForPort(port) {
+  for (let i = 0; i < 10; i++) {
+    await delay(1000)
+    if (await probeServer(port)) return true
+  }
+  return false
+}
+
+// 触发重启；服务端会关闭旧监听，连接被断开属于预期，只有服务端明确报错才抛出
+async function triggerRestart() {
+  try {
+    await restartServer()
+  } catch (err) {
+    if (err?.response) throw err
+  }
+}
+
+// 重启服务：按服务端配置里的端口探测，成功后才切换前端 baseURL
 async function doRestart() {
   restarting.value = true
   try {
-    await restartServer()
-  } catch {}
-  setTimeout(() => {
+    const config = await getServerConfig()
+    const targetPort = config.port || serverPort.value
+    await triggerRestart()
+    if (await waitForPort(targetPort)) {
+      setApiPort(targetPort)
+      serverPort.value = Number(targetPort)
+      portChanged.value = false
+      showToast('服务已重启，端口 ' + targetPort)
+    } else {
+      showToast('重启后未能连接端口 ' + targetPort + '，请手动检查服务状态', 'error', 4000)
+    }
+  } catch (err) {
+    showToast('重启失败: ' + errorText(err), 'error', 4000)
+  } finally {
     restarting.value = false
-  }, 3000)
+  }
 }
 
+// 切换开机自启
 async function toggleAutoLaunch() {
   if (!window.electronAPI) return
   const next = !autoLaunch.value
-  await window.electronAPI.setAutoLaunch(next)
-  autoLaunch.value = next
+  try {
+    await window.electronAPI.setAutoLaunch(next)
+    autoLaunch.value = next
+    showToast(next ? '已开启开机自启' : '已关闭开机自启')
+  } catch (err) {
+    showToast('设置失败: ' + errorText(err), 'error', 4000)
+  }
 }
 
+// 加载服务配置与开机自启状态
 async function loadData() {
   try {
     const config = await getServerConfig()
@@ -103,7 +160,7 @@ onMounted(loadData)
   font-size: 22px;
   font-weight: 600;
   margin-bottom: 24px;
-  color: #1A1A1A;
+  color: var(--text-1);
 }
 
 .section {
@@ -114,7 +171,7 @@ onMounted(loadData)
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 12px;
-  color: #1A1A1A;
+  color: var(--text-1);
 }
 
 .config-row {
@@ -122,7 +179,7 @@ onMounted(loadData)
   align-items: center;
   gap: 16px;
   padding: 10px 0;
-  border-bottom: 1px solid #F0F0F0;
+  border-bottom: 1px solid var(--border-2);
 }
 
 .config-row:last-of-type {
@@ -133,7 +190,7 @@ onMounted(loadData)
   width: 200px;
   font-size: 14px;
   font-weight: 500;
-  color: #1A1A1A;
+  color: var(--text-1);
   flex-shrink: 0;
 }
 
@@ -149,7 +206,7 @@ onMounted(loadData)
 
 .warning-box {
   background: #FFF7ED;
-  border: 1px solid #FF9500;
+  border: 1px solid var(--warning);
   color: #B45309;
   padding: 10px 14px;
   border-radius: 10px;
@@ -159,7 +216,7 @@ onMounted(loadData)
 
 .config-hint {
   font-size: 12px;
-  color: #999999;
+  color: var(--text-3);
   padding: 4px 0 8px;
 }
 
@@ -168,16 +225,16 @@ onMounted(loadData)
   border-radius: 20px;
   font-size: 13px;
   font-weight: 500;
-  background: #F0F0F0;
-  color: #999999;
-  border: 1px solid #E0E0E0;
+  background: var(--border-2);
+  color: var(--text-3);
+  border: 1px solid var(--border-3);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .toggle-btn.active {
-  background: #0082FC14;
-  color: #0082FC;
-  border-color: #0082FC;
+  background: var(--primary-bg);
+  color: var(--primary);
+  border-color: var(--primary);
 }
 </style>

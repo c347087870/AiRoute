@@ -20,7 +20,7 @@
       </button>
     </div>
 
-    <!-- 汇总统计卡片 -->
+    <!-- 汇总统计卡片：总计 / 输入 / 缓存读 / 缓存写 -->
     <div class="summary-cards">
       <div class="card summary-card">
         <div class="summary-icon purple">
@@ -37,17 +37,44 @@
       </div>
 
       <div class="card summary-card">
-        <div class="summary-icon orange">
+        <div class="summary-icon blue">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-            <line x1="16" y1="13" x2="8" y2="13"/>
-            <line x1="16" y1="17" x2="8" y2="17"/>
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+            <polyline points="10 17 15 12 10 7"/>
+            <line x1="15" y1="12" x2="3" y2="12"/>
           </svg>
         </div>
         <div class="summary-content">
-          <div class="summary-label">请求次数</div>
-          <div class="summary-value orange">{{ formatNumber(currentStats.count) }}</div>
+          <div class="summary-label">输入（未命中缓存）</div>
+          <div class="summary-value blue">{{ formatNumber(currentStats.input) }}</div>
+        </div>
+      </div>
+
+      <div class="card summary-card">
+        <div class="summary-icon purple">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="8 12 12 16 16 12"/>
+            <line x1="12" y1="8" x2="12" y2="16"/>
+          </svg>
+        </div>
+        <div class="summary-content">
+          <div class="summary-label">缓存读</div>
+          <div class="summary-value purple">{{ formatNumber(currentStats.cacheRead) }}</div>
+        </div>
+      </div>
+
+      <div class="card summary-card">
+        <div class="summary-icon orange">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="8 12 12 8 16 12"/>
+            <line x1="12" y1="16" x2="12" y2="8"/>
+          </svg>
+        </div>
+        <div class="summary-content">
+          <div class="summary-label">缓存写</div>
+          <div class="summary-value orange">{{ formatNumber(currentStats.cacheWrite) }}</div>
         </div>
       </div>
     </div>
@@ -56,6 +83,7 @@
     <div class="section">
       <h2 class="section-title">
         {{ chartTitle }}
+        <span class="title-meta">共 {{ formatNumber(currentStats.count) }} 次请求</span>
       </h2>
       <div class="card chart-container" @mouseleave="hideTooltip">
         <div v-if="chartData.length > 0" class="line-chart">
@@ -68,8 +96,24 @@
             <div class="tooltip-time">{{ tooltip.time }}</div>
             <div class="tooltip-divider"></div>
             <div class="tooltip-row">
-              <span class="tooltip-label">Token:</span>
+              <span class="tooltip-label">总计:</span>
               <span class="tooltip-value">{{ formatNumber(tooltip.total) }}</span>
+            </div>
+            <div class="tooltip-row">
+              <span class="tooltip-label">输入:</span>
+              <span class="tooltip-value">{{ formatNumber(tooltip.input) }}</span>
+            </div>
+            <div class="tooltip-row">
+              <span class="tooltip-label">缓存读:</span>
+              <span class="tooltip-value text-purple">{{ formatNumber(tooltip.cacheRead) }}</span>
+            </div>
+            <div class="tooltip-row">
+              <span class="tooltip-label">缓存写:</span>
+              <span class="tooltip-value text-orange">{{ formatNumber(tooltip.cacheWrite) }}</span>
+            </div>
+            <div class="tooltip-row">
+              <span class="tooltip-label">输出:</span>
+              <span class="tooltip-value">{{ formatNumber(tooltip.output) }}</span>
             </div>
             <div class="tooltip-row">
               <span class="tooltip-label">请求:</span>
@@ -163,6 +207,8 @@
               <th>模型</th>
               <th>请求次数</th>
               <th>总 Token</th>
+              <th>缓存读</th>
+              <th>缓存写</th>
               <th>占比</th>
             </tr>
           </thead>
@@ -171,6 +217,8 @@
               <td>{{ model }}</td>
               <td>{{ formatNumber(stats.count) }}</td>
               <td class="text-purple font-bold">{{ formatNumber(stats.total) }}</td>
+              <td class="text-purple">{{ formatNumber(stats.cacheRead) }}</td>
+              <td class="text-orange">{{ formatNumber(stats.cacheWrite) }}</td>
               <td>
                 <div class="percentage-bar">
                   <div 
@@ -191,6 +239,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats } from '../api.js'
+import { formatNumber, toLocalDateKey } from '../utils/format.js'
 
 // 时间维度选项
 const periods = [
@@ -213,6 +262,10 @@ const tooltip = ref({
   y: 0,
   time: '',
   total: 0,
+  input: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  output: 0,
   count: 0,
   index: -1
 })
@@ -227,6 +280,10 @@ const chartData = computed(() => {
     return periodData.value.details?.map(d => ({
       label: d.displayLabel,
       total: d.total,
+      input: d.input,
+      cacheRead: d.cacheRead,
+      cacheWrite: d.cacheWrite,
+      output: d.output,
       count: d.count || 0
     })) || []
   } else {
@@ -234,6 +291,10 @@ const chartData = computed(() => {
     return periodData.value.details?.map(d => ({
       label: d.displayDate,
       total: d.total,
+      input: d.input,
+      cacheRead: d.cacheRead,
+      cacheWrite: d.cacheWrite,
+      output: d.output,
       count: d.count || 0
     })) || []
   }
@@ -311,9 +372,9 @@ function getPercentage(total) {
   return Math.round((total / grandTotal) * 100)
 }
 
-// Tooltip 估算宽度和高度
+// Tooltip 估算尺寸，用于计算翻转方向；高度按「标题 + 分隔线 + 6 行明细」估算
 const tooltipWidth = 160
-const tooltipHeight = 90
+const tooltipHeight = 188
 const tipOffsetX = 15
 const tipOffsetY = 10
 
@@ -392,6 +453,10 @@ function updateTooltipPosition(event, lineChartEl, dataIndex) {
     y: tipY,
     time: point.label,
     total: point.total,
+    input: point.input || 0,
+    cacheRead: point.cacheRead || 0,
+    cacheWrite: point.cacheWrite || 0,
+    output: point.output || 0,
     count: point.count || 0,
     index: dataIndex
   }
@@ -403,16 +468,15 @@ function hideTooltip() {
   tooltip.value.index = -1
 }
 
-// 格式化数字
-function formatNumber(num) {
-  if (!num && num !== 0) return '0'
-  return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-}
-
 // 选择时间维度
 async function selectPeriod(period) {
   selectedPeriod.value = period
   await loadPeriodData(period)
+}
+
+// 按字段累加明细，用于把小时明细合成为「今天」的汇总
+function sumBy(list, key) {
+  return list.reduce((sum, item) => sum + (Number(item[key]) || 0), 0)
 }
 
 // 加载时间段数据
@@ -420,15 +484,20 @@ async function loadPeriodData(period) {
   loading.value = true
   try {
     if (period === 'today') {
-      // 今天：获取按小时的数据
-      const today = new Date().toISOString().split('T')[0]
+      // 今天：获取按小时的数据，必须用本地日期键，UTC 日期会与服务端统计口径错开一天
+      const today = toLocalDateKey()
       const hourlyData = await getTokenStatsHourly(today)
+      const details = hourlyData.details || []
       periodData.value = {
         summary: {
-          total: hourlyData.details.reduce((sum, d) => sum + (d.total || 0), 0),
-          count: hourlyData.details.reduce((sum, d) => sum + (d.count || 0), 0)
+          input: sumBy(details, 'input'),
+          output: sumBy(details, 'output'),
+          cacheRead: sumBy(details, 'cacheRead'),
+          cacheWrite: sumBy(details, 'cacheWrite'),
+          total: sumBy(details, 'total'),
+          count: sumBy(details, 'count')
         },
-        details: hourlyData.details
+        details
       }
     } else {
       // 多天：获取按天的数据
@@ -471,7 +540,7 @@ onMounted(() => {
   font-size: 22px;
   font-weight: 600;
   margin: 0;
-  color: #1A1A1A;
+  color: var(--text-1);
 }
 
 /* 时间维度选择器 */
@@ -483,9 +552,9 @@ onMounted(() => {
 }
 
 .period-btn {
-  background: #F5F5F5;
-  border: 1px solid #E0E0E0;
-  color: #666666;
+  background: var(--bg-page);
+  border: 1px solid var(--border-3);
+  color: var(--text-2);
   padding: 10px 20px;
   border-radius: 8px;
   font-size: 14px;
@@ -495,21 +564,21 @@ onMounted(() => {
 }
 
 .period-btn:hover {
-  border-color: #0082FC;
-  color: #0082FC;
+  border-color: var(--primary);
+  color: var(--primary);
   background: #F0F7FF;
 }
 
 .period-btn.active {
-  background: #0082FC;
-  border-color: #0082FC;
+  background: var(--primary);
+  border-color: var(--primary);
   color: #FFFFFF;
 }
 
 /* 汇总卡片 */
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -533,12 +602,17 @@ onMounted(() => {
 
 .summary-icon.purple {
   background: #F3E5F5;
-  color: #9C27B0;
+  color: var(--purple);
+}
+
+.summary-icon.blue {
+  background: #E3F2FD;
+  color: var(--primary);
 }
 
 .summary-icon.orange {
   background: #FFF3E0;
-  color: #FF9500;
+  color: var(--warning);
 }
 
 .summary-content {
@@ -547,7 +621,7 @@ onMounted(() => {
 
 .summary-label {
   font-size: 12px;
-  color: #999999;
+  color: var(--text-3);
   margin-bottom: 6px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -559,11 +633,15 @@ onMounted(() => {
 }
 
 .summary-value.purple {
-  color: #9C27B0;
+  color: var(--purple);
+}
+
+.summary-value.blue {
+  color: var(--primary);
 }
 
 .summary-value.orange {
-  color: #FF9500;
+  color: var(--warning);
 }
 
 /* 图表区域 */
@@ -575,7 +653,15 @@ onMounted(() => {
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 12px;
-  color: #1A1A1A;
+  color: var(--text-1);
+}
+
+/* 标题右侧的次要信息，请求次数从汇总卡片移到这里展示 */
+.title-meta {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-3);
 }
 
 .chart-container {
@@ -608,7 +694,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   height: 250px;
-  color: #999999;
+  color: var(--text-3);
   font-size: 14px;
 }
 
@@ -616,7 +702,7 @@ onMounted(() => {
 .chart-tooltip {
   position: absolute;
   background: rgba(255, 255, 255, 0.98);
-  border: 1px solid #E0E0E0;
+  border: 1px solid var(--border-3);
   border-radius: 8px;
   padding: 12px 16px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
@@ -628,13 +714,13 @@ onMounted(() => {
 .tooltip-time {
   font-size: 13px;
   font-weight: 600;
-  color: #1A1A1A;
+  color: var(--text-1);
   margin-bottom: 8px;
 }
 
 .tooltip-divider {
   height: 1px;
-  background: #E0E0E0;
+  background: var(--border-3);
   margin: 8px 0;
 }
 
@@ -651,12 +737,12 @@ onMounted(() => {
 }
 
 .tooltip-label {
-  color: #666666;
+  color: var(--text-2);
   margin-right: 12px;
 }
 
 .tooltip-value {
-  color: #1A1A1A;
+  color: var(--text-1);
   font-weight: 600;
 }
 
@@ -671,31 +757,31 @@ onMounted(() => {
   text-align: left;
   padding: 12px;
   font-size: 13px;
-  border-bottom: 1px solid #F0F0F0;
-  color: #1A1A1A;
+  border-bottom: 1px solid var(--border-2);
+  color: var(--text-1);
 }
 
 .model-table th {
-  color: #999999;
+  color: var(--text-3);
   font-weight: 500;
-  background: #FAFAFA;
+  background: var(--bg-hover);
 }
 
 .model-table tbody tr:hover {
-  background: #F5F5F5;
+  background: var(--bg-page);
 }
 
 .percentage-bar {
   position: relative;
   height: 24px;
-  background: #F0F0F0;
+  background: var(--border-2);
   border-radius: 4px;
   overflow: hidden;
 }
 
 .percentage-fill {
   height: 100%;
-  background: linear-gradient(90deg, #0082FC, #4DA6FF);
+  background: linear-gradient(90deg, var(--primary), #4DA6FF);
   transition: width 0.3s ease;
 }
 
@@ -706,11 +792,15 @@ onMounted(() => {
   transform: translateY(-50%);
   font-size: 12px;
   font-weight: 600;
-  color: #1A1A1A;
+  color: var(--text-1);
 }
 
 .text-purple {
-  color: #9C27B0;
+  color: var(--purple);
+}
+
+.text-orange {
+  color: var(--warning);
 }
 
 .font-bold {
@@ -718,6 +808,12 @@ onMounted(() => {
 }
 
 /* 响应式 */
+@media (max-width: 1200px) {
+  .summary-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 @media (max-width: 768px) {
   .summary-cards {
     grid-template-columns: 1fr;

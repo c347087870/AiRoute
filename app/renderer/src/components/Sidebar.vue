@@ -38,6 +38,7 @@ const navItems = [
   { path: '/providers', label: 'Provider 管理', icon: '◇' },
   { path: '/logs', label: '日志查看', icon: '▤' },
   { path: '/token-stats', label: 'Token 统计', icon: '◉' },
+  { path: '/benchmark', label: '模型测分', icon: '★' },
   { path: '/settings', label: '设置', icon: '⚙' },
   { path: '/tutorial', label: '使用教程', icon: '✎' }
 ]
@@ -62,7 +63,7 @@ onMounted(() => {
   width: 220px;
   min-width: 220px;
   background: #FFFFFF;
-  border-right: 1px solid #EEEEEE;
+  border-right: 1px solid var(--border-1);
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -70,7 +71,7 @@ onMounted(() => {
 
 .sidebar-header {
   padding: 24px 16px 16px;
-  border-bottom: 1px solid #F0F0F0;
+  border-bottom: 1px solid var(--border-2);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -79,7 +80,7 @@ onMounted(() => {
 .logo {
   font-size: 19px;
   font-weight: 700;
-  color: #0082FC;
+  color: var(--primary);
   letter-spacing: 0.5px;
 }
 
@@ -97,20 +98,20 @@ onMounted(() => {
   gap: 10px;
   padding: 11px 14px;
   border-radius: 10px;
-  color: #666666;
+  color: var(--text-2);
   text-decoration: none;
   font-size: 14px;
   transition: all 0.15s;
 }
 
 .nav-item:hover {
-  color: #1A1A1A;
-  background: #F5F5F5;
+  color: var(--text-1);
+  background: var(--bg-page);
 }
 
 .nav-item.active {
-  color: #0082FC;
-  background: #0082FC0D;
+  color: var(--primary);
+  background: var(--primary-bg);
   font-weight: 500;
 }
 
@@ -122,6 +123,6 @@ onMounted(() => {
 
 .sidebar-footer {
   padding: 14px;
-  border-top: 1px solid #F0F0F0;
+  border-top: 1px solid var(--border-2);
 }
 </style>
