@@ -1,0 +1,315 @@
+{
+  "version": 1,
+  "name": "AiRoute 内置题库",
+  "description": "覆盖代码、SQL、数学、逻辑推理、翻译、指令遵循、结构化输出、长上下文等维度。首次运行时会复制为可编辑的用户题库。",
+  "questions": [
+    {
+      "id": "code-01",
+      "category": "代码生成",
+      "title": "两数之和",
+      "prompt": "用 Python 写一个函数 two_sum(nums, target)，接收一个整数列表和一个目标整数，返回列表中两个数之和等于目标值的两个下标（以长度为 2 的列表返回）。假设每组输入恰有一个解，且同一个元素不能重复使用。\n\n只输出函数代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def two_sum", "return"], "maxScore": 5 }
+    },
+    {
+      "id": "code-02",
+      "category": "代码生成",
+      "title": "反转字符串",
+      "prompt": "用 Python 写一个函数 reverse_string(s)，返回字符串 s 的反转结果。要求使用切片实现，不要用循环。\n\n只输出函数代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def reverse_string", "[::-1]"], "maxScore": 5 }
+    },
+    {
+      "id": "code-03",
+      "category": "代码生成",
+      "title": "判断回文",
+      "prompt": "用 Python 写一个函数 is_palindrome(s)，判断字符串 s 是否为回文（正读和反读相同）。需要忽略大小写，并忽略所有非字母数字的字符。返回布尔值。\n\n只输出函数代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def is_palindrome", "return"], "maxScore": 5 }
+    },
+    {
+      "id": "code-04",
+      "category": "代码生成",
+      "title": "斐波那契数列",
+      "prompt": "用 Python 写一个函数 fib(n)，返回斐波那契数列的第 n 项（n 从 0 开始，fib(0)=0，fib(1)=1）。要求用迭代实现，禁止使用递归。\n\n只输出函数代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def fib", "for"], "maxScore": 5 }
+    },
+    {
+      "id": "code-05",
+      "category": "代码生成",
+      "title": "统计词频",
+      "prompt": "用 Python 写一个函数 count_words(text)，统计字符串中每个单词出现的次数，返回一个字典：键为小写单词，值为出现次数。\n\n只输出函数代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def count_words", "return"], "maxScore": 5 }
+    },
+    {
+      "id": "code-06",
+      "category": "代码生成",
+      "title": "二分查找",
+      "prompt": "用 Python 写一个函数 binary_search(arr, target)，在已按升序排列的列表 arr 中二分查找 target，找到则返回其下标，找不到返回 -1。\n\n只输出函数代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def binary_search", "return -1"], "maxScore": 5 }
+    },
+    {
+      "id": "fix-01",
+      "category": "代码修复",
+      "title": "Python 缩进错误",
+      "prompt": "下面这段 Python 代码会报 IndentationError，请修复它：\n\n```python\ndef greet(name):\nprint('Hello, ' + name)\n```\n\n只输出修复后的代码，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "def greet\\([^)]*\\):[\\s\\S]{0,40}?\\n\\s+print", "maxScore": 5 }
+    },
+    {
+      "id": "fix-02",
+      "category": "代码修复",
+      "title": "JS 数组越界",
+      "prompt": "下面这段 JavaScript 代码遍历数组时会读到 undefined 并报错，请修复它：\n\n```js\nconst users = ['alice', 'bob'];\nfor (let i = 0; i <= users.length; i++) {\n  console.log(users[i].toUpperCase());\n}\n```\n\n只输出修复后的代码，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "i\\s*<\\s*users\\.length", "maxScore": 5 }
+    },
+    {
+      "id": "fix-03",
+      "category": "代码修复",
+      "title": "Python 字典取值容错",
+      "prompt": "下面这段 Python 代码在键不存在时会抛 KeyError，请修复它：\n\n```python\ndef get_city(user):\n    return user['address']['city']\n```\n\n要求：任意一层缺失时返回字符串 'unknown'。只输出修复后的代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["def get_city", ".get("], "maxScore": 5 }
+    },
+    {
+      "id": "fix-04",
+      "category": "代码修复",
+      "title": "async/await 缺失",
+      "prompt": "下面这段 JavaScript 代码打印出来的是 Promise 对象而不是真实数据，请修复它：\n\n```js\nasync function load() {\n  const data = fetch('/api/user').then(r => r.json());\n  console.log(data.name);\n}\n```\n\n只输出修复后的代码，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["await", "fetch"], "maxScore": 5 }
+    },
+    {
+      "id": "sql-01",
+      "category": "SQL",
+      "title": "条件查询与排序",
+      "prompt": "有一张 users 表，字段为 id、name、email、created_at。写一条 SQL，查询 2024 年 1 月 1 日之后注册的所有用户的 name 和 email，按 created_at 倒序排列。\n\n只输出 SQL 语句，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["SELECT", "FROM", "users", "WHERE", "created_at", "ORDER BY", "DESC"], "maxScore": 5 }
+    },
+    {
+      "id": "sql-02",
+      "category": "SQL",
+      "title": "联表分组统计",
+      "prompt": "有 orders 表（id、user_id、amount、status）和 users 表（id、name）。写一条 SQL，按用户统计已完成（status = 'completed'）订单的总金额，只保留总金额大于 1000 的用户，返回用户名和总金额。\n\n只输出 SQL 语句，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["SELECT", "JOIN", "GROUP BY", "SUM", "HAVING", "completed"], "maxScore": 5 }
+    },
+    {
+      "id": "sql-03",
+      "category": "SQL",
+      "title": "左连接计数",
+      "prompt": "有 students 表（id、name、class_id）和 classes 表（id、class_name）。写一条 SQL，查询每个班级的学生人数，返回班级名称和人数，没有学生的班级也要显示（人数为 0）。\n\n只输出 SQL 语句，不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["SELECT", "LEFT JOIN", "GROUP BY", "COUNT"], "maxScore": 5 }
+    },
+    {
+      "id": "math-01",
+      "category": "数学计算",
+      "title": "三位数乘法",
+      "prompt": "计算：123 × 456 = ?\n\n只输出最终数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b56088\\b", "maxScore": 5 }
+    },
+    {
+      "id": "math-02",
+      "category": "数学计算",
+      "title": "等差数列求和",
+      "prompt": "一个等差数列首项为 3，公差为 4，求前 20 项的和。\n\n只输出最终数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b820\\b", "maxScore": 5 }
+    },
+    {
+      "id": "math-03",
+      "category": "数学计算",
+      "title": "古典概型",
+      "prompt": "一个袋子里有 5 个红球和 3 个蓝球。随机取出 2 个球（不放回），两个都是红球的概率是多少？请用最简分数或保留三位小数的小数表示。\n\n只输出结果，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "(5\\s*/\\s*14|0\\.35[67])", "maxScore": 5 }
+    },
+    {
+      "id": "math-04",
+      "category": "数学计算",
+      "title": "解一元一次方程",
+      "prompt": "解方程 3x + 7 = 2x - 5，求 x 的值。\n\n只输出结果数字（含负号），不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\-12", "maxScore": 5 }
+    },
+    {
+      "id": "math-05",
+      "category": "数学计算",
+      "title": "涨跌折扣",
+      "prompt": "一件商品原价 800 元，先涨价 20%，再打八折出售。最终售价是多少元？\n\n只输出数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b768\\b", "maxScore": 5 }
+    },
+    {
+      "id": "logic-01",
+      "category": "逻辑推理",
+      "title": "真假话推理",
+      "prompt": "甲、乙、丙三人中只有一人说了真话。甲说：“乙在说谎。”乙说：“丙在说谎。”丙说：“甲和乙都在说谎。”请问谁说了真话？\n\n只输出一个人名（甲、乙 或 丙），不要任何解释。",
+      "scoring": { "mode": "contains", "keywords": ["乙"], "maxScore": 5 }
+    },
+    {
+      "id": "logic-02",
+      "category": "逻辑推理",
+      "title": "数列找规律",
+      "prompt": "找规律填数：2, 6, 12, 20, 30, ?\n\n只输出下一个数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b42\\b", "maxScore": 5 }
+    },
+    {
+      "id": "logic-03",
+      "category": "逻辑推理",
+      "title": "鸡兔同笼",
+      "prompt": "鸡兔同笼：笼子里共有 35 个头，94 只脚。问鸡有多少只？\n\n只输出数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b23\\b", "maxScore": 5 }
+    },
+    {
+      "id": "logic-04",
+      "category": "逻辑推理",
+      "title": "星期推算",
+      "prompt": "已知 2024 年 3 月 1 日是星期五，那么 2024 年 3 月 15 日是星期几？\n\n只输出“星期X”三个字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "星期五", "maxScore": 5 }
+    },
+    {
+      "id": "logic-05",
+      "category": "逻辑推理",
+      "title": "开关与灯",
+      "prompt": "有三个开关 A、B、C 控制三盏灯，规则如下：A 打开则 1 号灯亮；B 和 C 同时打开则 2 号灯亮；C 打开且 A 关闭则 3 号灯亮。当前状态是 A 关闭、B 打开、C 打开。\n\n请问此刻有几盏灯是亮的？只输出一个数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b2\\b", "maxScore": 5 }
+    },
+    {
+      "id": "trans-01",
+      "category": "翻译",
+      "title": "中译英（技术文档）",
+      "prompt": "把下面这段中文翻译成英文，要求术语准确、语句自然：\n\n“请求失败时，系统会自动切换到备用模型，整个过程对客户端完全透明。”",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 语义完整准确，无漏译、无添加原文没有的信息；2) 术语准确（“备用模型”应译为 fallback 或 backup model，“透明”应译为 transparent）；3) 英文语法正确、表达自然流畅。5分=完全准确自然；4分=基本准确但有细微瑕疵；3分=有漏译或明显不自然；2分=语义有偏差；1分=严重错误、机翻痕迹重或未翻译。",
+        "maxScore": 5
+      }
+    },
+    {
+      "id": "trans-02",
+      "category": "翻译",
+      "title": "英译中（技术文档）",
+      "prompt": "把下面这段英文翻译成中文，要求符合中文技术文档的表达习惯：\n\n“The cache hit rate dropped significantly after we increased the context window, so we decided to revisit the eviction policy.”",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 语义完整准确，无漏译；2) 术语准确（cache hit rate 译为缓存命中率，context window 译为上下文窗口，eviction policy 译为淘汰策略或驱逐策略）；3) 中文通顺自然，无明显翻译腔。5分=完全准确自然；4分=基本准确；3分=有漏译或明显翻译腔；2分=语义偏差；1分=严重错误或未翻译。",
+        "maxScore": 5
+      }
+    },
+    {
+      "id": "trans-03",
+      "category": "翻译",
+      "title": "中译英（地道口语）",
+      "prompt": "把下面这句中文翻译成地道的美式口语英文：\n\n“这事儿我可帮不上忙，你还是找别人吧。”",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 语气传达准确（委婉拒绝，略带无奈或爱莫能助）；2) 表达地道，符合英语母语者的日常口语习惯；3) 无中式英语的直译痕迹。5分=地道且语气准确；4分=基本地道但略有生硬；3分=能看懂但明显不地道；2分=语气错误或严重直译；1分=严重错误或未翻译。",
+        "maxScore": 5
+      }
+    },
+    {
+      "id": "trans-04",
+      "category": "翻译",
+      "title": "术语一致性",
+      "prompt": "把下面这段中文翻译成英文。注意：文中“兜底”必须统一译为 fallback，“权重”必须统一译为 weight，全篇保持术语一致：\n\n“当主模型超时，兜底模型会接管请求。不同模型的权重可以在配置文件里调整，权重越高被选中的概率越大。”",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 术语一致性为首要标准——必须全篇使用 fallback 和 weight，如果改用同义词（如 backup、backup model、weighting 之外的替代词）直接扣至 2 分以下；2) 语义准确完整；3) 英文语法正确自然。5分=术语完全一致且翻译准确；3分=术语基本一致但有轻微问题；1分=术语未统一或严重误译。",
+        "maxScore": 5
+      }
+    },
+    {
+      "id": "inst-01",
+      "category": "指令遵循",
+      "title": "严格输出控制",
+      "prompt": "只输出两个大写字母 OK，不要输出任何其他内容（不要标点、不要空格、不要解释、不要代码块）。",
+      "scoring": { "mode": "exact", "answer": "OK", "maxScore": 5 }
+    },
+    {
+      "id": "inst-02",
+      "category": "指令遵循",
+      "title": "格式转换",
+      "prompt": "把下面这句话全部改成大写字母输出，不要改变内容，也不要加任何解释：\n\n“hello world, this is a test”",
+      "scoring": { "mode": "contains", "keywords": ["HELLO WORLD", "THIS IS A TEST"], "maxScore": 5 }
+    },
+    {
+      "id": "inst-03",
+      "category": "指令遵循",
+      "title": "字数约束",
+      "prompt": "用不超过 20 个字介绍什么是人工智能。只输出这一句话，不要解释，也不要加“人工智能是”以外的任何铺垫。",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 字数是否控制在 20 个字以内（超出 20 字直接判 2 分以下）；2) 是否准确传达人工智能的基本概念；3) 语句是否通顺。5分=20字内且准确通顺；4分=20字内但略有瑕疵；2分=超出字数但内容准确；1分=严重超字数或内容错误。",
+        "maxScore": 5
+      }
+    },
+    {
+      "id": "inst-04",
+      "category": "指令遵循",
+      "title": "分隔符格式",
+      "prompt": "列出三种编程语言的英文名称，用英文分号分隔，不要编号、不要换行、不要任何解释。\n\n输出格式示例：A;B;C",
+      "scoring": { "mode": "regex", "pattern": "^[A-Za-z+#.\\s]+;[A-Za-z+#.\\s]+;[A-Za-z+#.\\s]+$", "maxScore": 5 }
+    },
+    {
+      "id": "inst-05",
+      "category": "指令遵循",
+      "title": "禁用词约束",
+      "prompt": "用一句话解释什么是递归。要求：整句话中不能出现“函数”和“自己”这两个词。只输出这一句话，不要任何解释。",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 是否准确解释了递归的概念；2) 是否严格避免了“函数”和“自己”这两个词——出现其中任意一个直接判 1 分；3) 是否只有一句话、没有多余解释。5分=解释准确且完全遵守禁用词约束；3分=解释基本清楚但有轻微违规（如多说了几句）；1分=出现禁用词或解释错误。",
+        "maxScore": 5
+      }
+    },
+    {
+      "id": "inst-06",
+      "category": "指令遵循",
+      "title": "多步格式执行",
+      "prompt": "请严格按以下步骤输出，一共三行：\n第 1 行输出：开始\n第 2 行输出 1 到 5 的平方，用英文逗号分隔，形如 1,4,9,16,25\n第 3 行输出：结束\n\n不要输出任何额外内容。",
+      "scoring": { "mode": "regex", "pattern": "开始[\\s\\S]{0,60}?1,\\s*4,\\s*9,\\s*16,\\s*25[\\s\\S]{0,60}?结束", "maxScore": 5 }
+    },
+    {
+      "id": "json-01",
+      "category": "结构化输出",
+      "title": "信息提取为 JSON",
+      "prompt": "从下面这段文字中提取信息，输出一个 JSON 对象，包含 name（字符串）、age（整数）、city（字符串）三个字段：\n\n“张伟今年 32 岁，住在杭州。”\n\n只输出 JSON，不要用 markdown 代码块包裹，不要任何解释。",
+      "scoring": { "mode": "json", "schema": { "name": "string", "age": "number", "city": "string" }, "maxScore": 5 }
+    },
+    {
+      "id": "json-02",
+      "category": "结构化输出",
+      "title": "数组字段",
+      "prompt": "输出一个 JSON 对象，包含 fruits 字段（字符串数组，元素依次为 apple、banana、orange）和 count 字段（整数，值为 3）。\n\n只输出 JSON，不要用 markdown 代码块包裹，不要任何解释。",
+      "scoring": { "mode": "json", "schema": { "fruits": "array", "count": "number" }, "maxScore": 5 }
+    },
+    {
+      "id": "json-03",
+      "category": "结构化输出",
+      "title": "嵌套结构",
+      "prompt": "输出一个 JSON 对象描述一本书，结构要求如下：\ntitle（字符串）、author（对象，含 name 和 country 两个字符串字段）、tags（字符串数组，至少 2 个元素）、published（整数年份）。\n\n只输出 JSON，不要用 markdown 代码块包裹，不要任何解释。",
+      "scoring": { "mode": "json", "schema": { "title": "string", "author": "object", "tags": "array", "published": "number" }, "maxScore": 5 }
+    },
+    {
+      "id": "json-04",
+      "category": "结构化输出",
+      "title": "情感分析输出",
+      "prompt": "判断下面这句话的情感倾向，并输出 JSON：\n\n“这个产品真的很糟糕，我完全不推荐。”\n\n输出格式为：{\"sentiment\": \"negative\", \"confidence\": 0.95, \"keywords\": [\"糟糕\", \"不推荐\"]}\n其中 sentiment 只能是 positive、negative、neutral 之一，confidence 是 0 到 1 之间的小数，keywords 是字符串数组。\n\n只输出 JSON，不要用 markdown 代码块包裹，不要任何解释。",
+      "scoring": { "mode": "json", "schema": { "sentiment": "string", "confidence": "number", "keywords": "array" }, "maxScore": 5 }
+    },
+    {
+      "id": "ctx-01",
+      "category": "长上下文",
+      "title": "长文数字定位",
+      "prompt": "请阅读以下报告后回答问题。\n\n--- 报告开始 ---\n星耀科技 2024 年第三季度经营报告\n\n一、整体业绩\n本季度公司实现营业收入 12860 万元，同比增长 23.4%，环比增长 8.1%。归属于母公司股东的净利润为 1742 万元，同比增长 31.2%。经营活动产生的现金流量净额为 2105 万元。\n\n二、分地区表现\n华东地区本季度营收 5236 万元，占总营收的 40.7%，仍然是公司最大的收入来源，同比增长 19.8%。华南地区营收 3184 万元，同比增长 27.5%，增速为各地区最高。华北地区营收 2402 万元，同比增长 21.3%。西部地区营收 1358 万元，同比增长 18.6%。海外市场营收 680 万元，首次突破 600 万元关口。\n\n三、产品线情况\n智能客服产品线收入 4820 万元，同比增长 34.6%，是公司增长最快的业务。数据中台产品线收入 3960 万元，同比增长 15.2%。运维监控产品线收入 2540 万元，同比增长 18.9%。其他业务收入 1540 万元。\n\n四、客户与团队\n截至季度末，公司服务的企业客户数量达到 1286 家，较上季度净增 143 家。其中年度合同金额超过 100 万元的客户有 87 家。研发团队人数扩充至 268 人，占公司总人数的 61.3%。\n\n五、风险与展望\n公司管理层提示，当前应收账款周转天数上升至 68 天，较去年同期增加 9 天，需要持续关注回款情况。第四季度公司将重点推进智能客服产品线的国际化版本研发，并计划在新加坡设立首个海外研发中心。\n--- 报告结束 ---\n\n问题：报告中“华南地区”的季度营收是多少万元？\n\n只输出数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b3184\\b", "maxScore": 5 }
+    },
+    {
+      "id": "ctx-02",
+      "category": "长上下文",
+      "title": "长文细节检索",
+      "prompt": "请阅读以下报告后回答问题。\n\n--- 报告开始 ---\n星耀科技 2024 年第三季度经营报告\n\n一、整体业绩\n本季度公司实现营业收入 12860 万元，同比增长 23.4%，环比增长 8.1%。归属于母公司股东的净利润为 1742 万元，同比增长 31.2%。经营活动产生的现金流量净额为 2105 万元。\n\n二、分地区表现\n华东地区本季度营收 5236 万元，占总营收的 40.7%，仍然是公司最大的收入来源，同比增长 19.8%。华南地区营收 3184 万元，同比增长 27.5%，增速为各地区最高。华北地区营收 2402 万元，同比增长 21.3%。西部地区营收 1358 万元，同比增长 18.6%。海外市场营收 680 万元，首次突破 600 万元关口。\n\n三、产品线情况\n智能客服产品线收入 4820 万元，同比增长 34.6%，是公司增长最快的业务。数据中台产品线收入 3960 万元，同比增长 15.2%。运维监控产品线收入 2540 万元，同比增长 18.9%。其他业务收入 1540 万元。\n\n四、客户与团队\n截至季度末，公司服务的企业客户数量达到 1286 家，较上季度净增 143 家。其中年度合同金额超过 100 万元的客户有 87 家。研发团队人数扩充至 268 人，占公司总人数的 61.3%。\n\n五、风险与展望\n公司管理层提示，当前应收账款周转天数上升至 68 天，较去年同期增加 9 天，需要持续关注回款情况。第四季度公司将重点推进智能客服产品线的国际化版本研发，并计划在新加坡设立首个海外研发中心。\n--- 报告结束 ---\n\n问题：公司管理层提示的主要风险是什么？（应收账款周转天数上升至多少天）\n\n只输出天数数字，不要任何解释。",
+      "scoring": { "mode": "regex", "pattern": "\\b68\\b", "maxScore": 5 }
+    },
+    {
+      "id": "ctx-03",
+      "category": "长上下文",
+      "title": "长文要点总结",
+      "prompt": "请阅读以下报告，然后用不超过 100 字概括这份报告的核心要点，要求涵盖整体业绩、增长最快的业务和主要风险三个方面。\n\n--- 报告开始 ---\n星耀科技 2024 年第三季度经营报告\n\n一、整体业绩\n本季度公司实现营业收入 12860 万元，同比增长 23.4%，环比增长 8.1%。归属于母公司股东的净利润为 1742 万元，同比增长 31.2%。经营活动产生的现金流量净额为 2105 万元。\n\n二、分地区表现\n华东地区本季度营收 5236 万元，占总营收的 40.7%，仍然是公司最大的收入来源，同比增长 19.8%。华南地区营收 3184 万元，同比增长 27.5%，增速为各地区最高。华北地区营收 2402 万元，同比增长 21.3%。西部地区营收 1358 万元，同比增长 18.6%。海外市场营收 680 万元，首次突破 600 万元关口。\n\n三、产品线情况\n智能客服产品线收入 4820 万元，同比增长 34.6%，是公司增长最快的业务。数据中台产品线收入 3960 万元，同比增长 15.2%。运维监控产品线收入 2540 万元，同比增长 18.9%。其他业务收入 1540 万元。\n\n四、客户与团队\n截至季度末，公司服务的企业客户数量达到 1286 家，较上季度净增 143 家。其中年度合同金额超过 100 万元的客户有 87 家。研发团队人数扩充至 268 人，占公司总人数的 61.3%。\n\n五、风险与展望\n公司管理层提示，当前应收账款周转天数上升至 68 天，较去年同期增加 9 天，需要持续关注回款情况。第四季度公司将重点推进智能客服产品线的国际化版本研发，并计划在新加坡设立首个海外研发中心。\n--- 报告结束 ---\n\n只输出概括内容，不要任何解释。",
+      "scoring": {
+        "mode": "llm",
+        "rubric": "评估要点：1) 是否涵盖整体业绩（营收 12860 万元、同比增长等）；2) 是否指出增长最快的业务是智能客服产品线；3) 是否指出主要风险是应收账款周转天数上升至 68 天；4) 是否控制在 100 字以内（严重超标扣分）；5) 表述是否准确、无事实性错误。5分=三个方面齐全、字数合规、表述准确；4分=基本齐全但略有遗漏；3分=只涵盖一到两个方面；2分=遗漏严重或字数严重超标；1分=事实错误或未总结。",
+        "maxScore": 5
+      }
+    }
+  ]
+}

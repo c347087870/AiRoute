@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, Menu } = require('electron')
 const path = require('path')
-const { createTray } = require('./tray')
+const { createTray, refreshTrayMenu } = require('./tray')
 
 let mainWindow = null
 
@@ -79,6 +79,16 @@ app.on('activate', () => {
 
 ipcMain.handle('get-app-path', () => {
   return app.getAppPath()
+})
+
+// 供渲染进程把隐藏到托盘的窗口重新唤出
+ipcMain.on('show-window', () => {
+  if (mainWindow) mainWindow.show()
+})
+
+// 渲染进程切换模型或修改 Provider 配置后，重建托盘菜单保证选中态与模型列表最新
+ipcMain.on('model-data-changed', () => {
+  refreshTrayMenu()
 })
 
 ipcMain.handle('get-auto-launch', () => {

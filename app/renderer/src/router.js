@@ -4,6 +4,7 @@ import RoutingRules from './views/RoutingRules.vue'
 import Providers from './views/Providers.vue'
 import Logs from './views/Logs.vue'
 import TokenStats from './views/TokenStats.vue'
+import Benchmark from './views/Benchmark.vue'
 import Settings from './views/Settings.vue'
 import Tutorial from './views/Tutorial.vue'
 
@@ -14,6 +15,7 @@ const routes = [
   { path: '/providers', name: 'Providers', component: Providers },
   { path: '/logs', name: 'Logs', component: Logs },
   { path: '/token-stats', name: 'TokenStats', component: TokenStats },
+  { path: '/benchmark', name: 'Benchmark', component: Benchmark },
   { path: '/settings', name: 'Settings', component: Settings },
   { path: '/tutorial', name: 'Tutorial', component: Tutorial }
 ]
