@@ -16,6 +16,23 @@
           ⚠ 端口已保存，需要重启服务后生效。请点击下方「重启 Server」。
         </div>
         <div class="config-row">
+          <label class="config-label">推理档位</label>
+          <div class="config-control">
+            <select v-model="reasoningEffort" class="effort-select">
+              <option value="max">max（最高推理）</option>
+              <option value="high">high</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+              <option value="off">不使用（移除该参数）</option>
+            </select>
+            <button class="btn-primary" @click="saveReasoningEffort">保存档位</button>
+          </div>
+        </div>
+        <div class="config-hint">
+          统一覆盖客户端发来的 reasoning_effort 参数（如 CodeBuddy 的 xhigh 会被替换为所选档位），
+          避免上游因不支持的档位拒绝请求。保存后立即生效，无需重启。
+        </div>
+        <div class="config-row">
           <label class="config-label">重启服务</label>
           <div class="config-control">
             <button class="btn-ghost" @click="doRestart" :disabled="restarting">
@@ -57,6 +74,7 @@ const serverPort = ref(3000) // 端口输入框的值
 const portChanged = ref(false) // 端口已保存但尚未重启生效
 const restarting = ref(false) // 是否正在重启服务
 const autoLaunch = ref(false) // 开机自启开关状态
+const reasoningEffort = ref('max') // 推理档位，与 server-config 的 reasoningEffort 对应
 
 // 统一提取接口错误信息用于提示
 function errorText(err) {
@@ -125,6 +143,16 @@ async function doRestart() {
   }
 }
 
+// 保存推理档位：网关按所选档位强制覆盖请求里的 reasoning_effort，立即生效
+async function saveReasoningEffort() {
+  try {
+    await updateServerConfig({ reasoningEffort: reasoningEffort.value })
+    showToast('推理档位已保存，立即生效')
+  } catch (err) {
+    showToast('保存失败: ' + errorText(err), 'error', 4000)
+  }
+}
+
 // 切换开机自启
 async function toggleAutoLaunch() {
   if (!window.electronAPI) return
@@ -143,6 +171,7 @@ async function loadData() {
   try {
     const config = await getServerConfig()
     serverPort.value = config.port || 3000
+    reasoningEffort.value = config.reasoningEffort || 'max'
   } catch {}
 
   if (window.electronAPI) {
@@ -202,6 +231,17 @@ onMounted(loadData)
 
 .port-input {
   width: 120px;
+}
+
+.effort-select {
+  width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-3);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-1);
+  background: var(--bg-2, #fff);
+  cursor: pointer;
 }
 
 .warning-box {

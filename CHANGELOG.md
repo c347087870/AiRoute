@@ -2,6 +2,17 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-09-11
+
+### 新增
+
+- **推理档位设置**：设置页新增「推理档位」下拉框（不使用 / low / medium / high / max，默认 max），保存立即生效无需重启。网关按档位强制覆盖客户端请求中的 `reasoning_effort`，非标档位（如 `xhigh`）不再被 OpenAI 协议上游拒绝（400，code 20024）
+
+### 修复
+
+- **system 消息兼容**：修复按 OpenAI 习惯把 `role:"system"` 消息放进 `messages` 数组的客户端（如 CodeBuddy）调用 Anthropic 协议上游报 `invalid params`、表现为 "All providers failed" 的问题——转发前自动把 system 消息提取合并到顶层 `system` 字段
+- **打包脚本**：Electron 二进制镜像改为 npmmirror 直连，自动清理失效的 `ELECTRON_CUSTOM_DIR` 环境变量，解决打包时下载 404；规避 `pnpm-lock.yaml` 导致构建工具误调旧版 pnpm 而失败的问题
+
 ## [1.1.0] - 2026-09-07
 
 ### 新增

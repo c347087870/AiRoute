@@ -2,7 +2,10 @@ const { spawn, execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs-extra')
 
-process.env.ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+// 旧镜像路径 npmmirror.com/mirrors/electron/ 在 electron-builder 26 下重定向拼接会 404，改用 CDN 直连
+process.env.ELECTRON_MIRROR = 'https://cdn.npmmirror.com/binaries/electron/'
+// 系统环境变量若残留 ELECTRON_CUSTOM_DIR，会把 Electron 下载路径指向错误版本目录导致 404，强制清掉
+delete process.env.ELECTRON_CUSTOM_DIR
 process.env.ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
 
 const root = path.resolve(__dirname, '..')

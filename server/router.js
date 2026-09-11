@@ -106,6 +106,8 @@ async function handleRequest(req, res) {
   const fallbackData = getFallback()
   const isStream = !!req.body?.stream
   const clientIsAnthropic = req.path === '/v1/messages'
+  // 推理档位由客户端设置页统一指定，未配置时默认 max（上游不支持 xhigh 等非标档位）
+  const reasoningEffort = engine.getServerConfig().reasoningEffort || 'max'
 
   const { chain, primaryRef } = buildProviderChain(config, state, fallbackData, req.body)
 
@@ -155,7 +157,7 @@ async function handleRequest(req, res) {
     }
 
     const headers = upstream.resolveHeaders(provider, clientIsAnthropic)
-    const reqBody = upstream.buildRequestBody(req.body, entry.model, isStream, clientIsAnthropic)
+    const reqBody = upstream.buildRequestBody(req.body, entry.model, isStream, clientIsAnthropic, reasoningEffort)
 
     if (isStream) {
       try {
@@ -646,6 +648,11 @@ app.put('/api/server-config', (req, res) => {
     return res.status(400).json({ error: '端口必须是 1-65535 的整数' })
   }
   next.port = port
+  // 推理档位只允许预设值，防止写坏配置导致上游 400
+  const effortValues = ['off', 'low', 'medium', 'high', 'max']
+  if (next.reasoningEffort !== undefined && !effortValues.includes(next.reasoningEffort)) {
+    return res.status(400).json({ error: '推理档位必须是 off/low/medium/high/max 之一' })
+  }
   engine.saveServerConfig(next)
   res.json({ ok: true, portChanged: current.port !== next.port })
 })

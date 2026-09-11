@@ -1,6 +1,6 @@
 {
   "name": "aiRoute",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "本地 LLM 多模型调度网关",
   "private": true,
   "main": "app/main/main.js",

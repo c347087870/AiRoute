@@ -60,6 +60,7 @@
 - 同时兼容 **Anthropic Messages API** (`/v1/messages`) 和 **OpenAI Chat Completions API** (`/v1/chat/completions`)
 - 自动替换 model、headers、endpoint，转发到当前激活的 Provider
 - 支持流式（SSE）和非流式两种响应模式
+- 推理档位：按设置页配置强制覆盖客户端请求中的 `reasoning_effort`（不使用 / low / medium / high / max，默认 max），避免非标档位被 OpenAI 协议上游拒绝
 
 ### 模型切换
 
@@ -159,7 +160,7 @@ my-provider/model-large     my-provider/model-small     auto
 | 日志 | 筛选/搜索、导出 CSV、清空 |
 | Token 统计 | 用量趋势图、各模型用量占比 |
 | 模型测分 | 多模型跑分对比、题库编辑与导入导出 |
-| 设置 | 端口配置、服务重启、开机自启 |
+| 设置 | 端口配置、推理档位、服务重启、开机自启 |
 | 使用教程 | 接入说明、功能概览 |
 
 系统托盘驻留：右键快速切换模型、打开面板。
@@ -374,7 +375,7 @@ gpt-4-turbo                 gpt-3.5-turbo
 |---|---|---|
 | `GET` | `/api/health` | 健康检查，返回 `{ status, uptime, port }` |
 | `GET` | `/api/server-config` | 获取服务配置 |
-| `PUT` | `/api/server-config` | 更新服务配置（如端口） |
+| `PUT` | `/api/server-config` | 更新服务配置（端口、推理档位；档位仅允许 off/low/medium/high/max） |
 | `POST` | `/api/restart` | 重启监听（不退出进程，按当前配置重新 listen 端口） |
 
 ---

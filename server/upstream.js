@@ -32,8 +32,31 @@ function resolveHeaders(provider, isAnthropic) {
   }
 }
 
+// Anthropic 协议要求 system 必须是顶层字段；CodeBuddy 等客户端按 OpenAI 习惯把
+// role=system 消息放进 messages，上游会报 invalid params，这里统一提取合并到顶层 system
+function extractSystemMessages(reqBody) {
+  if (!Array.isArray(reqBody.messages)) return reqBody
+  const systemParts = Array.isArray(reqBody.system) ? [...reqBody.system] : (reqBody.system ? [reqBody.system] : [])
+  const messages = []
+  let hasSystemMsg = false
+  for (const m of reqBody.messages) {
+    if (m && m.role === 'system') {
+      hasSystemMsg = true
+      // 字符串内容包装为文本块，数组内容保留原始块（含 cache_control 等字段）
+      if (typeof m.content === 'string') systemParts.push({ type: 'text', text: m.content })
+      else if (Array.isArray(m.content)) systemParts.push(...m.content)
+      continue
+    }
+    messages.push(m)
+  }
+  if (!hasSystemMsg) return reqBody
+  return { ...reqBody, messages, system: systemParts }
+}
+
 // 构造转发请求体：替换模型 ID，按需注入 max_tokens 与流式用量开关
-function buildRequestBody(body, model, isStream, isAnthropic) {
+// reasoningEffort 为 AiRoute 客户端统一指定的推理档位（max/high/medium/low），off 表示移除该字段；
+// 不透传请求里的原始值——CodeBuddy 等客户端可能发出上游不认识的档位（如 xhigh），lkeap 会直接报 400
+function buildRequestBody(body, model, isStream, isAnthropic, reasoningEffort) {
   const reqBody = { ...body, model: model.id }
   if (isStream !== undefined) {
     reqBody.stream = isStream
@@ -46,7 +69,12 @@ function buildRequestBody(body, model, isStream, isAnthropic) {
   if (reqBody.max_tokens === undefined || reqBody.max_tokens === null) {
     if (model.maxOutput) reqBody.max_tokens = model.maxOutput
   }
-  return reqBody
+  // 推理档位是 OpenAI 协议字段，由网关按客户端配置强制覆盖（Anthropic 端点没有该字段，无需处理）
+  if (!isAnthropic && reasoningEffort !== undefined) {
+    if (reasoningEffort === 'off') delete reqBody.reasoning_effort
+    else reqBody.reasoning_effort = reasoningEffort
+  }
+  return isAnthropic ? extractSystemMessages(reqBody) : reqBody
 }
 
 function toNum(value) {
