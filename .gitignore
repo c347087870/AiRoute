@@ -27,6 +27,9 @@ app/server/
 app/renderer/dist/
 app/dist-electron/
 
+# 构建脚本重命名的旧依赖目录（删除失败时的残留）
+.build-node_modules.old.*
+
 # IDE
 .vscode/
 .idea/
