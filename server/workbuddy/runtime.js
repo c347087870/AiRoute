@@ -12,12 +12,14 @@ const poolMod = require('./pool')
 const sessionMod = require('./session')
 const payloadMod = require('./payload')
 const sseMod = require('./sse')
+const dsmlMod = require('./dsml')
 const promptMod = require('./prompt')
 const schedulerMod = require('./scheduler')
 const tasksMod = require('./tasks')
 const queueMod = require('./queue')
 const wafipMod = require('./wafip')
 const usageMod = require('./usage')
+const creditHistMod = require('./credithist')
 
 // 运行时单例（Express 与 Electron 主进程同进程，全局唯一）
 let rt = null
@@ -58,6 +60,13 @@ function init(opts = {}) {
   const usage = usageMod.createUsage({ dataDir, file: opts.usageFile })
   usage.load()
 
+  // 积分历史账本：把每次真实查到的余额与上次比对，变动即留痕（新账号首次只建
+  // 基线）。挂载在 client 的余额观察者上（余额查询是"积分变动"唯一可靠的观测口），
+  // 签到 / 活跃上报 / 旅行 / 保活 / 面板手动刷新全覆盖；落盘 data/credit-history.json
+  const creditHist = creditHistMod.createLedger({ dataDir, file: opts.creditHistoryFile })
+  creditHist.load()
+  client.setCreditObserver((uid, credits) => creditHist.observe(uid, credits))
+
   const session = sessionMod.createRouter({
     ttl: opts.poolConfig?.sessionStickyTtlMs,
     gcInterval: opts.poolConfig?.sessionStickyGcMs,
@@ -96,6 +105,7 @@ function init(opts = {}) {
     pool,
     session,
     usage,
+    creditHist,
     log,
     pushLog,
     logBuffer,
@@ -485,6 +495,10 @@ async function forwardChat(opts) {
   // 放在提示词与改写管线之前，保证降级重试路径同样携带
   body = payloadMod.setBodyEffort(body, opts.reasoningEffort)
   const baseBody = body
+  // 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本（见 dsml.js），
+  // 修复层用它做严格判定。名单来自「本请求声明的 tools」与「会话历史里出现过的工具名」
+  // 两个来源——实测 tools 声明会在中转环节丢失，只认前者会让修复层在最需要它的场景失效
+  const declaredTools = dsmlMod.toolNameAllowlist(baseBody)
   // 会话/轮级键必须在提示词改写前取（参照 handler：改写会动 messages 内容，之后取会让键漂移）
   const sessionKey = sessionMod.extractKey(baseBody)
   const turnKey = sessionMod.turnKey(baseBody)
@@ -587,13 +601,16 @@ async function forwardChat(opts) {
       let cost = null
       let ttfbMs = 0
       if (isStream) {
-        const out = await streamToClient(r, upstreamRes.stream, opts, releaseHeld, hintCtx)
+        const out = await streamToClient(r, upstreamRes.stream, opts, releaseHeld, hintCtx, declaredTools)
         cost = out.cost
         ttfbMs = out.ttfbMs
       } else {
         const text = await client.readAll(upstreamRes.stream, 64 * 1024 * 1024)
         releaseHeld()
         const aggregated = sseMod.aggregateSSE(text)
+        // 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls
+        const mrepair = dsmlMod.repairAggregatedResponse(aggregated, declaredTools, true)
+        logMarkupRepair(r, mrepair, model, declaredTools)
         cost = costOfUsage(aggregated && aggregated.usage)
         opts.onDone?.(aggregated)
       }
@@ -938,11 +955,15 @@ function readDeviceTokenCached(filePath) {
   }
 }
 
-// 流式转发：SSE 帧白名单重建 + [DONE] 恰好一次 + 空流兜底
+// 流式转发：SSE 帧白名单重建 + 标记修复 + [DONE] 恰好一次 + 空流兜底
 // 返回值：Promise<costInfo|null>（末帧 usage 的成本台账输入）
-function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx) {
+function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredTools) {
   return new Promise(resolve => {
-    const rebuilder = sseMod.createFrameRebuilder()
+    // 标记修复（见 dsml.js）：上游在没有 tools 的请求里会把工具调用吐成正文标记，
+    // 这里在透传前还原成 delta.tool_calls；名单为空时启用弱判定（tools 声明在
+    // 链路上丢失是实测最常见的泄漏成因，只做严格判定等于对主场景不设防）
+    const repair = dsmlMod.createMarkupRepair(declaredTools, true)
+    const rebuilder = sseMod.createFrameRebuilder({ repair })
     const idleMs = C.TIMEOUT_DEFAULTS.idleTimeoutMs
     let validFrames = 0
     let doneSent = false
@@ -1000,25 +1021,27 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx) {
         const payload = trimmed.slice(6).trim()
         if (payload === '[DONE]') return 'done'
         const result = rebuilder.push(payload)
-        let outPayload = result.payload
         if (result.valid) {
           validFrames++
           if (!ttfbMs) ttfbMs = Date.now() - startedAt // 首个有效帧到达耗时（TTFB）
-          // 成本台账输入：末帧 usage（credit + token 总数）
+          // 成本台账输入：末帧 usage（credit + token 总数）；标记修复可能把一帧
+          // 展开成多帧，逐帧找携带 usage 的那一帧
           if (payload.includes('"usage"')) {
-            let frameObj = null
-            try {
-              frameObj = JSON.parse(outPayload)
-            } catch {
-              frameObj = null
+            for (const p of result.payloads) {
+              if (!p.includes('"usage"')) continue
+              let frameObj = null
+              try {
+                frameObj = JSON.parse(p)
+              } catch {
+                frameObj = null
+              }
+              const c = costOfUsage(frameObj && frameObj.usage)
+              if (c) costInfo = c
             }
-            const c = costOfUsage(frameObj && frameObj.usage)
-            if (c) costInfo = c
           }
-          // error 帧附加 gateway_hint（参照 hint.FrameHintFunc）
-          outPayload = attachFrameHint(outPayload, hintCtx)
         }
-        writeFrame(outPayload)
+        // error 帧附加 gateway_hint（参照 hint.FrameHintFunc），非 error 帧原样
+        for (const p of result.payloads) writeFrame(attachFrameHint(p, hintCtx))
         return ''
       }
       if (trimmed !== '') {
@@ -1032,6 +1055,26 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx) {
       return ''
     }
 
+    // 流末统一收尾：标记修复尾部回吐 + 兜底收尾帧 + 空流兜底 + [DONE]。
+    // [DONE] 到达与 EOF/错误收尾都汇到这里（幂等）
+    const finalize = () => {
+      if (finished) return
+      // 标记修复收尾：未判定的尾部字节一律原文回吐（绝不吞字节，未闭合的块连
+      // 起始标记一起交还）；本流还原过调用但上游没给收尾帧时，补一帧
+      // finish_reason: tool_calls（客户端才不会把「工具调用回合」读成「只说了话」）
+      const tail = rebuilder.finish()
+      for (let i = 0; i < tail.payloads.length; i++) {
+        writeFrame(tail.payloads[i])
+        if (i < tail.validCount) validFrames++
+      }
+      logMarkupRepair(r, repair, opts.model, declaredTools)
+      if (validFrames === 0) {
+        writeFrame('{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}')
+      }
+      writeDone()
+      finish()
+    }
+
     const handleEnd = () => {
       if (finished) return
       // 冲刷残行
@@ -1039,16 +1082,11 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx) {
         const res = handleLine(buffer)
         buffer = ''
         if (res === 'done') {
-          writeDone()
-          finish()
+          finalize()
           return
         }
       }
-      if (validFrames === 0) {
-        writeFrame('{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}')
-      }
-      writeDone()
-      finish()
+      finalize()
     }
 
     upstreamStream.on('data', chunk => {
@@ -1061,8 +1099,9 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx) {
         buffer = buffer.slice(idx + 1)
         const res = handleLine(line)
         if (res === 'done') {
-          writeDone()
-          finish()
+          // [DONE] 后不再透传任何数据（含垃圾帧），收尾统一走 finalize
+          // （先回吐标记修复的尾缓冲与兜底收尾帧，再写 [DONE]）
+          finalize()
           try {
             upstreamStream.destroy()
           } catch {
@@ -1078,12 +1117,27 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx) {
   })
 }
 
+// 标记修复命中统计（对齐参考实现：还原成功记 INFO、识别到但拒绝记 WARN——
+// 排障时能一眼区分「没识别到」与「识别到但判定不通过」）
+function logMarkupRepair(r, repair, model, declaredTools) {
+  if (!repair) return
+  const known = declaredTools ? declaredTools.size : 0
+  if (repair.converted() > 0) {
+    r.pushLog('chat', `已从助手正文还原 ${repair.converted()} 个原生工具调用（model=${model || ''}，已知工具名 ${known} 个）`, 'info')
+  } else if (repair.seen() > 0) {
+    r.pushLog('chat', `识别到 ${repair.seen()} 个原生工具调用标记块但未还原（model=${model || ''}，已知工具名 ${known} 个）`, 'warn')
+  }
+}
+
 // 会话头族 meta（参照 handler 的 chatMeta 装配）：
-// conversationID 透传客户端原值（不伪造）；conversationRequestID 入站头透传优先，
-// 否则 轮级复合键 > 纯轮级键 > 会话级键 > 请求级随机；traceId 入站透传
+// conversationID 透传客户端原值；客户端没有时（Anthropic / Claude Code 流量）回退会话键，
+// 否则 X-Conversation-ID 缺失、上游 prompt_cache_key 会退化为每账号一个常量——同账号下
+// 所有客户端共享一个不断被逐出的前缀缓存槽（对齐参考项目 #133）；conversationRequestID
+// 入站头透传优先，否则 轮级复合键 > 纯轮级键 > 会话级键 > 请求级随机；traceId 入站透传
 function buildChatMeta(body, keys = {}) {
   const inbound = keys.inbound || {}
-  const conversationId = sessionMod.resolveConversationId(body)
+  let conversationId = sessionMod.resolveConversationId(body)
+  if (!conversationId) conversationId = keys.sessionKey || ''
   let conversationRequestId = strOr(inbound.conversationRequestId)
   if (!conversationRequestId) {
     const sessKey = keys.sessionKey || ''
@@ -1121,6 +1175,33 @@ async function creditPackages(uid) {
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
   return client.resourcePackages(auth, { ...rtOpts(r), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
+}
+
+// 积分变动流水（新的在前；limit 默认 200、上限 1000，uid 可选精确过滤）
+// 账号昵称在读取时用池快照填充——账本只存 uid，上游改名后旧流水也跟着更新
+function creditHistory(limitArg, uidArg) {
+  const r = ensure()
+  let limit = Math.trunc(Number(limitArg)) || 0
+  if (limit <= 0) limit = 200
+  if (limit > 1000) limit = 1000
+  const uid = String(uidArg || '').trim()
+
+  // 有 uid 过滤时必须先全量取回（账本上限默认 2000 条）：先截断再过滤会让筛选后的
+  // 条数看起来像历史缺失；无过滤时只取 limit 条，不为一次展示拷贝整个账本
+  const all = r.creditHist.read(uid ? 0 : limit)
+
+  const nicks = new Map()
+  for (const st of r.pool.list()) {
+    if (st.nickname) nicks.set(st.uid, st.nickname)
+  }
+
+  const entries = []
+  for (const e of all) {
+    if (uid && e.uid !== uid) continue
+    entries.push({ ...e, account: nicks.get(e.uid) || '' })
+    if (entries.length >= limit) break
+  }
+  return { entries, limit }
 }
 
 // 账号池统一维护的启用模型清单（供 Provider 同步）
@@ -1344,6 +1425,7 @@ module.exports = {
   queueStatus,
   // 积分构成 / 模型清单 / 运行日志
   creditPackages,
+  creditHistory,
   getEnabledModels,
   setEnabledModels,
   getLogs,

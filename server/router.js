@@ -1028,6 +1028,12 @@ app.get('/api/workbuddy/usage', (req, res) => {
   res.json({ ok: true, ...workbuddy.usageSnapshot(req.query.hours) })
 })
 
+// 积分变动流水（新的在前；limit 默认 200 上限 1000，uid 可选精确过滤）
+app.get('/api/workbuddy/credit-history', (req, res) => {
+  if (!requireWorkbuddy(res)) return
+  res.json({ ok: true, ...workbuddy.creditHistory(req.query.limit, req.query.uid) })
+})
+
 // 立即落盘用量数据（面板「刷新」或关闭前调用）
 app.post('/api/workbuddy/usage/save', (req, res) => {
   if (!requireWorkbuddy(res)) return

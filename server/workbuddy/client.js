@@ -322,6 +322,29 @@ async function dailyCheckin(auth, opts = {}) {
   return { ok: true, message: '签到成功' }
 }
 
+// ===== 余额观察者 =====
+
+// 当前挂载的余额观察者（null = 未挂载）。旁路通知，不改变任何透传字节；未挂载时零开销
+let creditObserver = null
+
+// 挂载 / 注销（null）余额观察者。可在启动后任意时刻调用；观察者在余额查询的
+// 调用栈上同步执行，必须自身快速返回
+function setCreditObserver(fn) {
+  creditObserver = typeof fn === 'function' ? fn : null
+}
+
+// 查询成功（ok）后旁路通知观察者（uid + 余额绝对值）
+// 失败不是观测值：网络抖动返回的错误若被留痕，会在下一次成功时造出一条假变动；
+// 观察者异常不打断余额查询主流程（纯旁路，与"落盘失败只记日志"同一哲学）
+function notifyCredits(uid, credits) {
+  if (!creditObserver || !uid) return
+  try {
+    creditObserver(String(uid), credits)
+  } catch {
+    /* 观察者是旁路：异常不得影响余额查询 */
+  }
+}
+
 // 余额查询：返回 { ok, credits, total, expiring, earliestExpiry, earliestRemaining, message }
 async function userResource(auth, opts = {}) {
   const billingBase = headersMod.billingBaseOf(auth, opts)
@@ -350,7 +373,9 @@ async function userResource(auth, opts = {}) {
   if (!accounts) {
     return { ok: false, message: `响应缺少 Accounts（顶层键：${topKeysOf(env)}）` }
   }
-  return aggregateCredits(accounts, opts.expiringSoonMs)
+  const agg = aggregateCredits(accounts, opts.expiringSoonMs)
+  if (agg.ok) notifyCredits(auth.uid, agg.credits)
+  return agg
 }
 
 // 积分批次明细查询：返回规范化后的批次列表（用于「积分构成」视图）
@@ -925,6 +950,7 @@ module.exports = {
   dailyCheckin,
   userResource,
   resourcePackages,
+  setCreditObserver,
   growthCall,
   growthOK,
   growthMPHeaders,

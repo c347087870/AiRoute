@@ -22,6 +22,9 @@ server/workbuddy-state.json
 # WorkBuddy 用量统计（运行时数据）
 server/usage.json
 
+# WorkBuddy 积分历史（运行时数据）
+server/credit-history.json
+
 # 工具本地数据
 .codebuddy/
 

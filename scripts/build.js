@@ -21,7 +21,7 @@ const releaseDir = path.join(appCwd, 'release')
 // 排除：API Key、依赖、日志，以及 WorkBuddy 凭证与个人运行数据（避免随公开发布泄露）
 function copyServerFiles() {
   fs.ensureDirSync(serverBldDir)
-  const exclude = ['models.json', 'node_modules', 'logs', 'cost.json', 'workbuddy-auths', 'workbuddy-state.json', 'usage.json', 'token-stats.json', 'benchmark-questions.json', 'benchmark-runs.json', '.npmrc']
+  const exclude = ['models.json', 'node_modules', 'logs', 'cost.json', 'workbuddy-auths', 'workbuddy-state.json', 'usage.json', 'credit-history.json', 'token-stats.json', 'benchmark-questions.json', 'benchmark-runs.json', '.npmrc']
   const entries = fs.readdirSync(serverSrcDir)
   for (const entry of entries) {
     if (exclude.includes(entry)) continue

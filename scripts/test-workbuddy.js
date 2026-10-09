@@ -29,6 +29,7 @@ const schedulerMod = require(path.join(wbDir, 'scheduler.js'))
 const catalogMod = require(path.join(wbDir, 'catalog.js'))
 const modelsdevMod = require(path.join(wbDir, 'modelsdev.js'))
 const usageMod = require(path.join(wbDir, 'usage.js'))
+const credithistMod = require(path.join(wbDir, 'credithist.js'))
 
 // ===== 迷你测试框架 =====
 let passed = 0
@@ -1445,6 +1446,7 @@ async function main() {
       'taskProgress',
       'taskScan',
       'creditPackages',
+      'creditHistory',
       'getEnabledModels',
       'setEnabledModels',
       'getLogs',
@@ -2039,6 +2041,140 @@ async function main() {
     const entry = clientMod.mapModelEntry({ id: 'glm-5.3', credits: 'x0.79' })
     assert.strictEqual(entry.rate, '0.79')
     assert.strictEqual(clientMod.mapModelEntry({ id: 'x' }).rate, '', '缺失倍率为空串')
+  })
+
+  // ==================== 15. 积分历史 ====================
+  group('15. 积分历史 credithist')
+
+  test('首次观测只建基线；变化留痕（正获取负消耗）；read 新的在前', () => {
+    let clk = Date.parse('2026-05-01T10:00:00')
+    const l = credithistMod.createLedger({ file: '', now: () => (clk += 1000) })
+    l.observe('u1', 100)
+    assert.deepStrictEqual(l.read(0), [], '首次观测只建基线，不记流水')
+    l.observe('u1', 100)
+    assert.deepStrictEqual(l.read(0), [], '余额不变不留痕')
+    l.observe('u1', 160)
+    l.observe('u1', 120)
+    const r = l.read(0)
+    assert.strictEqual(r.length, 2)
+    assert.strictEqual(r[0].delta, -40, '新的在前')
+    assert.strictEqual(r[0].before, 160)
+    assert.strictEqual(r[0].after, 120)
+    assert.strictEqual(r[1].delta, 60)
+    assert.strictEqual(r[1].before, 100)
+    assert.strictEqual(r[1].after, 160)
+    assert.ok(r[0].time && !Number.isNaN(Date.parse(r[0].time)), '时间为可解析的 ISO 串')
+    assert.strictEqual(l.read(1).length, 1, 'limit 取最近 1 条')
+    assert.strictEqual(l.read(1)[0].delta, -40)
+    assert.strictEqual(l.read(999).length, 2, 'limit 超量取全部')
+  })
+
+  test('|delta| 超过 maxDelta 只更新基线不留痕（边界值恰好等于上限仍留痕）', () => {
+    const l = credithistMod.createLedger({ file: '', maxDelta: 1000 })
+    l.observe('u1', 100)
+    l.observe('u1', 1101)
+    assert.deepStrictEqual(l.read(0), [], '超限变动不留痕')
+    l.observe('u1', 1201) // 与更新后的基线差 100：正常留痕
+    assert.strictEqual(l.read(0).length, 1)
+    assert.strictEqual(l.read(0)[0].before, 1101)
+    assert.strictEqual(l.read(0)[0].delta, 100)
+    l.observe('u1', 2201) // 恰好等于上限：仍留痕
+    assert.strictEqual(l.read(0).length, 2)
+    assert.strictEqual(l.read(0)[0].delta, 1000)
+  })
+
+  test('持久化往返：快照与流水恢复、tmp 不残留；重启后同余额不产生假变动', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-credithist-'))
+    const file = path.join(dir, 'credit-history.json')
+    const l1 = credithistMod.createLedger({ file })
+    l1.observe('u1', 100)
+    l1.observe('u1', 150)
+    assert.ok(fs.existsSync(file), '变动应同步落盘')
+    assert.ok(!fs.existsSync(`${file}.tmp`), '原子写后不应残留 tmp 文件')
+    const disk = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.strictEqual(disk.version, 1)
+    assert.strictEqual(disk.snapshot.u1, 150)
+    assert.strictEqual(disk.entries.length, 1)
+
+    const l2 = credithistMod.createLedger({ file })
+    l2.load()
+    l2.observe('u1', 150) // 与恢复的基线相同：不应补一条假流水
+    l2.observe('u2', 90) // 新账号：只建基线
+    const r = l2.read(0)
+    assert.strictEqual(r.length, 1, '重启后同余额不产生假变动')
+    assert.strictEqual(r[0].delta, 50)
+    const disk2 = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.strictEqual(disk2.snapshot.u2, 90, '新账号基线已持久化')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('流水条数上限：超出丢最旧', () => {
+    const l = credithistMod.createLedger({ file: '', maxEntries: 3 })
+    let v = 0
+    for (let i = 0; i < 6; i++) l.observe('u1', (v += 10))
+    const r = l.read(0)
+    assert.strictEqual(r.length, 3)
+    assert.strictEqual(r[0].after, 60, '保留最新')
+    assert.strictEqual(r[2].after, 40, '最旧的被丢弃')
+  })
+
+  test('空 uid 与非有限余额被忽略', () => {
+    const l = credithistMod.createLedger({ file: '' })
+    l.observe('', 10)
+    l.observe('   ', 10)
+    l.observe(null, 10)
+    l.observe('u1', NaN)
+    l.observe('u1', 'abc')
+    assert.deepStrictEqual(l.read(0), [], '非法观测不产生任何记录')
+    l.observe('u1', 100)
+    l.observe('u1', 120)
+    assert.strictEqual(l.read(0).length, 1, '修剪后的 uid 正常工作')
+  })
+
+  test('client 余额观察者接口导出（挂载 / 注销）', () => {
+    assert.strictEqual(typeof clientMod.setCreditObserver, 'function')
+    clientMod.setCreditObserver(null)
+    clientMod.setCreditObserver(() => {})
+    clientMod.setCreditObserver(null)
+  })
+
+  test('runtime.creditHistory：昵称读取时填充、uid 过滤、limit 夹取', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-credithist-rt-'))
+    runtimeMod.init({ dataDir: tmp }) // 已初始化时为幂等空操作
+    const r = runtimeMod.getRuntime()
+    const savedLedger = r.creditHist
+    const savedList = r.pool.list
+    // 用假账本与假账号池隔离测试读取层：留痕写入语义由上面 credithist 组用例覆盖
+    r.creditHist = {
+      read: limit => {
+        const all = [
+          { time: '2026-05-01T02:00:00.000Z', uid: 'u1', delta: 60, before: 100, after: 160 },
+          { time: '2026-05-01T01:00:00.000Z', uid: 'u2', delta: -30, before: 130, after: 100 },
+          { time: '2026-05-01T00:00:00.000Z', uid: 'u1', delta: 30, before: 70, after: 100 }
+        ]
+        return limit > 0 ? all.slice(0, limit) : all
+      }
+    }
+    r.pool.list = () => [{ uid: 'u1', nickname: '账号一' }]
+    try {
+      const a = runtimeMod.creditHistory()
+      assert.strictEqual(a.limit, 200, '默认 200')
+      assert.strictEqual(a.entries.length, 3)
+      assert.strictEqual(a.entries[0].account, '账号一', '昵称读取时填充')
+      assert.strictEqual(a.entries[1].account, '', '池内无此账号时昵称为空串')
+      assert.strictEqual(runtimeMod.creditHistory(2).entries.length, 2, 'limit 截断')
+      assert.strictEqual(runtimeMod.creditHistory(5000).limit, 1000, '上限 1000')
+      assert.strictEqual(runtimeMod.creditHistory(-1).limit, 200, '非法 limit 回落默认')
+      assert.strictEqual(runtimeMod.creditHistory('abc').limit, 200, '非数字 limit 回落默认')
+      const e = runtimeMod.creditHistory(100, 'u1')
+      assert.strictEqual(e.entries.length, 2, 'uid 过滤')
+      assert.ok(e.entries.every(x => x.uid === 'u1'))
+    } finally {
+      r.creditHist = savedLedger
+      r.pool.list = savedList
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
   })
 
   // ==================== 8.5 CN 域请求头（固定 zh-CN / 固定 CN 域）====================

@@ -334,6 +334,11 @@ export function wbUsageSave() {
   return api.post('/api/workbuddy/usage/save', {}).then(r => r.data)
 }
 
+// 积分变动流水（新的在前；limit 默认 200 上限 1000）
+export function wbCreditHistory(limit = 100) {
+  return api.get('/api/workbuddy/credit-history', { params: { limit } }).then(r => r.data)
+}
+
 // 账号池统一维护的启用模型清单
 export function wbEnabledModels() {
   return api.get('/api/workbuddy/models/enabled').then(r => r.data)

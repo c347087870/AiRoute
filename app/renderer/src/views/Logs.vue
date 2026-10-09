@@ -96,12 +96,50 @@
         {{ hasActiveFilter ? '没有符合当前筛选条件的日志，可调整条件或点击「重置」' : '暂无日志记录' }}
       </div>
     </div>
+
+    <!-- 积分历史：每次真实查到余额与上次比对，变动即留痕（正 = 获取，负 = 消耗） -->
+    <div class="card credit-card">
+      <div class="credit-header">
+        <h3 class="credit-title">积分历史</h3>
+        <span class="credit-hint text-muted">每次真实查到余额与上次比对，变动即留痕</span>
+        <span class="credit-note text-muted">{{ creditNote }}</span>
+        <select v-model="creditLimit" class="filter-select credit-limit" title="读取条数">
+          <option :value="100">最近 100 条</option>
+          <option :value="300">最近 300 条</option>
+          <option :value="1000">最近 1000 条</option>
+        </select>
+        <button class="btn-ghost btn-sm" @click="loadCreditHistory">重新读取</button>
+      </div>
+      <div class="table-wrap" v-if="creditEntries.length">
+        <table class="log-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>账号</th>
+              <th>变动</th>
+              <th>变动后余额</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(e, i) in creditEntries" :key="i">
+              <td class="nowrap">{{ formatTime(e.time) }}</td>
+              <td class="nowrap token-cell text-muted">{{ accountLabel(e.uid) }}</td>
+              <td class="token-cell" :class="deltaClass(e.delta)">{{ creditDeltaText(e.delta) }}</td>
+              <td class="token-cell text-purple">{{ formatNumber(e.after) }}</td>
+              <td class="text-muted">余额 {{ formatNumber(e.before) }} → {{ formatNumber(e.after) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="empty">暂无积分变动记录</div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
-import { getLogs, getLogModels, clearLogs, getLogsSize, wbAccounts } from '../api.js'
+import { getLogs, getLogModels, clearLogs, getLogsSize, wbAccounts, wbCreditHistory } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { formatNumber, formatTime, formatBytes } from '../utils/format.js'
 
@@ -112,6 +150,9 @@ const modelFilter = ref('') // 模型筛选，空表示全部
 const statusFilter = ref('') // 状态筛选：'' / success / failed
 const modelOptions = ref([]) // 模型下拉选项，来自日志中出现过的模型引用
 const accounts = ref([]) // 账号池账号列表，供「账号」列把 uid 映射为昵称
+const creditEntries = ref([]) // 积分变动流水（新的在前，账号列由 uid 映射为昵称）
+const creditLimit = ref(100) // 积分历史读取条数（100 / 300 / 1000）
+const creditNote = ref('') // 积分历史统计说明（条数 · 净变动）
 
 // 是否存在生效中的筛选条件，用于区分两种空状态文案
 const hasActiveFilter = computed(() => {
@@ -185,9 +226,46 @@ async function loadAccounts() {
   }
 }
 
-// 全量刷新：日志 + 模型选项 + 目录占用 + 账号池昵称
+// 变动列格式化：获取 +N、消耗 −N（U+2212，与请求记录口径一致）、无变动 0
+function creditDeltaText(delta) {
+  const d = Number(delta) || 0
+  if (d > 0) return '+' + formatNumber(d)
+  if (d < 0) return '−' + formatNumber(-d)
+  return '0'
+}
+
+// 变动列着色：获取绿 / 消耗红 / 无变动灰
+function deltaClass(delta) {
+  const d = Number(delta) || 0
+  if (d > 0) return 'text-green'
+  if (d < 0) return 'text-red'
+  return 'text-muted'
+}
+
+// 积分历史统计说明：条数与净变动（净值 0 不带符号）
+function creditNoteText(entries) {
+  if (!entries.length) return '暂无积分变动记录'
+  let net = 0
+  for (const e of entries) net += Number(e.delta) || 0
+  const sign = net > 0 ? '+' : net < 0 ? '−' : ''
+  return `${entries.length} 条 · 净 ${sign}${formatNumber(Math.abs(net))}`
+}
+
+// 加载积分变动流水；失败降级为空列表并提示，不影响日志主流程
+async function loadCreditHistory() {
+  try {
+    const data = await wbCreditHistory(creditLimit.value)
+    creditEntries.value = data?.entries || []
+    creditNote.value = creditNoteText(creditEntries.value)
+  } catch {
+    creditEntries.value = []
+    creditNote.value = '加载失败'
+  }
+}
+
+// 全量刷新：日志 + 模型选项 + 目录占用 + 账号池昵称 + 积分历史
 async function refreshAll() {
-  await Promise.all([loadLogs(), loadModels(), loadSize(), loadAccounts()])
+  await Promise.all([loadLogs(), loadModels(), loadSize(), loadAccounts(), loadCreditHistory()])
 }
 
 // 重置筛选条件，条数属于展示设置不参与重置
@@ -212,6 +290,9 @@ async function clearAllLogs() {
 
 // 模型 / 状态 / 条数变化后立即重新加载
 watch([modelFilter, statusFilter, limit], loadLogs)
+
+// 积分历史读取条数变化后立即重新加载
+watch(creditLimit, loadCreditHistory)
 
 onMounted(refreshAll)
 </script>
@@ -252,6 +333,37 @@ onMounted(refreshAll)
 .filter-select {
   font-size: 13px;
   padding: 8px 12px;
+}
+
+.credit-card {
+  margin-top: 16px;
+}
+
+.credit-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.credit-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.credit-hint {
+  font-size: 12px;
+}
+
+.credit-note {
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.credit-limit {
+  padding: 6px 10px;
 }
 
 .table-wrap {

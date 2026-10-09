@@ -93,6 +93,9 @@ pnpm install
 # Electron 桌面应用（网关服务 + 前端 + 窗口）
 pnpm dev
 
+# 只启动网关服务 + 前端页面（浏览器打开 http://localhost:5173 调试，不启动 Electron）
+pnpm dev:web
+
 # 或只启动网关服务（配合任意客户端使用）
 node server/router.js
 ```
@@ -354,6 +357,7 @@ Key 只存储在本地 `server/models.json`，该文件被 `.gitignore` 排除�
 
 ```bash
 pnpm dev        # 开发模式（Electron 应用）
+pnpm dev:web    # 只启动服务与前端（浏览器访问 http://localhost:5173，不启动 Electron）
 pnpm build      # 打包便携版单文件 exe（app/dist-electron/AiRoute.exe）
 pnpm test       # WorkBuddy 模块离线测试
 ```
