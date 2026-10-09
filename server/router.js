@@ -10,6 +10,7 @@ const paths = require('./paths')
 const models = require('./models')
 const upstream = require('./upstream')
 const benchmark = require('./benchmark')
+const update = require('./update')
 const workbuddy = require('./workbuddy/runtime')
 const wbSession = require('./workbuddy/session')
 const wbAnthropic = require('./workbuddy/anthropic')
@@ -536,6 +537,33 @@ app.post('/api/state', (req, res) => {
   }
   saveState({ current })
   res.json({ current })
+})
+
+// ==================== 更新检查与下载 ====================
+
+// 查询最新版本；force=1 跳过 30 分钟缓存（设置页手动检查用）
+app.get('/api/update/check', async (req, res) => {
+  try {
+    res.json(await update.checkUpdate(req.query.force === '1'))
+  } catch (e) {
+    res.status(502).json({ error: '检查更新失败: ' + (e.message || '网络不可用') })
+  }
+})
+
+// 启动应用内下载（服务端流式写盘，前端轮询进度）
+app.post('/api/update/download', (req, res) => {
+  const { tag, savePath } = req.body || {}
+  if (!tag || !savePath) return res.status(400).json({ error: '缺少版本号或保存路径' })
+  try {
+    res.json(update.startDownload(tag, savePath))
+  } catch (e) {
+    res.status(409).json({ error: e.message || '无法开始下载' })
+  }
+})
+
+// 下载进度快照
+app.get('/api/update/download/progress', (req, res) => {
+  res.json(update.getDownloadState())
 })
 
 app.get('/api/providers', (req, res) => {

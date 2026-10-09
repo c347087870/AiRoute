@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, dialog, shell } = require('electron')
 const path = require('path')
 const { createTray, refreshTrayMenu } = require('./tray')
 
@@ -102,4 +102,27 @@ ipcMain.handle('set-auto-launch', (_, enabled) => {
     path: app.getPath('exe')
   })
   return true
+})
+
+// 更新功能：选择新版本安装包的保存位置（默认落到系统下载目录）
+ipcMain.handle('save-file-dialog', async (_, defaultName) => {
+  const options = {
+    title: '保存新版本安装包',
+    defaultPath: path.join(app.getPath('downloads'), defaultName || 'AiRoute.exe'),
+    filters: [{ name: '可执行文件', extensions: ['exe'] }]
+  }
+  const result = mainWindow && mainWindow.isVisible()
+    ? await dialog.showSaveDialog(mainWindow, options)
+    : await dialog.showSaveDialog(options)
+  return result.canceled ? '' : result.filePath
+})
+
+// 更新功能：用系统默认浏览器打开外链（Release 页面）
+ipcMain.handle('open-external', (_, url) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url)
+})
+
+// 更新功能：打开已下载文件所在文件夹并选中它
+ipcMain.handle('show-item-in-folder', (_, filePath) => {
+  if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath)
 })

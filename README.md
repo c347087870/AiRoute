@@ -1,6 +1,7 @@
 # AiRoute
 
-> 本地 LLM 多模型调度网关 — 好钢用在刀刃上，贵的模型做难事，便宜的做杂事。
+> 本地 LLM 统一网关 — **一处配置，处处通用，多客户端无缝切换模型**。
+> 把所有 AI 客户端统一到 `http://localhost:3000`；把腾讯 WorkBuddy（CodeBuddy）账号变成本地网关，OAuth 登录即用、无需 API Key。
 
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/c347087870/AiRoute)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
@@ -9,78 +10,164 @@
 
 ---
 
-## 界面预览
+> **免责声明**：本项目仅供学习和研究使用。使用者需遵守 WorkBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。
 
-![Dashboard](assets/1.png)
-
-![Providers](assets/2.png)
-
-![路由规则](assets/3.png)
-
-![模型测分](assets/4-benchmark.png)
-
-![Token 统计](assets/5-tokenstats.png)
-
-![设置](assets/7-settings.png)
-
-![使用教程](assets/8-tutorial.png)
+> **打赏支持**：如果 AiRoute 帮到了你，欢迎打赏一下，支持作者持续维护。
+>
+> <img src="assets/donate.jpg" width="240" alt="微信赞赏码">
 
 ---
 
-## 为什么选择 AiRoute
+## 界面预览
 
-- **统一入口** — 所有 AI 客户端只需连接 `http://localhost:3000`，不再关心真实 API 地址
-- **一键切换模型** — Electron 客户端面板点击切换，无需修改任何客户端配置
-- **智能路由** — 中文走国产模型、代码走 Claude、自定义关键词匹配，按任务选最优
-- **双协议支持** — 每个 Provider 可分别配置 Anthropic 和 OpenAI 端点，请求直接走对应协议，不做格式转换
-- **故障自愈** — 主模型挂了自动 fallback，对客户端完全透明
-- **可视化操作** — Electron 桌面应用，所有配置（Provider、规则、Fallback）均在界面完成
-- **WorkBuddy 账号池** — 无需 API Key，OAuth 登录 WorkBuddy 账号池，多号轮转共享额度、失败自动换号重试
-- **开箱即用** — 打包后为单个 exe 文件，内置 Express 服务无需额外安装部署，双击即用
+**状态面板**（当前模型、请求统计、Token 用量、模型芯片快速切换）
+
+![状态面板](assets/1.png)
+
+**Provider 管理**（增删改查、连通性测试、单模型切换）
+
+![Provider 管理](assets/2.png)
+
+---
+
+## 核心亮点
+
+| 亮点 | 说明 |
+|---|---|
+| **一处配置，处处通用** | Provider、API Key、路由规则只在 AiRoute 里配置一次；本机所有客户端（Claude Code、Cursor、各类 SDK、脚本）统一直连 `http://localhost:3000`，局域网设备也能用，不再在每个软件里重复填 Key、换地址 |
+| **统一入口** | 同时兼容 Anthropic 与 OpenAI 两套协议，`/v1/messages` 与 `/v1/chat/completions` 共用一个端口；客户端完全不需要知道真实的上游地址 |
+| **一键切换，多客户端无缝** | 侧边栏 / 状态面板 / 系统托盘 / Provider 页四处切换入口实时同步；切换对所有已接入客户端**立即生效**——Claude Code 里正跑着的会话，下一条请求就是新模型，无需改配置、无需重启任何客户端 |
+| **智能路由** | Auto 模式按请求内容自动挑模型：12 种内置检测条件 + 默认兜底 + 自定义匹配规则，命中即路由；贵的模型做难事，便宜的做杂事 |
+| **故障自愈** | 主模型失败自动 Fallback 到备用模型；WorkBuddy 账号池内失败自动换号，全程对客户端透明 |
+| **WorkBuddy 账号池** | 把腾讯 WorkBuddy（CodeBuddy）账号变成本地网关：OAuth 登录即用，多号轮转共享额度、积分快过期优先消耗、签到/保活/成长任务全自动 |
+| **可视化操作** | Electron 桌面客户端，Provider、路由规则、Fallback、账号池、日志与统计全部界面完成，无需手改配置文件 |
+| **开箱即用** | 打包为单个 `AiRoute.exe`，内置服务，双击即用；支持局域网访问、开机自启与托盘常驻 |
 
 ---
 
 ## 架构
 
 ```
-┌──────────────────────────────────────────┐
-│          Claude Code / 任意 AI 客户端       │
-│         ANTHROPIC_BASE_URL=localhost:3000 │
-└──────────────────┬───────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────┐
-│            AiRoute Router (:3000)          │
-│  请求代理 · 模型切换 · 智能路由 · Fallback   │
-└──────┬──────────┬──────────┬─────────────┘
-       │          │          │
-       ▼          ▼          ▼
-   ┌──────┐  ┌──────┐  ┌──────┐  ┌───────────────────────┐
-   │ GLM  │  │ 小米 │  │Claude│  │WorkBuddy 账号池       │
-   └──────┘  └──────┘  └──────┘  │多号轮转 · 失败换号    │
-                                 └───────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│   Claude Code · Cursor · 各类 OpenAI / Anthropic 兼容客户端   │
+│   本机 http://localhost:3000 · 局域网 http://<本机IP>:3000    │
+└───────────────────────────┬─────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       AiRoute (:3000)                       │
+│    请求代理 · 模型切换 · 智能路由 · Fallback · 日志与统计      │
+└──────┬──────────┬──────────┬───────────┬────────────────────┘
+       ▼          ▼          ▼           ▼
+   ┌──────┐  ┌──────┐  ┌────────┐  ┌──────────────────────────┐
+   │ GLM  │  │ 小米 │  │ Claude │  │ WorkBuddy 账号池          │
+   └──────┘  └──────┘  └────────┘  │ 多号轮转 · 失败换号 ·     │
+                                   │ 积分核算 · 任务自动化      │
+                                   └──────────────────────────┘
 ```
 
 ---
 
-## 功能
+## 快速开始
 
-### 请求代理（核心）
+### 方式一：下载即用（推荐）
 
-- 同时兼容 **Anthropic Messages API** (`/v1/messages`) 和 **OpenAI Chat Completions API** (`/v1/chat/completions`)
-- 自动替换 model、headers、endpoint，转发到当前激活的 Provider
-- 支持流式（SSE）和非流式两种响应模式
-- 推理档位：按设置页配置强制覆盖客户端请求中的 `reasoning_effort`（不使用 / low / medium / high / max，默认 max），避免非标档位被 OpenAI 协议上游拒绝
+到 [Releases](https://github.com/c347087870/AiRoute/releases) 下载最新的 `AiRoute.exe`，双击运行，无需安装任何依赖。
 
-### 模型切换
+首次启动后：
 
-在 Electron 客户端的 Dashboard 页面点击模型芯片即可实时切换，或通过系统托盘右键菜单（按 Provider 分组的二级菜单）快速切换。Providers 页面每个模型行也有独立的「切换」按钮。侧边栏下拉框、状态面板、托盘菜单、Providers 页面四处同步。
+1. 打开「Provider 管理」添加模型来源（上游地址 + API Key）；或直接添加 WorkBuddy 账号池（无需任何 Key，见下文）
+2. 打开「状态面板」，点击模型芯片切换当前模型
+3. 把任意客户端指向 `http://localhost:3000`（见「统一入口」一节）
 
-### Provider 管理
+> **更新**：AiRoute 启动后会静默检查 GitHub Releases，有新版本时侧边栏会弹出提示，可直接在应用内下载新版 exe（下载完成后打开所在文件夹）；也可以随时在「设置 → 关于与更新」手动检查。
 
-在客户端的 Providers 页面可视化增删改查 Provider，支持连通性测试。API Key 支持密码/明文切换和复制。
+### 方式二：源码运行
 
-**一个 Provider 可以配置多个模型，每个模型可单独设置最大上下文与最大输出：**
+前置条件：[Node.js](https://nodejs.org) >= 18、[pnpm](https://pnpm.io) >= 10
+
+```bash
+git clone https://github.com/c347087870/AiRoute.git
+cd AiRoute
+pnpm install
+
+# Electron 桌面应用（网关服务 + 前端 + 窗口）
+pnpm dev
+
+# 或只启动网关服务（配合任意客户端使用）
+node server/router.js
+```
+
+服务默认监听 `http://localhost:3000`，端口可在「设置」页修改（保存后点「重启 Server」生效）。
+
+> `server/models.json` 存放 Provider 配置（含 API Key），已加入 `.gitignore` 不会提交；推荐直接在客户端「Provider 管理」页面配置，无需手改文件。
+
+---
+
+## 统一入口：一处配置，处处通用
+
+AiRoute 启动后就是一个标准的本地 LLM 网关：**你不必再在每个客户端里配置上游账号**——Provider、Key、路由规则全部集中在 AiRoute，客户端只需要认一个地址。
+
+| 项目 | 值 |
+|---|---|
+| 本机接入地址 | `http://localhost:3000` |
+| 局域网接入地址 | `http://<本机IP>:3000`（手机 / 另一台电脑 / 虚拟机同样适用） |
+| API Key | `sk-airoute`（任意非空字符串；AiRoute 本地不做鉴权） |
+| Anthropic 协议 | `/v1/messages`（Claude Code 等自动拼接） |
+| OpenAI 协议 | `/v1/chat/completions`、`/v1/models` |
+
+> 切换模型时**所有客户端同步生效**：AiRoute 只转发「当前激活模型」，客户端里填的模型名仅是占位，实际走哪个模型始终由 AiRoute 决定。
+
+### 接入 Claude Code
+
+配置文件位于 `~/.claude/settings.json`（Windows：`C:\Users\<用户名>\.claude\settings.json`）：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-airoute",
+    "ANTHROPIC_BASE_URL": "http://localhost:3000"
+  },
+  "model": "claude-opus-4-7"
+}
+```
+
+> **⚠️ 关键**：`ANTHROPIC_BASE_URL` 只写到端口号，**不要**带 `/v1/messages` 等路径——Claude Code 会自动拼接，写全路径会变成 `/v1/messages/v1/messages` 导致 404。
+> 修改后需**完全退出并重启** Claude Code 才生效。
+
+`model` 字段可填真实模型 ID（`/v1/models` 会返回你配置的全部模型），也可填兼容别名：
+
+```
+claude-opus-4-0-20250514    claude-opus-4-20250514
+claude-sonnet-4-0-20250514  claude-sonnet-4-20250514
+claude-3-7-sonnet-20250219  claude-3-5-sonnet-20241022
+claude-3-5-haiku-20241022   claude-3-opus-20240229
+gpt-4o                      gpt-4o-mini
+gpt-4-turbo                 gpt-3.5-turbo
+```
+
+无论填哪个，实际调用的都是 AiRoute 当前激活的模型。
+
+### 接入 OpenAI 兼容客户端
+
+任何支持自定义 Base URL 的 OpenAI 兼容客户端（Cursor、Continue、各类 SDK 与命令行工具）：
+
+```
+Base URL: http://localhost:3000/v1
+API Key:  sk-airoute
+Model:    任意（或填 /v1/models 拉到的真实模型 ID）
+```
+
+### 局域网内其他设备
+
+把地址换成运行 AiRoute 电脑的局域网 IP 即可（如 `http://192.168.1.10:3000`），手机、平板、另一台电脑共享同一套模型池与切换能力。
+
+---
+
+## 模型路由（重点）
+
+### Provider 与多模型
+
+一个 Provider = 一套上游账号（地址 + Key + 多个模型）。每个模型可单独设置最大上下文 / 最大输出 / 推理档位，在「Provider 管理」页面可视化编辑并支持连通性测试：
 
 ```json
 {
@@ -97,323 +184,196 @@
 }
 ```
 
-> - `baseURL` 用于 Anthropic 协议（`/v1/messages`），`openaiURL` 用于 OpenAI 协议（`/v1/chat/completions`），二者至少填一个。
-> - `maxContext` / `maxOutput` **不填就是空**。`maxOutput` 会在请求未指定 `max_tokens` 时自动注入（Anthropic 协议要求该字段必填）。
-> - 数组第一个模型是该 Provider 的默认模型。
-> - 老配置里的单个 `"model": "xxx"` 字段会被自动识别为该 Provider 的唯一模型，**不会改写你的配置文件**。
+> - `baseURL` 走 Anthropic 协议、`openaiURL` 走 OpenAI 协议，二者至少填一个；请求按客户端协议**直接走对应端点，不做格式转换**，最大化保留各协议原生能力
+> - `maxOutput` 会在请求未指定时自动注入（Anthropic 协议必填字段）；数组第一个模型是该 Provider 的默认模型
+> - API Key 支持密码 / 明文切换与复制；老配置里的单 `"model"` 字段自动兼容，不改写你的文件
 
 ### 模型引用
 
-切换与路由的最小单位是**模型**，引用格式为 `Provider名/模型ID`：
+切换与路由的最小单位是**模型**，引用格式 `Provider名/模型ID`：
 
 ```
-my-provider/model-large     my-provider/model-small     auto
+my-provider/model-large     my-provider/model-small     workbuddy/模型ID     auto
 ```
 
-侧边栏下拉、状态面板快速切换、托盘菜单、路由规则目标、兜底模型，全部使用这个格式。老配置里只写了 Provider 名（如 `my-provider`）也能正常工作，解析时取其默认模型。
-
-### Fallback 机制
-
-主模型请求失败时，自动切换到备用模型。Fallback 配置在「路由规则」页面完成。
+侧边栏下拉、状态面板、托盘菜单、路由规则目标、兜底模型全部使用该格式。
 
 ### 智能路由（auto 模式）
 
-当激活模型设为 `auto` 时，根据请求内容自动选择最优模型。支持 13 种内置检测条件（代码、SQL、中文、翻译、代码审查等）+ 自定义关键词匹配。
+把当前模型设为 `auto`，AiRoute 会**按请求内容自动挑选模型**，贵的模型做难事、便宜的做杂事。内置 12 种检测条件 + 1 条默认兜底，共 13 条规则：
 
-> **自定义规则**：只匹配本次输入的最后一条用户消息，不受对话历史影响。如配置关键词 `123` → A 模型、`456` → B 模型，输入包含 `123` 就走 A 模型，与上下文无关。
+| # | 条件 | # | 条件 |
+|---|---|---|---|
+| 1 | 包含代码 | 7 | 数学计算 |
+| 2 | 包含 SQL | 8 | 文本摘要 |
+| 3 | 中文任务 | 9 | 翻译任务 |
+| 4 | 英语请求 | 10 | 代码审查/优化 |
+| 5 | 知识问答 | 11 | 编写测试 |
+| 6 | 创意写作 | 12 | 长上下文 |
+| | | 13 | 默认（全局唯一兜底规则） |
 
-路由规则在「路由规则」页面可视化编辑，所有 fallback 事件记录日志可追溯。
+- **自定义匹配规则**（最高优先级，页面独立区块）：当请求包含指定字符串时直接路由到目标模型——只匹配本次输入的**最后一条用户消息**，不受对话历史影响；例如 `123` → A 模型、`456` → B 模型，输入里出现哪个就走哪个
+- **未命中兜底**：所有检测条件都未命中时走「默认」规则的目标；未配置默认规则则兜底到第一个可用 Provider，不会报错
+- 所有规则在「路由规则」页面可视化编辑（智能路由规则 + 自定义匹配规则两个区块），即改即生效
 
-### 日志系统
+### Fallback 故障自愈
 
-- 记录：时间戳、模型、响应时间、状态码、输入/输出/缓存读/缓存写 Token、使用记录（输入文案）、积分消耗、fallback 信息
-- 同一任务（一次输入及其后续工具调用）合并为一条记录，不再逐请求罗列
-- 脱敏处理：API Key 相关字段自动隐藏
-- 按天分文件存储（`logs/usage-YYYY-MM-DD.log`），在客户端「日志」页面可一键清空；页头显示日志目录占用体积与文件数
-- 在客户端「日志」页面按模型/状态筛选、清空
+主模型请求失败时自动切换备用模型，对客户端**完全透明**（客户端无感知，不需要重试）；Fallback 链在「路由规则」页面配置，所有 fallback 事件写入日志可追溯。
 
-### Token 统计
+### 一键切换模型（四处同步）
 
-统计口径按四个维度分开记录，**缓存单独计数，不与输入重复计算**：
-
-| 字段 | 含义 |
+| 入口 | 位置 |
 |---|---|
-| `input` | 未命中缓存的输入 Token |
-| `cacheRead` | 从缓存读取的输入 Token |
-| `cacheWrite` | 写入缓存的输入 Token |
-| `output` | 输出 Token |
-| `total` | `input + cacheRead + cacheWrite + output` |
+| 侧边栏下拉框 | 左下角「当前模型」，全页面可见 |
+| 状态面板芯片 | Dashboard 顶部模型卡片，点击即切 |
+| 系统托盘 | 右键菜单按 Provider 分组的二级菜单，常驻可切 |
+| Provider 管理 | 每个模型行的「切换」按钮 |
 
-- Anthropic：`input_tokens` 本身不含缓存部分，直接取 `cache_read_input_tokens` / `cache_creation_input_tokens`
-- OpenAI：`prompt_tokens` **包含**缓存部分，统计时从 `prompt_tokens_details.cached_tokens` 扣除后计入 `input`
-- 所有时间维度（今日/本月/按小时）均使用**本机本地时间**
-- 数据保留 35 天，按天清理
+四处实时同步、指向同一个激活项；切换瞬间所有已接入客户端（Claude Code 正在跑的会话、正在请求的脚本等）**下一条请求即用新模型**。
 
-### 模型测分
+### 推理档位
 
-内置题库跑一遍多个模型，出横向对比排行榜与各维度得分。
+按「设置」页配置强制覆盖客户端请求中的 `reasoning_effort`（不使用 / low / medium / high / max，默认 max），避免非标档位被 OpenAI 协议上游拒绝；也可在模型级别单独指定。
 
-- **内置题库**：40 道题，覆盖代码生成、代码修复、SQL、数学计算、逻辑推理、翻译、指令遵循、结构化输出、长上下文九个维度，满分 200 分
-- **两种评分方式**
-  - 客观题用规则判定：`exact`（完全相等）、`contains`（按关键词命中比例）、`regex`（正则命中即满分）、`json`（按 schema 校验字段与类型）
-  - 主观题（翻译、开放问答）交给**裁判模型**按评分细则打 1-5 分，裁判模型可以任选一个已配置的模型
-- **题库可自行编辑**：增删改题目、按分类筛选、导入/导出 JSON、一键恢复内置题库
-- **评测维度**：总分与得分率、各分类得分率、成功/失败数、平均延迟、Token 消耗
-- 评测**直连 Provider**，不经过智能路由与 fallback，确保测的是目标模型本身
+---
 
-### WorkBuddy 账号池
+## WorkBuddy 账号池（重点）
 
-内置的特殊 Provider：无需 API Key 和 URL，通过 OAuth 登录 WorkBuddy 账号，把账号池当作可轮转的模型来源使用。
+**把腾讯 WorkBuddy（CodeBuddy）账号变成本地网关**：不需要 API Key、不需要单独申请额度——用 OAuth 登录你的 WorkBuddy 账号，账号池会作为内置 Provider 出现在 AiRoute 中，与其他模型完全同权：一键切换、参与智能路由、可加入 Fallback 链。
 
-- **多号轮转**：请求自动调度到可用账号，失败自动换号重试；同一会话保持粘性
-- **维护自动化**：签到 / 保活 / 成长任务等由内置调度器定时执行
-- **模型清单**：在「账号池 → 模型和档位」页签统一维护，启用后与其他模型一样参与智能路由与 Fallback，引用格式为 `workbuddy/模型ID`
-- **账号池页签**：账号池、积分构成、用量、模型和档位、成长任务、定时任务、高级配置、运行日志
+```
+任意客户端 ──► AiRoute (:3000) ──► WorkBuddy 账号池 ──► 腾讯上游
+             统一入口 / 路由       多号轮转 · 积分核算      WorkBuddy 账号
+```
 
-接入步骤见下方「WorkBuddy 账号池」章节。
+### 核心机制
 
-### Electron 可视化客户端
+- **多号轮转**：请求自动调度到当前最合适的可用账号，多账号共享调度、互相分担
+- **会话粘性**：同一会话（30 分钟窗口）固定使用同一账号，避免上下文漂移
+- **失败自动换号**：请求失败自动切换到下一个可用账号重试，对客户端完全透明
+- **智能容错**：429 软冷却（指数退避）、余额不足自动休眠到次日凌晨、连续失败熔断保护、模型级不可用负缓存（自动跳过不支持的模型）——坏账号自动让路，好账号优先干活
+- **积分精算**：快过期积分优先消耗（168 小时窗口内优先）、闲置账号补偿加权，最大化每份额度利用率
+- **内置提示词系统**：出站前按模式替换 / 追加网关自有 system 提示词，并进行指纹脱敏处理，规范请求形态、提高上游兼容性
 
-| 页面 | 功能 |
+### 接入步骤
+
+1. **添加账号**：在「账号池」页面点「+ 添加账号」，浏览器完成 OAuth 授权；支持添加多个账号，页面每 3 秒自动检测授权结果。凭证仅保存在本地 `server/workbuddy-auths/`，不会上传到任何服务器
+2. **启用模型**：「模型和档位」页签点「拉取上游模型」，勾选需要的模型并保存；启用后即刻出现在所有模型选择入口，引用格式 `workbuddy/模型ID`
+3. **开始使用**：把当前模型切到某个 `workbuddy/xxx`，或把它加入智能路由 / 兜底链即可；客户端侧无需任何额外配置
+
+### 账号池页面（7 个页签）
+
+| 页签 | 功能 |
 |---|---|
-| Dashboard | 当前模型、请求数统计、Token 用量（含缓存）、最近日志 |
-| Providers | 增删改 Provider 与模型、连通性测试、单模型切换 |
-| 账号池 | WorkBuddy 账号管理、多号轮转与积分用量、模型档位、定时任务、运行日志 |
-| 路由规则 | 智能路由规则编辑、fallback 配置 |
-| 日志 | 按任务合并、使用记录与积分消耗、目录占用提示、筛选、清空 |
-| Token 统计 | 用量趋势图、各模型用量占比 |
-| 模型测分 | 多模型跑分对比、题库编辑与导入导出 |
-| 设置 | 端口配置、推理档位、服务重启、开机自启 |
-| 使用教程 | 接入说明、功能概览 |
+| 账号池 | 添加 / 移除账号、逐个签到、刷新余额、启用 / 禁用、详情面板（冷却类型与剩余、熔断状态、在途请求数、快过期积分、模型受限明细） |
+| 积分构成 | 按账号查看积分批次：剩余 / 已用 / 总额、到期时间、周期包，一眼看清哪笔积分快过期 |
+| 模型和档位 | 拉取上游模型、勾选启用、查看各模型与档位配置 |
+| 成长任务 | 接受任务、一键完成全部、全账号扫描未完成任务、入队执行与领奖 |
+| 定时任务 | 签到 / 旅行 / 活跃 / 保活 / 夜猫子 / 成长任务 / 余额刷新 逐项启用与时点配置，支持「立即执行」与「保存排程」 |
+| 高级配置 | 提示词模式、指纹脱敏、设备令牌文件可编辑并保存；账号池参数（冷却 / 熔断 / 在途上限等）只读展示 |
+| 运行日志 | 按频道（对话 / 任务 / 系统）与关键词过滤，3 秒自动刷新 |
 
-系统托盘驻留：右键快速切换模型、打开面板。
+### 自动化任务
 
----
+由内置调度器按你配置的时点自动执行：**每日签到 + 余额查询**（默认 9:00 / 21:00 双时点）、**猫猫旅行**、**活跃上报**、**token 保活**、**夜猫子**、**成长任务扫描执行**——账号维护与积分增长全自动，无需手动干预。
 
-## 快速开始
+### 安全与合规
 
-### 前置条件
-
-- [Node.js](https://nodejs.org) >= 18
-- [pnpm](https://pnpm.io) >= 10
-
-### 安装
-
-```bash
-# 克隆项目
-git clone https://github.com/c347087870/AiRoute.git
-cd aiRoute
-
-# 安装依赖（全部依赖集中在根 package.json，一次安装）
-pnpm install
-```
-
-### 配置 Provider
-
-```bash
-# 复制配置模板
-cp server/models.example.json server/models.json
-
-# 编辑 models.json，填入你的 API 信息
-```
-
-编辑 `server/models.json`：
-
-```json
-{
-  "my-model": {
-    "baseURL": "https://your-api-endpoint.com/anthropic",
-    "openaiURL": "https://your-api-endpoint.com/v1",
-    "apiKey": "your-api-key",
-    "displayName": "我的 Provider",
-    "models": [
-      { "id": "your-model-id", "displayName": "主力", "maxContext": 200000, "maxOutput": 8192 },
-      { "id": "your-fast-id", "displayName": "轻量" }
-    ]
-  }
-}
-```
-
-> Provider 名称不能包含斜杠 `/` 或空格。
-
-> **注意**：`models.json` 包含 API Key，已加入 `.gitignore`，不会被提交到仓库。也可通过 Electron 客户端的 Providers 页面配置。
-
-### 启动
-
-```bash
-# Electron 桌面应用（服务 + Vite + Electron 窗口）
-pnpm dev
-
-# 仅启动服务（配合任意客户端使用）
-node server/router.js
-```
-
-服务默认运行在 `http://localhost:3000`。启动后打开 Electron 客户端即可管理所有配置。
+- 凭证仅存本地数据目录，**不会随 exe 打包分发**（发布构建已排除），日志中敏感字段自动脱敏
+- 账号池功能仅供个人自用，请遵守腾讯相关服务条款；使用自动化功能可能存在的账号风险由使用者自行承担
 
 ---
 
-## 接入 Claude Code
+## 其他功能
 
-> **⚠️ 关键**：`ANTHROPIC_BASE_URL` 只需写到端口号，**不要**带 `/v1/messages` 路径。Claude Code 会自动拼接 `/v1/models`、`/v1/messages` 等路径。
-
-### 1. 配置文件位置
-
-Claude Code 的配置文件位于用户目录下：
-
-```
-~/.claude/settings.json          # macOS / Linux
-C:\Users\<用户名>\.claude\settings.json  # Windows
-```
-
-### 2. 完整配置
-
-打开配置文件，写入：
-
-```json
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "sk-airoute",
-    "ANTHROPIC_BASE_URL": "http://localhost:3000"
-  },
-  "model": "claude-opus-4-7"
-}
-```
-
-**字段说明：**
-
-| 字段 | 值 | 说明 |
-|---|---|---|
-| `ANTHROPIC_BASE_URL` | `http://localhost:3000` | **不要带路径**，只写到端口 |
-| `ANTHROPIC_AUTH_TOKEN` | `sk-airoute`（任意非空字符串） | AiRoute 不做认证，填任意值即可 |
-| `model` | 从下方别名中任选一个 | 实际调用的是 AiRoute 当前激活的 Provider |
-
-### 3. 可选模型别名
-
-`/v1/models` 会返回**你配置的所有真实模型 ID**，外加下列兼容别名，Claude Code 的 `model` 字段可从下列选择：
-
-```
-claude-opus-4-0-20250514    claude-opus-4-20250514
-claude-sonnet-4-0-20250514  claude-sonnet-4-20250514
-claude-3-7-sonnet-20250219  claude-3-5-sonnet-20241022
-claude-3-5-haiku-20241022   claude-3-opus-20240229
-gpt-4o                      gpt-4o-mini
-gpt-4-turbo                 gpt-3.5-turbo
-```
-
-> 无论选哪个别名，实际调用的是 AiRoute 当前激活的 Provider。切换 Provider 在 Electron 客户端中完成，无需修改 Claude Code 配置。
-
-### 4. 重启 Claude Code
-
-修改配置后，**完全退出 Claude Code 再重新启动**，配置方可生效。
-
----
-
-## WorkBuddy 账号池
-
-WorkBuddy 是内置的特殊 Provider：**无需 API Key 和 URL**，通过 OAuth 登录 WorkBuddy 账号，把账号池当作模型来源使用。
-
-### 1. 添加账号
-
-在客户端「账号池」页面点击添加账号，按提示在浏览器中完成 OAuth 授权；支持添加多个账号。凭证仅保存在本地数据目录 `workbuddy-auths/` 中。
-
-### 2. 启用模型
-
-在「模型和档位」页签维护 WorkBuddy 的模型清单，启用后的模型会出现在 Dashboard、Providers 等所有模型列表中，可参与智能路由与 Fallback，引用格式为 `workbuddy/模型ID`。
-
-### 3. 多号轮转
-
-请求自动调度到可用账号，失败自动换号重试且对客户端透明；同一会话保持粘性。
-
-### 4. 定时任务
-
-签到 / 保活 / 成长任务等维护任务由内置调度器自动执行，在「定时任务」页签可查看开关状态与执行记录。
-
-### 5. 运行日志
-
-账号池后台运行情况记录在「运行日志」页签，出现异常先在这里排查。
-
----
-
-## 开发
-
-```bash
-# Electron 开发（服务 + Vite + Electron 窗口）
-pnpm dev
-
-# 构建 Electron 应用（输出单个 AiRoute.exe）
-pnpm build
-
-# 运行测试（WorkBuddy 模块离线断言，不发网络请求）
-pnpm test
-```
+| 功能 | 说明 |
+|---|---|
+| 状态面板 | 当前模型、请求统计、Token 用量（含缓存）、最近请求、模型芯片快速切换 |
+| 日志 | 记录模型 / 耗时 / 状态码 / Token / 积分消耗 / 重试与 fallback 详情；按天存储，支持筛选与清空 |
+| Token 统计 | 输入 / 缓存读 / 缓存写 / 输出 四维分开计数（缓存不与输入重复计算），今日 / 本月 / 按小时趋势 |
+| 模型测分 | 内置 40 题 × 9 维度题库，多模型横向跑分；客观题规则判定 + 主观题裁判评分，题库可编辑、导入导出 |
+| 更新检查 | 启动静默检查 GitHub Releases，发现新版本时侧边栏提示，应用内下载新版 exe；「设置 → 关于与更新」支持手动检查 |
+| 系统设置 | 端口配置、推理档位、重启 Server、开机自启 |
+| 托盘常驻 | 右键快速切换模型、显示 / 隐藏窗口、开机自启开关、退出 |
 
 ---
 
 ## 常见问题
 
 <details>
-<summary><strong>Q: 为什么修改 Claude Code 配置后不生效？</strong></summary>
+<summary><b>修改了 Claude Code 配置但不生效？</b></summary>
 
-**A:** 修改 `settings.json` 后需要完全退出 Claude Code 重新启动，仅在终端内重启无效。
+需要**完全退出并重新启动** Claude Code（包括后台进程），配置只在启动时读取一次。
 </details>
 
 <details>
-<summary><strong>Q: Claude Code 配置中 ANTHROPIC_BASE_URL 带 /v1/messages 可以吗？</strong></summary>
+<summary><b>客户端报 404 错误？</b></summary>
 
-**A:** 不可以。Claude Code 会自动在 BASE_URL 后拼接 `/v1/models`、`/v1/messages` 等路径。如果写成 `http://localhost:3000/v1/messages`，实际会访问 `http://localhost:3000/v1/messages/v1/messages`，导致 404。务必只写到 `http://localhost:3000`。
+`ANTHROPIC_BASE_URL` / `Base URL` 只写到端口号：`http://localhost:3000`，**不要**再拼 `/v1/messages` 或 `/v1`（OpenAI 兼容客户端需写 `/v1` 的除外，见上文示例）。路径重复拼接会导致 404。
 </details>
 
 <details>
-<summary><strong>Q: 如何添加新的 Provider？</strong></summary>
+<summary><b>Claude Code 的 <code>/model</code> 列表不对？</b></summary>
 
-**A:** 推荐在 Electron 客户端的「Providers」页面通过表单添加，也支持连通性测试。也可直接编辑 `server/models.json` 添加配置。
+检查三点：① `ANTHROPIC_BASE_URL` 未包含路径；② 已重启 Claude Code；③ 已在 AiRoute 中配置好 Provider 和模型。列表由 AiRoute 的 `/v1/models` 实时提供。
 </details>
 
 <details>
-<summary><strong>Q: Claude Code 输入 /model 看到的模型列表不对？</strong></summary>
+<summary><b>auto 模式没有配置任何规则会怎样？</b></summary>
 
-**A:** 这说明 Claude Code 没有连上 AiRoute。
-- 检查 `ANTHROPIC_BASE_URL` 是否只写到端口号
-- 确认 AiRoute 服务已启动（访问 `http://localhost:3000/api/health`）
-- 确认 Claude Code 已完全重启
+未命中任何条件时会走「默认」规则的目标；若未配置默认规则，则兜底到第一个可用 Provider，不会报错。建议在「路由规则」页配置好各条件的映射。
 </details>
 
 <details>
-<summary><strong>Q: 如何查看请求日志？</strong></summary>
+<summary><b>如何添加 Provider？</b></summary>
 
-**A:** 日志按天存储在 `server/logs/usage-YYYY-MM-DD.log`，可通过 `GET /api/logs` 查询，或在 Electron 客户端的「日志」页面查看（同一任务的多次请求合并为一条记录，支持筛选与清空，页头显示目录占用体积）。
+打开「Provider 管理」页面，点击「添加 Provider」，填写名称、上游地址（Anthropic / OpenAI 至少一个）与 API Key，再为它添加模型即可。所有配置保存在本地 `server/models.json`（已加入 `.gitignore`，不会被提交）。
 </details>
 
 <details>
-<summary><strong>Q: AiRoute 会存储我的 API Key 吗？</strong></summary>
+<summary><b>API Key 会泄露吗？</b></summary>
 
-**A:** API Key 存储在 `server/models.json` 本地文件中，不出网。日志模块对 API Key 相关字段进行脱敏处理。`models.json` 已加入 `.gitignore`，不会被提交到仓库。
+Key 只存储在本地 `server/models.json`，该文件被 `.gitignore` 排除且打包时会剔除，不会出现在发布产物中；日志中相关字段也会自动脱敏。
 </details>
 
 <details>
-<summary><strong>Q: Auto 模式下没有配置路由规则会怎样？</strong></summary>
+<summary><b>局域网内其他设备连不上？</b></summary>
 
-**A:** 会兜底使用第一个可用的 Provider，不会报错。推荐至少配置一条默认规则。
+确认：① 客户端填写的是 AiRoute 所在电脑的局域网 IP（如 `192.168.1.10`）而不是 `localhost`；② 端口与 AiRoute 设置一致；③ Windows 防火墙已允许 AiRoute 通过（专用网络）。
+</details>
+
+<details>
+<summary><b>账号池显示「无可用账号」？</b></summary>
+
+在「账号池 → 详情」中查看具体原因：常见的是账号处于冷却或熔断保护期、余额不足已休眠到次日、或该模型被账号标记为不可用。多数情况等待保护期结束会自动恢复；持续异常可到「运行日志」按频道和关键词排查。
 </details>
 
 ---
 
-## 打包
+## 开发与打包
 
 ```bash
-pnpm build
+pnpm dev        # 开发模式（Electron 应用）
+pnpm build      # 打包便携版单文件 exe（app/dist-electron/AiRoute.exe）
+pnpm test       # WorkBuddy 模块离线测试
 ```
 
-构建产物为单个免安装文件 `app/dist-electron/AiRoute.exe`，约 85MB。
+> 打包脚本会自动排除 API Key（`models.json`）、WorkBuddy 凭证与个人运行数据，产物可放心分发。
+> 国内网络安装依赖较慢时，可改用镜像：`pnpm config set registry https://registry.npmmirror.com`
 
-> 国内用户如需加速下载 Electron 二进制包，构建前设置镜像：
-> ```powershell
-> $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
-> $env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'
-> ```
+---
+
+## 使用声明
+
+- 本项目完全开源免费，仅供个人学习与技术研究使用；严禁任何形式的倒卖、加价转售或商业化包装分发
+- 请在遵守各上游平台服务条款的前提下使用本项目；使用 WorkBuddy 账号池等自动化能力可能带来的账号风险由使用者自行承担
+- 项目不对账号封禁、额度损失或数据丢失承担任何责任
 
 ---
 
 ## 许可
 
-MIT License
+[MIT License](LICENSE)
+
+
+

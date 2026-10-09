@@ -45,6 +45,46 @@
         <div class="config-hint">开启后系统启动时将自动打开 AiRoute 桌面客户端</div>
       </div>
     </div>
+
+    <div class="section">
+      <h2 class="section-title">关于与更新</h2>
+      <div class="card">
+        <div class="config-row">
+          <label class="config-label">当前版本</label>
+          <div class="config-control">
+            <span class="version-text">v{{ info?.current || '未检查' }}</span>
+            <button class="btn-ghost btn-sm" :disabled="checking" @click="runCheck(false, true)">
+              {{ checking ? '检查中...' : '检查更新' }}
+            </button>
+          </div>
+        </div>
+        <div v-if="info" class="config-row">
+          <label class="config-label">最新版本</label>
+          <div class="config-control">
+            <span class="version-text">v{{ info.latest }}</span>
+            <span v-if="info.hasUpdate" class="update-tag">有新版本可用</span>
+            <span v-else class="latest-tag">已是最新</span>
+          </div>
+        </div>
+        <div v-if="error" class="warning-box">⚠ {{ error }}</div>
+        <div v-if="info && info.hasUpdate" class="update-block">
+          <div v-if="info.publishedAt" class="config-hint">发布时间：{{ info.publishedAt.slice(0, 10) }}</div>
+          <pre v-if="info.notes" class="update-notes">{{ info.notes }}</pre>
+          <div class="config-control">
+            <button v-if="!savedPath" class="btn-primary" :disabled="downloading" @click="startDownload">
+              {{ downloading ? `下载中 ${percent}%` : `下载新版本 v${info.latest}` }}
+            </button>
+            <button v-else class="btn-primary" @click="openFolder">打开文件夹</button>
+            <button class="btn-ghost" @click="openReleasePage">查看 Release 页面</button>
+          </div>
+          <div v-if="downloading" class="progress-track">
+            <div class="progress-fill" :style="{ width: percent + '%' }"></div>
+          </div>
+          <div v-if="savedPath" class="config-hint">已保存到：{{ savedPath }}</div>
+          <div class="config-hint">下载完成后请退出 AiRoute，用新文件替换当前 AiRoute.exe（不会自动替换）</div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -52,11 +92,15 @@
 import { ref, onMounted } from 'vue'
 import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort } from '../api.js'
 import { showToast } from '../composables/useToast.js'
+import { useUpdate } from '../composables/useUpdate.js'
 
 const serverPort = ref(3000) // 端口输入框的值
 const portChanged = ref(false) // 端口已保存但尚未重启生效
 const restarting = ref(false) // 是否正在重启服务
 const autoLaunch = ref(false) // 开机自启开关状态
+
+// 更新功能共享状态与方法（与侧边栏提示条同源）
+const { info, checking, downloading, percent, savedPath, error, runCheck, startDownload, openFolder, openReleasePage } = useUpdate()
 
 // 统一提取接口错误信息用于提示
 function errorText(err) {
@@ -236,5 +280,63 @@ onMounted(loadData)
   background: var(--primary-bg);
   color: var(--primary);
   border-color: var(--primary);
+}
+
+.version-text {
+  font-size: 14px;
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.update-tag {
+  font-size: 12px;
+  color: var(--primary);
+  background: var(--primary-bg);
+  padding: 2px 10px;
+  border-radius: 20px;
+}
+
+.latest-tag {
+  font-size: 12px;
+  color: var(--success);
+  background: rgba(0, 181, 120, 0.08);
+  padding: 2px 10px;
+  border-radius: 20px;
+}
+
+.update-block {
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.update-notes {
+  background: var(--bg-page);
+  border: 1px solid var(--border-1);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.7;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+.progress-track {
+  height: 6px;
+  background: var(--border-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s;
 }
 </style>

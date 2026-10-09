@@ -374,3 +374,20 @@ export function wbSchedulerRun(task) {
 export function wbSchedulerUpdate(patch) {
   return api.put('/api/workbuddy/scheduler', patch).then(r => r.data)
 }
+
+// ==================== 更新检查 ====================
+
+// 查询最新版本；force 为 true 时跳过服务端 30 分钟缓存（手动检查用）
+export function checkUpdate(force = false) {
+  return api.get('/api/update/check', { params: force ? { force: 1 } : {} }).then(r => r.data)
+}
+
+// 启动应用内下载（tag + 保存路径），返回初始下载状态
+export function startUpdateDownload(tag, savePath) {
+  return api.post('/api/update/download', { tag, savePath }).then(r => r.data)
+}
+
+// 下载进度快照（前端轮询）
+export function getUpdateProgress() {
+  return api.get('/api/update/download/progress').then(r => r.data)
+}

@@ -4,6 +4,12 @@
       <h1 class="page-title">使用教程</h1>
     </div>
 
+    <!-- 打赏区域：位于页面开头，居中展示二维码与说明文字 -->
+    <div class="donate">
+      <img class="donate-img" :src="donateImg" alt="微信打赏二维码" />
+      <p class="donate-text">如果 AiRoute 帮到了你，欢迎扫码打赏支持作者</p>
+    </div>
+
     <div class="tutorial-content">
       <!-- 一、接入指南 -->
       <section class="section">
@@ -167,6 +173,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { getServerConfig } from '../api.js'
+import donateImg from '../assets/donate.jpg' // 打赏二维码图片，构建时由 Vite 处理为相对路径
 
 const serverPort = ref(3000) // 当前服务端口，从服务端配置读取，失败时保持默认 3000
 const lanIPs = ref([]) // 本机局域网 IPv4 列表（服务端动态检测，物理网卡优先）
@@ -195,6 +202,25 @@ onMounted(loadConfig)
   font-size: 22px;
   font-weight: 600;
   color: var(--text-1);
+}
+
+/* 打赏区域：标题下方居中展示二维码与说明文字 */
+.donate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 32px;
+}
+
+.donate-img {
+  width: 180px;
+  border-radius: 10px;
+}
+
+.donate-text {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-3);
 }
 
 .tutorial-content {
