@@ -85,7 +85,7 @@ async function updateMenu(tray, mainWindow) {
     providers = {}
   }
 
-  // 切换模型：写入服务端后重建菜单，保证所有 radio 的选中态一致
+  // 切换模型：写入服务端后重建菜单，保证所有勾选项状态一致
   const switchTo = (ref) => async () => {
     try {
       await axios.post(`${getApiBase()}/api/state`, { current: ref })
@@ -101,7 +101,7 @@ async function updateMenu(tray, mainWindow) {
       const ref = `${name}/${model.id}`
       return {
         label: model.displayName || model.id,
-        type: 'radio',
+        type: 'checkbox',
         checked: currentModel === ref,
         click: switchTo(ref)
       }
@@ -114,7 +114,7 @@ async function updateMenu(tray, mainWindow) {
     ...providerItems,
     {
       label: 'Auto (智能路由)',
-      type: 'radio',
+      type: 'checkbox',
       checked: currentModel === 'auto',
       click: switchTo('auto')
     },

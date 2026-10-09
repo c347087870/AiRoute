@@ -2,9 +2,12 @@
   <div class="token-stats-page">
     <div class="page-header">
       <h1 class="page-title">Token 使用统计</h1>
-      <button class="btn-ghost" @click="refreshData" :disabled="loading">
-        {{ loading ? '刷新中...' : '刷新' }}
-      </button>
+      <div class="header-actions">
+        <button class="btn-danger btn-sm" @click="clearStats" :disabled="loading">清空</button>
+        <button class="btn-ghost" @click="refreshData" :disabled="loading">
+          {{ loading ? '刷新中...' : '刷新' }}
+        </button>
+      </div>
     </div>
 
     <!-- 时间维度选择 -->
@@ -238,7 +241,8 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats } from '../api.js'
+import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats, clearTokenStats } from '../api.js'
+import { showToast } from '../composables/useToast.js'
 import { formatNumber, toLocalDateKey } from '../utils/format.js'
 
 // 时间维度选项
@@ -519,6 +523,20 @@ async function refreshData() {
   await loadPeriodData(selectedPeriod.value)
 }
 
+// 清空全部 Token 统计（二次确认，不可恢复；状态面板请求数同源一并归零）
+async function clearStats() {
+  const confirmed = window.confirm('确定清空全部 Token 统计吗？\n\n此操作不可恢复：按日/月/时/模型的统计与最近请求明细都会永久删除，状态面板的请求数也会同步归零。')
+  if (!confirmed) return
+
+  try {
+    await clearTokenStats()
+    await refreshData()
+    showToast('Token 统计已清空')
+  } catch (err) {
+    showToast('清空 Token 统计失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
+  }
+}
+
 onMounted(() => {
   loadPeriodData(selectedPeriod.value)
 })
@@ -534,6 +552,12 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 24px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .page-title {

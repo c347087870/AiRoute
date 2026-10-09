@@ -1,12 +1,13 @@
 {
   "name": "aiRoute",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "本地 LLM 多模型调度网关",
   "private": true,
   "main": "app/main/main.js",
   "scripts": {
     "dev": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development npx electron .\"",
-    "build": "node scripts/build.js"
+    "build": "node scripts/build.js",
+    "test": "cross-env ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe scripts/test-workbuddy.js"
   },
   "keywords": ["llm", "router", "gateway", "anthropic", "openai", "electron"],
   "author": "c",

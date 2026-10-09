@@ -243,6 +243,17 @@ function getAllStats() {
   }
 }
 
+// 清空全部统计（不可恢复）：五个维度归零并立即落盘，同时清掉待落盘定时器避免回写旧数据
+function clearAllStats() {
+  statsCache = { byDay: {}, byMonth: {}, byHour: {}, byModel: {}, requests: [] }
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  dirty = false
+  saveStats()
+}
+
 function getModelStats(model) {
   return statsCache.byModel[model] || initStatObj()
 }
@@ -341,6 +352,7 @@ process.on('exit', flush)
 module.exports = {
   recordTokens,
   recordFailure,
+  clearAllStats,
   getRequestSummary,
   getAllStats,
   getModelStats,

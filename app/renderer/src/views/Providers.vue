@@ -2,11 +2,21 @@
   <div class="providers">
     <div class="page-header">
       <h1 class="page-title">Provider 管理</h1>
-      <button class="btn-primary" @click="showAdd = true">+ 新增 Provider</button>
+      <div class="header-actions">
+        <button class="btn-ghost" @click="openAddModal('')">+ 通用 Provider</button>
+        <button
+          class="btn-primary"
+          :disabled="hasWorkbuddyProvider"
+          :title="hasWorkbuddyProvider ? 'WorkBuddy 源只能有一个（账号池中的全部账号自动轮转）' : ''"
+          @click="openAddModal('workbuddy')"
+        >
+          {{ hasWorkbuddyProvider ? '已有 WorkBuddy 源' : '+ 添加 WorkBuddy 账号池' }}
+        </button>
+      </div>
     </div>
 
     <div v-if="!providerCount" class="card empty-state">
-      还没有配置任何 Provider，点击右上角「新增 Provider」开始。
+      还没有配置任何 Provider，点击右上角「+ 通用 Provider」或「+ 添加 WorkBuddy 账号池」开始。
     </div>
 
     <div v-else class="provider-list">
@@ -20,23 +30,32 @@
           <div class="row-head">
             <span class="row-name">{{ provider.displayName || name }}</span>
             <span class="row-id">{{ name }}</span>
+            <span v-if="provider.type === 'workbuddy'" class="badge-type">账号池</span>
             <span v-if="isCurrentProvider(name)" class="badge-current">当前</span>
             <span class="row-count">{{ provider.models?.length || 0 }} 个模型</span>
           </div>
 
           <div class="row-meta">
-            <span class="meta-item">
-              <span class="meta-label">Anthropic</span>
-              <span class="meta-value" :title="provider.baseURL || ''">{{ provider.baseURL || '未配置' }}</span>
-            </span>
-            <span class="meta-item">
-              <span class="meta-label">OpenAI</span>
-              <span class="meta-value" :title="provider.openaiURL || ''">{{ provider.openaiURL || '未配置' }}</span>
-            </span>
-            <span class="meta-item">
-              <span class="meta-label">Key</span>
-              <span class="meta-value">{{ provider.apiKey || '未配置' }}</span>
-            </span>
+            <template v-if="provider.type === 'workbuddy'">
+              <span class="meta-item">
+                <span class="meta-label">类型</span>
+                <span class="meta-value">WorkBuddy 账号池（OAuth 登录 / 自动轮转）</span>
+              </span>
+            </template>
+            <template v-else>
+              <span class="meta-item">
+                <span class="meta-label">Anthropic</span>
+                <span class="meta-value" :title="provider.baseURL || ''">{{ provider.baseURL || '未配置' }}</span>
+              </span>
+              <span class="meta-item">
+                <span class="meta-label">OpenAI</span>
+                <span class="meta-value" :title="provider.openaiURL || ''">{{ provider.openaiURL || '未配置' }}</span>
+              </span>
+              <span class="meta-item">
+                <span class="meta-label">Key</span>
+                <span class="meta-value">{{ provider.apiKey || '未配置' }}</span>
+              </span>
+            </template>
           </div>
 
           <div class="row-models">
@@ -93,7 +112,7 @@
     <div v-if="showAdd || editingName" class="modal-overlay">
       <div class="card modal">
         <div class="modal-header">
-          <h2>{{ editingName ? '编辑 Provider' : '新增 Provider' }}</h2>
+          <h2>{{ modalTitle }}</h2>
           <button class="modal-close" @click="closeModal">×</button>
         </div>
         <div class="form">
@@ -105,6 +124,63 @@
             显示名称
             <input v-model="form.displayName" placeholder="如: 智谱 GLM" />
           </label>
+          <!-- 类型由新增入口决定，编辑时只读展示 -->
+          <div v-if="editingName" class="form-type-line">
+            类型：{{ form.type === 'workbuddy' ? 'WorkBuddy 账号池' : '通用端点（OpenAI / Anthropic）' }}
+          </div>
+
+          <!-- WorkBuddy 类型：账号池中的全部账号自动轮转，这里只读展示 -->
+          <div v-if="form.type === 'workbuddy'" class="wb-entry">
+            <div class="wb-entry-header">
+              <span class="wb-entry-title">账号（{{ wbAccounts.length }} 个，自动轮转）</span>
+              <router-link to="/workbuddy" class="wb-entry-link">前往账号池页面管理 →</router-link>
+            </div>
+            <div class="wb-entry-hint">
+              账号池中的全部账号都参与本源的请求轮转（自动换号、限流冷却、会话粘性），无需在此选择。
+            </div>
+            <div v-if="!wbAccounts.length" class="wb-entry-empty">
+              账号池还没有账号，请先到「账号池」页面通过 OAuth 添加账号。
+            </div>
+            <div v-else class="wb-account-list">
+              <div v-for="acct in wbAccounts" :key="acct.uid" class="wb-account-item">
+                <span class="wb-account-name">{{ acct.nickname || acct.uid.slice(0, 12) }}</span>
+                <span class="wb-account-state" :class="accountStateClass(acct)">{{ accountStateLabel(acct) }}</span>
+              </div>
+            </div>
+
+            <div class="wb-entry-header">
+              <span class="wb-entry-title">模型清单</span>
+              <router-link to="/workbuddy" class="wb-entry-link">调整启用模型 →</router-link>
+            </div>
+            <div class="wb-entry-hint">
+              {{ editingName ? '模型清单来自' : '已默认带出' }}账号池「模型和档位」中启用的全部模型（共
+              {{ wbModelList.length }} 个）{{ editingName ? '，保存后自动同步。' : '，保存后生效。' }}
+            </div>
+            <div class="wb-model-chips">
+              <div v-for="m in wbModelList" :key="m.id" class="wb-model-row">
+                <span class="wb-model-chip">{{ m.id }}</span>
+                <select
+                  class="effort-select-sm"
+                  :value="effortSelectValue(m)"
+                  @change="onEffortSelect(m, $event.target.value)"
+                >
+                  <option value="">默认（不干预）</option>
+                  <option value="low">low</option>
+                  <option value="high">high</option>
+                  <option value="max">max</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="__custom">自定义…</option>
+                </select>
+                <input v-model="m.reasoningEffort" class="effort-input" placeholder="或输入自定义值" />
+              </div>
+              <span v-if="!wbModelList.length" class="wb-entry-empty">尚未配置模型，请到账号池页面勾选要启用的模型。</span>
+            </div>
+            <div class="wb-entry-hint">
+              推理档位逐模型独立配置（WorkBuddy 源不回落全局档位）：下拉可选 low / high / max / xhigh，或直接输入自定义值；选「默认」表示不改写客户端请求的档位。
+            </div>
+          </div>
+
+          <template v-else>
           <label>
             Anthropic URL
             <input v-model="form.baseURL" placeholder="https://api.example.com/anthropic" />
@@ -123,14 +199,16 @@
               <button class="key-copy-btn" @click="copyKey" title="复制">📋</button>
             </div>
           </label>
+          </template>
 
-          <div class="model-editor">
+          <div v-if="form.type !== 'workbuddy'" class="model-editor">
             <div class="model-editor-header">
               <span class="model-editor-title">模型列表</span>
               <button class="btn-ghost btn-sm" @click="addModelRow">+ 添加模型</button>
             </div>
             <div class="model-editor-hint">
               第一个模型为默认模型。最大上下文与最大输出不填即为空，填写后会在请求未指定 max_tokens 时自动注入。
+              推理档位逐模型配置（下拉可选 low / high / max / xhigh，或输入自定义值），选「默认」表示不干预客户端请求。
             </div>
 
             <div v-for="(model, index) in form.models" :key="index" class="model-edit-row">
@@ -148,6 +226,22 @@
                   <span class="limit-label">最大输出</span>
                   <input v-model="model.maxOutput" type="number" min="1" placeholder="留空" />
                 </div>
+              </div>
+              <div class="model-edit-line model-edit-effort">
+                <span class="limit-label">推理档位</span>
+                <select
+                  class="effort-select-sm"
+                  :value="effortSelectValue(model)"
+                  @change="onEffortSelect(model, $event.target.value)"
+                >
+                  <option value="">默认（不干预）</option>
+                  <option value="low">low</option>
+                  <option value="high">high</option>
+                  <option value="max">max</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="__custom">自定义…</option>
+                </select>
+                <input v-model="model.reasoningEffort" class="effort-input" placeholder="或输入自定义值" />
               </div>
             </div>
 
@@ -168,7 +262,15 @@
 import { ref, computed, onMounted } from 'vue'
 import { useModel } from '../composables/useModel.js'
 import { showToast } from '../composables/useToast.js'
-import { getProviderFull, addProvider, updateProvider, deleteProvider, testProvider } from '../api.js'
+import {
+  getProviderFull,
+  addProvider,
+  updateProvider,
+  deleteProvider,
+  testProvider,
+  wbAccounts as fetchWbAccounts,
+  wbEnabledModels
+} from '../api.js'
 import { formatNumber } from '../utils/format.js'
 
 // 模型 chip 超过该数量时折叠，点击 +N 展开
@@ -182,14 +284,27 @@ const editingName = ref('') // 正在编辑的 provider 名
 const showKey = ref(false) // API Key 密码/明文切换
 const expanded = ref(new Set()) // 已展开全部模型的 provider 名
 const form = ref(emptyForm()) // 编辑表单数据
+const wbAccounts = ref([]) // WorkBuddy 账号池的账号列表（只读展示自动轮转的账号）
+const enabledModels = ref([]) // 账号池统一维护的启用模型清单（只读展示）
+const wbModelList = ref([]) // WorkBuddy 表单的模型清单（由启用清单构建，档位可逐模型编辑）
 
 const providerCount = computed(() => Object.keys(providers.value).length)
+
+// 是否已存在 WorkBuddy 源（全局唯一，已存在时禁用新增入口）
+const hasWorkbuddyProvider = computed(() => Object.values(providers.value).some(p => p.type === 'workbuddy'))
+
+// 弹窗标题：编辑态显示「编辑 Provider」，新增态按入口类型区分
+const modalTitle = computed(() => {
+  if (editingName.value) return '编辑 Provider'
+  return form.value.type === 'workbuddy' ? '添加 WorkBuddy 账号池' : '新增通用 Provider'
+})
 
 // 生成一份空白表单
 function emptyForm() {
   return {
     name: '', // Provider ID
     displayName: '', // 显示名称
+    type: '', // Provider 类型（空=通用端点，workbuddy=账号池）
     baseURL: '', // Anthropic 端点 URL
     openaiURL: '', // OpenAI 端点 URL
     apiKey: '', // API Key
@@ -197,9 +312,66 @@ function emptyForm() {
   }
 }
 
+// 加载账号池数据（账号列表 + 启用模型清单），供 WorkBuddy 类型表单使用
+// existingModels：编辑态传入当前 Provider 的模型列表，用于回填各模型已配置的推理档位
+async function loadWorkbuddyData(existingModels) {
+  try {
+    const [acctRes, modelRes] = await Promise.all([fetchWbAccounts(), wbEnabledModels()])
+    wbAccounts.value = acctRes.accounts || []
+    enabledModels.value = modelRes.models || []
+  } catch {
+    // 账号池接口不可用时静默降级（表单仍可保存通用配置）
+    wbAccounts.value = []
+    enabledModels.value = []
+  }
+  wbModelList.value = buildWbModelList(existingModels)
+}
+
+// 由账号池启用清单构建 WorkBuddy 模型列表（保留当前 Provider 已配置的模型级档位）
+function buildWbModelList(existingModels) {
+  const effortByID = new Map((existingModels || []).map(m => [m.id, m.reasoningEffort || '']))
+  return enabledModels.value.map(m => ({
+    id: m.id,
+    displayName: m.displayName || '',
+    maxContext: m.maxContext ?? null,
+    maxOutput: m.maxOutput ?? null,
+    reasoningEffort: effortByID.get(m.id) || ''
+  }))
+}
+
+// 账号状态标签文案（与账号池页面保持同一口径）
+function accountStateLabel(acct) {
+  if (acct.disabled) return '已禁用'
+  if (acct.cooling) return '冷却中'
+  return '可用'
+}
+
+// 账号状态标签样式类
+function accountStateClass(acct) {
+  if (acct.disabled) return 'is-bad'
+  if (acct.cooling) return 'is-warn'
+  return 'is-ok'
+}
+
+// 档位预设选项（下拉可快速选择；输入框可自由输入自定义值）
+const EFFORT_PRESETS = ['low', 'high', 'max', 'xhigh']
+
+// 档位下拉的当前显示值：预设值原样返回，自定义值返回 __custom，空值返回 ''（默认）
+function effortSelectValue(model) {
+  const v = (model.reasoningEffort || '').trim()
+  if (!v) return ''
+  return EFFORT_PRESETS.includes(v) ? v : '__custom'
+}
+
+// 档位下拉变更：选预设即写入；选「自定义」不改值（由输入框接管）
+function onEffortSelect(model, value) {
+  if (value === '__custom') return
+  model.reasoningEffort = value
+}
+
 // 生成一行空白模型配置
 function emptyModel() {
-  return { id: '', displayName: '', maxContext: null, maxOutput: null }
+  return { id: '', displayName: '', maxContext: null, maxOutput: null, reasoningEffort: '' }
 }
 
 // 当前激活的 Provider 名（currentModel 形如 provider/model）
@@ -249,12 +421,13 @@ function removeModelRow(index) {
   form.value.models.splice(index, 1)
 }
 
-// 打开编辑弹窗，加载完整的 apiKey
+// 打开编辑弹窗，加载完整的 apiKey 与账号池数据
 async function editProvider(name, provider) {
   editingName.value = name
   form.value = {
     name,
     displayName: provider.displayName || '',
+    type: provider.type || '',
     baseURL: provider.baseURL || '',
     openaiURL: provider.openaiURL || '',
     apiKey: '', // 先置空，下面异步回填
@@ -268,10 +441,19 @@ async function editProvider(name, provider) {
       : [emptyModel()]
   }
   showKey.value = false
+  if (form.value.type === 'workbuddy') loadWorkbuddyData(provider.models)
   try {
     const full = await getProviderFull(name)
     form.value.apiKey = full.apiKey || ''
   } catch {}
+}
+
+// 打开新增弹窗：type 为空 = 通用 Provider，'workbuddy' = WorkBuddy 账号池（由入口按钮决定类型）
+function openAddModal(type = '') {
+  resetForm()
+  form.value.type = type
+  if (type === 'workbuddy') loadWorkbuddyData()
+  showAdd.value = true
 }
 
 // 复制 apiKey 到剪贴板
@@ -298,26 +480,45 @@ function toLimitOrNull(value) {
 
 // 保存 provider
 async function saveProvider() {
-  const models = form.value.models
-    .map(m => ({
-      id: (m.id || '').trim(),
-      displayName: (m.displayName || '').trim(),
-      maxContext: toLimitOrNull(m.maxContext),
-      maxOutput: toLimitOrNull(m.maxOutput)
-    }))
-    .filter(m => m.id)
+  const isWorkbuddy = form.value.type === 'workbuddy'
+  // WorkBuddy 类型的模型清单来自账号池统一配置（档位在 Provider 侧逐模型独立配置）；通用类型用表单里的模型编辑区
+  const models = isWorkbuddy
+    ? wbModelList.value
+        .map(m => ({
+          id: (m.id || '').trim(),
+          displayName: (m.displayName || '').trim(),
+          maxContext: m.maxContext ?? null,
+          maxOutput: m.maxOutput ?? null,
+          reasoningEffort: (m.reasoningEffort || '').trim()
+        }))
+        .filter(m => m.id)
+    : form.value.models
+        .map(m => ({
+          id: (m.id || '').trim(),
+          displayName: (m.displayName || '').trim(),
+          maxContext: toLimitOrNull(m.maxContext),
+          maxOutput: toLimitOrNull(m.maxOutput),
+          reasoningEffort: (m.reasoningEffort || '').trim()
+        }))
+        .filter(m => m.id)
 
   if (!form.value.name.trim()) {
     showToast('请填写 Provider 名称', 'error')
     return
   }
   if (!models.length) {
-    showToast('至少需要一个模型，且模型 ID 不能为空', 'error')
+    showToast(
+      isWorkbuddy
+        ? '账号池尚未配置模型，请先到「账号池」页面的「模型和档位」勾选要启用的模型'
+        : '至少需要一个模型，且模型 ID 不能为空',
+      'error'
+    )
     return
   }
 
   const data = {
     displayName: form.value.displayName.trim(),
+    type: form.value.type,
     baseURL: form.value.baseURL.trim(),
     openaiURL: form.value.openaiURL.trim(),
     apiKey: form.value.apiKey,
@@ -374,12 +575,14 @@ async function setAsCurrent(name) {
   await useModelRef(`${name}/${first.id}`)
 }
 
-// 测试连通性，默认测第一个模型
+// 测试连通性：优先使用当前选中的模型（未选中该 Provider 的模型时回落第一个模型）
 async function runTest(name) {
   testingName.value = name
   testResults.value[name] = null
+  const ref = currentModel.value || ''
+  const modelId = ref.startsWith(`${name}/`) ? ref.slice(name.length + 1) : ''
   try {
-    testResults.value[name] = await testProvider(name)
+    testResults.value[name] = await testProvider(name, modelId)
   } catch (err) {
     testResults.value[name] = { ok: false, error: '请求失败', latency: 0 }
   }
@@ -403,6 +606,20 @@ onMounted(() => {
   font-size: 22px;
   font-weight: 600;
   color: var(--text-1);
+}
+
+/* 右上角新增入口按钮组（通用 Provider / WorkBuddy 账号池） */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 编辑弹窗中的只读类型行 */
+.form-type-line {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 2px 0;
 }
 
 .empty-state {
@@ -478,6 +695,152 @@ onMounted(() => {
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 500;
+}
+
+/* WorkBuddy 账号池类型徽标 */
+.badge-type {
+  font-size: 11px;
+  background: rgba(59, 130, 246, 0.08);
+  color: #2563EB;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+/* WorkBuddy 类型在表单中的账号管理入口 */
+.wb-entry {
+  border: 1px solid var(--border-1);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #FAFCFF;
+}
+
+/* 区块标题行（标题 + 右侧跳转链接） */
+.wb-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.wb-entry-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.wb-entry-link {
+  font-size: 12px;
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.wb-entry-link:hover {
+  text-decoration: underline;
+}
+
+.wb-entry-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
+.wb-entry-empty {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* 账号只读列表（最多高度内滚动） */
+.wb-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.wb-account-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.wb-account-name {
+  flex: 1;
+  color: var(--text-1);
+}
+
+.wb-account-state {
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.wb-account-state.is-ok { color: #16A34A; background: #ECFDF5; }
+.wb-account-state.is-warn { color: #D97706; background: #FFFBEB; }
+.wb-account-state.is-bad { color: #DC2626; background: #FEF2F2; }
+
+/* 模型清单列表（每行：模型 id + 推理档位输入） */
+.wb-model-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* 单个模型行（id chip + 档位输入） */
+.wb-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 推理档位快捷选择（与右侧自定义输入框配合使用） */
+.effort-select-sm {
+  width: 130px;
+  font-size: 12px;
+  padding: 3px 4px;
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  background: #FFFFFF;
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.effort-select-sm:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* 推理档位自定义输入框 */
+.effort-input {
+  width: 130px;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  background: #FFFFFF;
+  color: var(--text-1);
+}
+
+.effort-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.wb-model-chip {
+  font-size: 11px;
+  font-family: 'Courier New', Consolas, monospace;
+  color: var(--text-2);
+  background: #EEF3FA;
+  border-radius: 4px;
+  padding: 2px 6px;
 }
 
 .row-count {
@@ -651,7 +1014,7 @@ onMounted(() => {
 }
 
 .modal {
-  width: 520px;
+  width: 560px;
   max-height: 84vh;
   overflow-y: auto;
 }
@@ -761,7 +1124,7 @@ onMounted(() => {
 .model-edit-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   background: #FFFFFF;
   border: 1px solid var(--border-1);
   border-radius: 10px;
@@ -814,6 +1177,25 @@ onMounted(() => {
 
 .limit-field input {
   flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+/* 推理档位行：下拉固定宽，自定义输入占满剩余空间，与上下限输入同高 */
+.model-edit-effort .effort-select-sm {
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.model-edit-effort .effort-input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.model-edit-row .effort-select-sm,
+.model-edit-row .effort-input {
   padding: 6px 10px;
   font-size: 13px;
 }

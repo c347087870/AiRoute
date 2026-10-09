@@ -17,6 +17,6 @@
   ],
   "win": {
     "target": "portable",
-    "icon": "app/renderer/public/icon.png"
+    "icon": "app/renderer/public/icon.ico"
   }
 }

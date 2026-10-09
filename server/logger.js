@@ -54,7 +54,7 @@ function readEntriesFromFile(fileName) {
 
 function matchKeyword(entry, keyword) {
   if (!keyword) return true
-  const target = `${entry.model || ''} ${entry.error || ''} ${entry.fallbackFrom || ''}`.toLowerCase()
+  const target = `${entry.model || ''} ${entry.error || ''} ${entry.fallbackFrom || ''} ${entry.input || ''}`.toLowerCase()
   return target.includes(keyword.toLowerCase())
 }
 
@@ -65,24 +65,48 @@ function matchStatus(entry, statusFilter) {
   return String(entry.status) === String(statusFilter)
 }
 
-// 从最新的日志文件往前读，凑够 limit 条即停止，避免每次全量解析历史
+// 从最新的日志文件往前读；带 taskKey 的多次调用按任务合并为一条（一次提问一条记录）
+// 合并后再做状态/关键字过滤与条数截断，保证过滤结果与页面展示口径一致
 function getLogs(options = {}) {
   const { limit = 50, model = '', status = '', keyword = '' } = options || {}
   const max = Number(limit) > 0 ? Number(limit) : 50
-  const results = []
+  const RAW_CAP = 3000 // 单次查询最多扫描的原始条数（防大文件全量解析）
+
+  const groups = new Map() // taskKey → 原始条目（新→旧）
+  const standalone = [] // 无 taskKey 的逐条记录（新→旧）
+  let raw = 0
 
   for (const fileName of listLogFiles()) {
     const entries = readEntriesFromFile(fileName)
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i]
       if (model && entry.model !== model) continue
-      if (!matchStatus(entry, status)) continue
-      if (!matchKeyword(entry, keyword)) continue
-      results.push(entry)
-      if (results.length >= max) return results
+      if (entry.taskKey) {
+        const list = groups.get(entry.taskKey)
+        if (list) list.push(entry)
+        else groups.set(entry.taskKey, [entry])
+      } else {
+        standalone.push(entry)
+      }
+      raw++
+      if (raw >= RAW_CAP) break
     }
+    if (raw >= RAW_CAP) break
   }
 
+  // 组内新→旧，反转成旧→新后合并；与逐条记录一起按「末条完成时刻」倒序
+  const merged = []
+  for (const list of groups.values()) merged.push(mergeTaskEntries([...list].reverse()))
+  merged.push(...standalone)
+  merged.sort((a, b) => Date.parse(b.timestamp || 0) + (b.responseTime || 0) - (Date.parse(a.timestamp || 0) + (a.responseTime || 0)))
+
+  const results = []
+  for (const entry of merged) {
+    if (!matchStatus(entry, status)) continue
+    if (!matchKeyword(entry, keyword)) continue
+    results.push(entry)
+    if (results.length >= max) break
+  }
   return results
 }
 
@@ -97,13 +121,70 @@ function getLoggedModels() {
   return [...models].sort()
 }
 
+// 请求序号（面板日志顺序对齐；进程内单调递增）
+let seqCounter = 0
+
+// ===== 任务级合并（读时）=====
+// 同 taskKey 的多次请求（一次提问 + 其工具循环/换号重试）在读取时合并为一条：
+// 文件仍保留每次上游调用的原始记录（便于排查），页面与导出一任务一条。
+
+// token 速率派生字段（缺失且可算时补上）
+function deriveTokensPerSec(enriched) {
+  if (!enriched.tokensPerSec && enriched.totalTokens > 0 && enriched.responseTime > 0) {
+    enriched.tokensPerSec = Math.round((enriched.totalTokens / (enriched.responseTime / 1000)) * 10) / 10
+  }
+  return enriched
+}
+
+// 合并一组同任务记录（入参按时间升序）：时间/输入/模型取首条，Token 与积分累加，
+// 耗时 = 末条完成 - 首条开始，任一失败即失败（状态取首个非 200、错误取首个错误），
+// 账号取末条、ttfb 取首条非空；calls 记录上游调用次数；taskKey 为内部字段不出现在输出
+function mergeTaskEntries(list) {
+  const first = list[0]
+  let acc = { ...first, calls: 1 }
+  for (let i = 1; i < list.length; i++) {
+    const entry = list[i]
+    acc = {
+      ...acc,
+      status: acc.status !== 200 ? acc.status : entry.status,
+      error: acc.error || entry.error,
+      fallback: acc.fallback || entry.fallback || undefined,
+      fallbackFrom: acc.fallbackFrom || entry.fallbackFrom,
+      uid: entry.uid || acc.uid,
+      uid8: entry.uid ? entry.uid8 || String(entry.uid).slice(0, 8) : acc.uid8,
+      ttfbMs: acc.ttfbMs || entry.ttfbMs,
+      inputTokens: (acc.inputTokens || 0) + (entry.inputTokens || 0),
+      outputTokens: (acc.outputTokens || 0) + (entry.outputTokens || 0),
+      cacheReadTokens: (acc.cacheReadTokens || 0) + (entry.cacheReadTokens || 0),
+      cacheWriteTokens: (acc.cacheWriteTokens || 0) + (entry.cacheWriteTokens || 0),
+      totalTokens: (acc.totalTokens || 0) + (entry.totalTokens || 0),
+      stream: acc.stream || entry.stream || undefined,
+      input: acc.input || entry.input,
+      credits: (acc.credits || 0) + (entry.credits || 0) || undefined,
+      tokensPerSec: undefined,
+      calls: acc.calls + 1
+    }
+  }
+  // 耗时：末条完成时刻 - 首条开始时刻（timestamp 为完成时刻，responseTime 为本次耗时）
+  const firstStart = Date.parse(first.timestamp) - (first.responseTime || 0)
+  const lastEnd = Date.parse(list[list.length - 1].timestamp)
+  if (Number.isFinite(firstStart) && Number.isFinite(lastEnd) && lastEnd >= firstStart) {
+    acc.responseTime = lastEnd - firstStart
+  }
+  delete acc.taskKey
+  return deriveTokensPerSec(acc)
+}
+
+// 写一条请求日志（纯追加，保留每次上游调用的原始记录）；
+// 带 taskKey 的记录在读取时按任务合并（一任务一条）。
+// 自动补序号 / uid 前 8 位 / token 速率派生字段
 function log(entry) {
   ensureLogDir()
-  const line = JSON.stringify({
-    timestamp: new Date().toISOString(),
-    ...entry
-  }) + '\n'
-  fs.appendFileSync(path.join(paths.getLogDir(), getLogFileName()), line)
+  seqCounter++
+  const enriched = deriveTokensPerSec({ seq: seqCounter, ...(entry || {}) })
+  if (enriched.uid && !enriched.uid8) enriched.uid8 = String(enriched.uid).slice(0, 8)
+  const line = JSON.stringify({ timestamp: new Date().toISOString(), ...enriched })
+  fs.appendFileSync(path.join(paths.getLogDir(), getLogFileName()), line + '\n')
 }
 
 function clearLogs() {
@@ -113,4 +194,23 @@ function clearLogs() {
   }
 }
 
-module.exports = { log, getLogs, clearLogs, getLoggedModels }
+// 日志目录占用统计：总字节数 + 文件数（供前端提示存储体积）
+function getTotalSize() {
+  ensureLogDir()
+  let totalSize = 0
+  let fileCount = 0
+  for (const name of fs.readdirSync(paths.getLogDir())) {
+    try {
+      const stat = fs.statSync(path.join(paths.getLogDir(), name))
+      if (stat.isFile()) {
+        totalSize += stat.size
+        fileCount++
+      }
+    } catch {
+      /* 忽略并发消失的文件 */
+    }
+  }
+  return { totalSize, fileCount }
+}
+
+module.exports = { log, getLogs, clearLogs, getLoggedModels, getTotalSize }

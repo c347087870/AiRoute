@@ -54,7 +54,7 @@ function extractSystemMessages(reqBody) {
 }
 
 // 构造转发请求体：替换模型 ID，按需注入 max_tokens 与流式用量开关
-// reasoningEffort 为 AiRoute 客户端统一指定的推理档位（max/high/medium/low），off 表示移除该字段；
+// reasoningEffort 为 Provider 中该模型配置的推理档位（取值可自定义，如 low/high/max/xhigh），off 表示移除该字段；
 // 不透传请求里的原始值——CodeBuddy 等客户端可能发出上游不认识的档位（如 xhigh），lkeap 会直接报 400
 function buildRequestBody(body, model, isStream, isAnthropic, reasoningEffort) {
   const reqBody = { ...body, model: model.id }

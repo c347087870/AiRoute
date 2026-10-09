@@ -17,6 +17,14 @@
 
 ![路由规则](assets/3.png)
 
+![模型测分](assets/4-benchmark.png)
+
+![Token 统计](assets/5-tokenstats.png)
+
+![设置](assets/7-settings.png)
+
+![使用教程](assets/8-tutorial.png)
+
 ---
 
 ## 为什么选择 AiRoute
@@ -27,6 +35,7 @@
 - **双协议支持** — 每个 Provider 可分别配置 Anthropic 和 OpenAI 端点，请求直接走对应协议，不做格式转换
 - **故障自愈** — 主模型挂了自动 fallback，对客户端完全透明
 - **可视化操作** — Electron 桌面应用，所有配置（Provider、规则、Fallback）均在界面完成
+- **WorkBuddy 账号池** — 无需 API Key，OAuth 登录 WorkBuddy 账号池，多号轮转共享额度、失败自动换号重试
 - **开箱即用** — 打包后为单个 exe 文件，内置 Express 服务无需额外安装部署，双击即用
 
 ---
@@ -46,9 +55,10 @@
 └──────┬──────────┬──────────┬─────────────┘
        │          │          │
        ▼          ▼          ▼
-   ┌──────┐  ┌──────┐  ┌──────┐
-   │ GLM  │  │ 小米 │  │Claude│  ···
-   └──────┘  └──────┘  └──────┘
+   ┌──────┐  ┌──────┐  ┌──────┐  ┌───────────────────────┐
+   │ GLM  │  │ 小米 │  │Claude│  │WorkBuddy 账号池       │
+   └──────┘  └──────┘  └──────┘  │多号轮转 · 失败换号    │
+                                 └───────────────────────┘
 ```
 
 ---
@@ -116,10 +126,11 @@ my-provider/model-large     my-provider/model-small     auto
 
 ### 日志系统
 
-- 记录：时间戳、模型、响应时间、状态码、输入/输出/缓存读/缓存写 Token、fallback 信息
+- 记录：时间戳、模型、响应时间、状态码、输入/输出/缓存读/缓存写 Token、使用记录（输入文案）、积分消耗、fallback 信息
+- 同一任务（一次输入及其后续工具调用）合并为一条记录，不再逐请求罗列
 - 脱敏处理：API Key 相关字段自动隐藏
-- 按天分文件存储（`logs/usage-YYYY-MM-DD.log`），在客户端「日志」页面可一键清空
-- 在客户端「日志」页面按模型/状态筛选、关键词搜索、导出 CSV、清空
+- 按天分文件存储（`logs/usage-YYYY-MM-DD.log`），在客户端「日志」页面可一键清空；页头显示日志目录占用体积与文件数
+- 在客户端「日志」页面按模型/状态筛选、清空
 
 ### Token 统计
 
@@ -150,14 +161,26 @@ my-provider/model-large     my-provider/model-small     auto
 - **评测维度**：总分与得分率、各分类得分率、成功/失败数、平均延迟、Token 消耗
 - 评测**直连 Provider**，不经过智能路由与 fallback，确保测的是目标模型本身
 
+### WorkBuddy 账号池
+
+内置的特殊 Provider：无需 API Key 和 URL，通过 OAuth 登录 WorkBuddy 账号，把账号池当作可轮转的模型来源使用。
+
+- **多号轮转**：请求自动调度到可用账号，失败自动换号重试；同一会话保持粘性
+- **维护自动化**：签到 / 保活 / 成长任务等由内置调度器定时执行
+- **模型清单**：在「账号池 → 模型和档位」页签统一维护，启用后与其他模型一样参与智能路由与 Fallback，引用格式为 `workbuddy/模型ID`
+- **账号池页签**：账号池、积分构成、用量、模型和档位、成长任务、定时任务、高级配置、运行日志
+
+接入步骤见下方「WorkBuddy 账号池」章节。
+
 ### Electron 可视化客户端
 
 | 页面 | 功能 |
 |---|---|
 | Dashboard | 当前模型、请求数统计、Token 用量（含缓存）、最近日志 |
 | Providers | 增删改 Provider 与模型、连通性测试、单模型切换 |
+| 账号池 | WorkBuddy 账号管理、多号轮转与积分用量、模型档位、定时任务、运行日志 |
 | 路由规则 | 智能路由规则编辑、fallback 配置 |
-| 日志 | 筛选/搜索、导出 CSV、清空 |
+| 日志 | 按任务合并、使用记录与积分消耗、目录占用提示、筛选、清空 |
 | Token 统计 | 用量趋势图、各模型用量占比 |
 | 模型测分 | 多模型跑分对比、题库编辑与导入导出 |
 | 设置 | 端口配置、推理档位、服务重启、开机自启 |
@@ -285,156 +308,29 @@ gpt-4-turbo                 gpt-3.5-turbo
 
 ---
 
-## API 参考
+## WorkBuddy 账号池
 
-### 核心代理
+WorkBuddy 是内置的特殊 Provider：**无需 API Key 和 URL**，通过 OAuth 登录 WorkBuddy 账号，把账号池当作模型来源使用。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `POST` | `/v1/messages` | Anthropic 协议代理 |
-| `POST` | `/v1/chat/completions` | OpenAI 协议代理 |
-| `GET` | `/v1/models` | 返回兼容的模型列表（含别名） |
+### 1. 添加账号
 
-### 模型管理
+在客户端「账号池」页面点击添加账号，按提示在浏览器中完成 OAuth 授权；支持添加多个账号。凭证仅保存在本地数据目录 `workbuddy-auths/` 中。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/state` | 获取当前激活模型引用 |
-| `POST` | `/api/state` | 切换当前模型 `{"current": "my-provider/model-large"}` |
+### 2. 启用模型
 
-### Provider 管理
+在「模型和档位」页签维护 WorkBuddy 的模型清单，启用后的模型会出现在 Dashboard、Providers 等所有模型列表中，可参与智能路由与 Fallback，引用格式为 `workbuddy/模型ID`。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/providers` | 列出所有 Provider（Key 脱敏，`model` 字段已归一化为 `models` 数组） |
-| `GET` | `/api/providers/:name/full` | 获取单个 Provider 完整信息 |
-| `POST` | `/api/providers/:name` | 新增 Provider（字段白名单，名称不能含 `/` 或空格） |
-| `PUT` | `/api/providers/:name` | 更新 Provider（apiKey 为空保留原值，`models` 整体替换） |
-| `DELETE` | `/api/providers/:name` | 删除 Provider，并同步清理 state / fallback / 路由规则中的悬空引用 |
-| `POST` | `/api/providers/:name/test` | 连通性测试，可选 `{"model": "模型ID"}` 指定模型；**测试用量不计入统计** |
+### 3. 多号轮转
 
-### Fallback
+请求自动调度到可用账号，失败自动换号重试且对客户端透明；同一会话保持粘性。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/fallback` | 获取 fallback 配置 |
-| `PUT` | `/api/fallback` | 设置 fallback 模型 `{"model": "my-provider/model-large"}` |
+### 4. 定时任务
 
-### 路由规则
+签到 / 保活 / 成长任务等维护任务由内置调度器自动执行，在「定时任务」页签可查看开关状态与执行记录。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/rules` | 获取智能路由规则 |
-| `PUT` | `/api/rules` | 更新路由规则（含 customRules） |
+### 5. 运行日志
 
-> `long_context` 条件按整轮对话字符数判定，超过约 12000 字符（中文约 8k Token 以上）命中。
-
-### 日志与统计
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/logs?limit=50&model=&status=&keyword=` | 获取日志，可按模型 / 状态(`success`/`failed`) / 关键词筛选 |
-| `GET` | `/api/logs/models` | 日志中出现过的模型引用列表 |
-| `DELETE` | `/api/logs` | 清空全部日志 |
-| `GET` | `/api/stats` | 请求数统计，与 Token 统计同源：`{ todayRequests, todayFailed, totalRequests, totalFailed, retentionDays }` |
-
-### Token 统计
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/token-stats` | 获取全部 Token 用量统计 |
-| `GET` | `/api/token-stats/today` | 今日 Token 用量 |
-| `GET` | `/api/token-stats/month` | 本月 Token 用量统计 |
-| `GET` | `/api/token-stats/model/:name` | 指定模型的 Token 用量 |
-| `GET` | `/api/token-stats/period/:days` | 指定天数内用量（1-30天） |
-| `GET` | `/api/token-stats/hourly/:date` | 某一天按小时统计 |
-
-> 统计对象结构：`{ input, output, cacheRead, cacheWrite, total, count, failed }`，`total = input + cacheRead + cacheWrite + output`。
-
-### 模型测分
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/benchmark/questions` | 获取题库（首次调用从内置题库复制一份到数据目录） |
-| `PUT` | `/api/benchmark/questions` | 整体保存题库 |
-| `POST` | `/api/benchmark/questions/import` | 导入题库，`{ questions, mode }`，mode 为 `replace`/`append` |
-| `POST` | `/api/benchmark/questions/reset` | 恢复内置题库 |
-| `POST` | `/api/benchmark/run` | 启动评测 `{ refs, questionIds, judgeRef, concurrency }`，返回 `{ runId, total }` |
-| `GET` | `/api/benchmark/status` | 评测进度 `{ running, runId, total, completed }` |
-| `GET` | `/api/benchmark/runs` | 历史列表（不含每题回答） |
-| `GET` | `/api/benchmark/runs/:id` | 单次详情（含每题回答） |
-| `DELETE` | `/api/benchmark/runs/:id` | 删除单条记录 |
-| `DELETE` | `/api/benchmark/runs` | 清空全部记录 |
-
-> 题目结构：`{ id, category, title, prompt, maxTokens?, scoring: { mode, maxScore, answer?, keywords?, pattern?, flags?, schema?, rubric? } }`
-> `mode` 取值：`exact`（完全相等）、`contains`（按关键词命中比例给分）、`regex`（正则命中即满分）、`json`（按 schema 校验，支持剥离 markdown 代码块）、`llm`（交给裁判模型按 rubric 打分）。
-
-### 系统
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/health` | 健康检查，返回 `{ status, uptime, port }` |
-| `GET` | `/api/server-config` | 获取服务配置 |
-| `PUT` | `/api/server-config` | 更新服务配置（端口、推理档位；档位仅允许 off/low/medium/high/max） |
-| `POST` | `/api/restart` | 重启监听（不退出进程，按当前配置重新 listen 端口） |
-
----
-
-## 项目结构
-
-```
-aiRoute/
-├── server/                      # Router 核心服务
-│   ├── .npmrc                    # pnpm 配置
-│   ├── router.js                # 请求代理入口（Express）
-│   ├── router-engine.js         # 智能路由引擎
-│   ├── models.js                # Provider / 模型引用解析、字段白名单、引用清理
-│   ├── benchmark.js             # 模型测分：题库管理、评分器、并发执行引擎
-│   ├── upstream.js              # 上游协议封装（端点/请求头/用量提取），router 与 benchmark 共用
-│   ├── token-stats.js           # Token 用量统计（含缓存维度）
-│   ├── logger.js                # 日志模块（按天分文件、筛选、清空）
-│   ├── paths.js                 # 数据目录与端口的统一入口
-│   ├── questions.json           # 内置题库（40 题，作为种子只读）
-│   ├── models.example.json      # Provider 配置模板
-│   ├── models.json              # Provider 配置（gitignore）
-│   ├── token-stats.json         # Token 用量数据（gitignore）
-│   ├── benchmark-questions.json # 可编辑题库（gitignore，首次运行从内置题库复制）
-│   ├── benchmark-runs.json      # 评测记录（gitignore，保留最近 20 次）
-│   ├── state.json               # 当前模型状态（存模型引用）
-│   ├── fallback.json            # Fallback 配置
-│   ├── rules.json               # 智能路由规则
-│   ├── server-config.json       # 服务配置（端口等）
-│   └── logs/                    # 日志目录（gitignore）
-│
-├── app/                         # Electron 可视化客户端
-│   ├── main/                    # 主进程
-│   │   ├── main.js              # 窗口管理 + 生产模式内置启动 Express
-│   │   ├── tray.js              # 系统托盘（按 Provider 分组的二级菜单）
-│   │   ├── preload.js           # IPC 桥接
-│   │   └── icon.ico             # 应用图标
-│   └── renderer/                # 渲染进程（Vue 3）
-│       ├── src/
-│       │   ├── App.vue          # 根组件
-│       │   ├── views/           # 8 个页面
-│       │   ├── components/      # 通用组件（含 ToastHost 全局提示）
-│       │   ├── composables/     # 共享状态（useModel / useToast）
-│       │   ├── utils/           # 模型引用解析与格式化工具
-│       │   ├── api.js           # HTTP API 封装
-│       │   └── router.js        # 前端路由
-│       └── vite.config.js
-│
-├── scripts/
-│   └── build.js                 # 构建打包（输出单个 exe）
-│
-├── assets/                      # 文档截图
-│
-├── electron-builder.json         # 打包配置
-├── README.md                    # 本文件
-├── CHANGELOG.md                 # 更新日志
-├── .gitignore
-├── .npmrc                       # pnpm 配置
-└── package.json                 # 单包：全部依赖与命令
-```
+账号池后台运行情况记录在「运行日志」页签，出现异常先在这里排查。
 
 ---
 
@@ -446,6 +342,9 @@ pnpm dev
 
 # 构建 Electron 应用（输出单个 AiRoute.exe）
 pnpm build
+
+# 运行测试（WorkBuddy 模块离线断言，不发网络请求）
+pnpm test
 ```
 
 ---
@@ -482,7 +381,7 @@ pnpm build
 <details>
 <summary><strong>Q: 如何查看请求日志？</strong></summary>
 
-**A:** 日志按天存储在 `server/logs/usage-YYYY-MM-DD.log`，可通过 `GET /api/logs` 查询，或在 Electron 客户端的「日志」页面查看（支持筛选、搜索、导出 CSV 与清空）。
+**A:** 日志按天存储在 `server/logs/usage-YYYY-MM-DD.log`，可通过 `GET /api/logs` 查询，或在 Electron 客户端的「日志」页面查看（同一任务的多次请求合并为一条记录，支持筛选与清空，页头显示目录占用体积）。
 </details>
 
 <details>
@@ -505,7 +404,7 @@ pnpm build
 pnpm build
 ```
 
-构建产物为单个免安装文件 `app/dist-electron/AiRoute.exe`，约 230MB。
+构建产物为单个免安装文件 `app/dist-electron/AiRoute.exe`，约 85MB。
 
 > 国内用户如需加速下载 Electron 二进制包，构建前设置镜像：
 > ```powershell

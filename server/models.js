@@ -7,7 +7,13 @@ const CONFIG_PATH = paths.getConfigPath()
 const REF_SEP = '/'
 
 // Provider 允许写入的字段白名单，防止任意字段落盘
-const PROVIDER_TEXT_FIELDS = ['displayName', 'baseURL', 'openaiURL']
+const PROVIDER_TEXT_FIELDS = ['displayName', 'baseURL', 'openaiURL', 'type']
+
+// Provider 类型白名单：workbuddy 走账号池转发，其余为空（通用端点）
+const PROVIDER_TYPES = ['workbuddy']
+
+// 自动重建 WorkBuddy 源时使用的默认 Provider ID（用户手动创建时 ID 可自定义）
+const WORKBUDDY_PROVIDER_ID = 'workbuddy'
 
 function getConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return {}
@@ -33,7 +39,7 @@ function toPositiveIntOrNull(value) {
 
 function toModelView(raw) {
   if (typeof raw === 'string') {
-    return { id: raw.trim(), displayName: '', maxContext: null, maxOutput: null }
+    return { id: raw.trim(), displayName: '', maxContext: null, maxOutput: null, reasoningEffort: '' }
   }
   if (!raw || typeof raw !== 'object') return null
   const id = typeof raw.id === 'string' ? raw.id.trim() : ''
@@ -42,7 +48,9 @@ function toModelView(raw) {
     id,
     displayName: typeof raw.displayName === 'string' ? raw.displayName.trim() : '',
     maxContext: toPositiveIntOrNull(raw.maxContext),
-    maxOutput: toPositiveIntOrNull(raw.maxOutput)
+    maxOutput: toPositiveIntOrNull(raw.maxOutput),
+    // 模型级推理档位（可自定义字符，适配不同模型的档位命名差异）；空 = 使用全局档位
+    reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort.trim().slice(0, 32) : ''
   }
 }
 
@@ -51,6 +59,7 @@ function toProviderView(raw) {
   if (!raw || typeof raw !== 'object') return null
   const view = { ...raw }
   delete view.model
+  delete view.accounts // 账箱子集已废弃（全池自动轮转），清理旧配置残留
 
   const rawModels = Array.isArray(raw.models) && raw.models.length
     ? raw.models
@@ -165,6 +174,8 @@ function sanitizeProviderInput(input) {
   for (const field of PROVIDER_TEXT_FIELDS) {
     if (typeof source[field] === 'string') out[field] = source[field].trim()
   }
+  // type 只接受白名单值，非法值丢弃（不写入落盘）
+  if (out.type && !PROVIDER_TYPES.includes(out.type)) delete out.type
   // apiKey 为空表示保留原值，交由调用方处理
   if (typeof source.apiKey === 'string' && source.apiKey.trim()) {
     out.apiKey = source.apiKey.trim()
@@ -173,6 +184,20 @@ function sanitizeProviderInput(input) {
     out.models = sanitizeModels(source.models)
   }
   return out
+}
+
+// 是否 WorkBuddy 类型 Provider（走账号池转发，不需要 apiKey/URL）
+function isWorkbuddyProvider(provider) {
+  return !!provider && provider.type === 'workbuddy'
+}
+
+// 返回配置中 WorkBuddy 源的名称列表（设计上只允许一个）
+function listWorkbuddyProviders(config) {
+  const names = []
+  for (const [name, raw] of Object.entries(config || {})) {
+    if (isWorkbuddyProvider(raw)) names.push(name)
+  }
+  return names
 }
 
 // 模型列表整体替换，maxContext / maxOutput 未填写时不写入字段
@@ -185,6 +210,7 @@ function sanitizeModels(models) {
       const item = { id: view.id, displayName: view.displayName }
       if (view.maxContext !== null) item.maxContext = view.maxContext
       if (view.maxOutput !== null) item.maxOutput = view.maxOutput
+      if (view.reasoningEffort) item.reasoningEffort = view.reasoningEffort
       return item
     })
     .filter(Boolean)
@@ -216,6 +242,9 @@ module.exports = {
   cleanupRuleRefs,
   sanitizeProviderInput,
   sanitizeModels,
+  isWorkbuddyProvider,
+  listWorkbuddyProviders,
+  WORKBUDDY_PROVIDER_ID,
   toSafeConfig,
   toPositiveIntOrNull
 }

@@ -22,6 +22,16 @@ export function formatTime(ts) {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+// 字节数格式化：B / KB / MB / GB（日志目录占用等存储体积展示）
+export function formatBytes(bytes) {
+  const value = Number(bytes)
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 // 本地日期 YYYY-MM-DD，与服务端统计口径保持一致
 export function toLocalDateKey(date = new Date()) {
   const pad = n => String(n).padStart(2, '0')
