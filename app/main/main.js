@@ -81,6 +81,22 @@ ipcMain.handle('get-app-path', () => {
   return app.getAppPath()
 })
 
+// 系统状态：应用各进程内存占用（字节）：main 主进程 / renderer 渲染进程 / gpu 图形进程 / total 合计
+ipcMain.handle('get-app-memory', () => {
+  let main = 0
+  let renderer = 0
+  let gpu = 0
+  let total = 0
+  for (const metric of app.getAppMetrics()) {
+    const bytes = (metric.memory?.workingSetSize || 0) * 1024 // Electron 返回 KB
+    total += bytes
+    if (metric.type === 'Browser') main += bytes
+    else if (metric.type === 'Tab' || metric.type === 'Renderer') renderer += bytes
+    else if (metric.type === 'GPU') gpu += bytes
+  }
+  return { main, renderer, gpu, total }
+})
+
 // 供渲染进程把隐藏到托盘的窗口重新唤出
 ipcMain.on('show-window', () => {
   if (mainWindow) mainWindow.show()

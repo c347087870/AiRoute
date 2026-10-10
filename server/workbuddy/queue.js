@@ -1,12 +1,11 @@
 // WorkBuddy 多账号成长任务执行队列
-// 翻译自参考项目 internal/panel/taskcenter.go 的执行队列部分。
 // 语义：账号内串行（同账号任务按依赖序逐条执行）、账号间并发（并发数夹取 [1,4]，
 // 默认 2）、单调 seq（每启动一轮 +1，前端只渲染自己启动的那一轮）、状态可轮询。
 // 纯函数风格（无 class）；依赖全部由调用方注入。
 
 const DEFAULT_CONCURRENCY = 2 // 默认账号间并发
 const MIN_CONCURRENCY = 1 // 并发下限
-const MAX_CONCURRENCY = 4 // 并发上限（与参考实现夹取 [1,4] 一致）
+const MAX_CONCURRENCY = 4 // 并发上限（有效范围 [1,4]）
 const ITEM_TIMEOUT_MS = 30 * 60 * 1000 // 单条执行安全上限（默认 30 分钟，防悬挂）
 
 // 并发数夹取到 [1,4]；非法/未配置回落默认 2

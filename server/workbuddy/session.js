@@ -1,5 +1,4 @@
 // 会话粘性路由：同一会话尽量复用同一账号，多轮对话不跳号
-// 翻译自参考项目 internal/session/session.go
 
 const crypto = require('crypto')
 
@@ -88,7 +87,7 @@ function hashIndex(key, n) {
   return h % n
 }
 
-// ===== 会话头族 ID（参照 internal/session/ids.go）=====
+// ===== 会话头族 ID =====
 
 // 消息级 ID：32 位 hex（UUID v4 去横线形态）
 function newMessageId() {

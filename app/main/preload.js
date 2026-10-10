@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showWindow: () => ipcRenderer.send('show-window'),
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
   setAutoLaunch: (enabled) => ipcRenderer.invoke('set-auto-launch', enabled),
+  // 系统状态：应用各进程内存占用（字节）
+  getAppMemory: () => ipcRenderer.invoke('get-app-memory'),
   // 模型或 Provider 配置变化后通知主进程刷新托盘菜单
   notifyModelChanged: () => ipcRenderer.send('model-data-changed'),
   // 更新功能：另存为对话框 / 用系统浏览器打开外链 / 打开文件夹并选中文件

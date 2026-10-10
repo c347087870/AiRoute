@@ -49,7 +49,7 @@ function toModelView(raw) {
     displayName: typeof raw.displayName === 'string' ? raw.displayName.trim() : '',
     maxContext: toPositiveIntOrNull(raw.maxContext),
     maxOutput: toPositiveIntOrNull(raw.maxOutput),
-    // 模型级推理档位（可自定义字符，适配不同模型的档位命名差异）；空 = 使用全局档位
+    // 模型级推理档位（可自定义字符，适配不同模型的档位命名差异）；空 = 不干预客户端原值
     reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort.trim().slice(0, 32) : ''
   }
 }

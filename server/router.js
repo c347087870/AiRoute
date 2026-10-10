@@ -9,11 +9,14 @@ const tokenStats = require('./token-stats')
 const paths = require('./paths')
 const models = require('./models')
 const upstream = require('./upstream')
+const iputil = require('./iputil')
 const benchmark = require('./benchmark')
 const update = require('./update')
 const workbuddy = require('./workbuddy/runtime')
+const wbIdentity = require('./workbuddy/identity')
 const wbSession = require('./workbuddy/session')
 const wbAnthropic = require('./workbuddy/anthropic')
+const wbResponses = require('./workbuddy/responses')
 
 const {
   getConfig,
@@ -114,6 +117,7 @@ async function handleRequest(req, res) {
   const fallbackData = getFallback()
   const isStream = !!req.body?.stream
   const clientIsAnthropic = req.path === '/v1/messages'
+  const clientIsResponses = req.path === '/v1/responses'
 
   // 任务级日志上下文：同一任务（一次输入+其工具循环）的多次请求合并为一条日志记录
   const rawBody = JSON.stringify(req.body || {})
@@ -134,11 +138,30 @@ async function handleRequest(req, res) {
       responseTime: 0
     })
     const noChainMsg = '没有可用的 Provider 或模型，请先在 Provider 管理中配置'
-    return res.status(500).json(clientIsAnthropic ? wbAnthropic.errorBody(noChainMsg) : { error: noChainMsg })
+    const noChainBody = clientIsAnthropic
+      ? wbAnthropic.errorBody(noChainMsg)
+      : clientIsResponses
+        ? wbResponses.errorBody(noChainMsg)
+        : { error: noChainMsg }
+    return res.status(500).json(noChainBody)
   }
 
   const startTime = Date.now()
   let lastError = null
+  let activeUpstreamStream = null // 当前活跃的通用 Provider 上游响应流（流式分支注册，重试时覆盖）
+  // 下游断开（客户端取消/超时）：立即断开上游，释放上游连接与账号并发
+  res.on('close', () => {
+    if (res.writableEnded) return // 正常收尾不算断开
+    const s = activeUpstreamStream
+    activeUpstreamStream = null
+    if (s) {
+      try {
+        s.destroy()
+      } catch {
+        /* 忽略 */
+      }
+    }
+  })
 
   for (const entry of chain) {
     const provider = entry.provider
@@ -147,7 +170,7 @@ async function handleRequest(req, res) {
     // WorkBuddy 类型：走账号池转发（不需要 apiKey / 端点 URL）
     if (models.isWorkbuddyProvider(provider)) {
       try {
-        await handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic)
+        await handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses)
         return
       } catch (err) {
         lastError = err
@@ -195,8 +218,10 @@ async function handleRequest(req, res) {
     }
 
     const headers = upstream.resolveHeaders(provider, clientIsAnthropic)
+    // Responses 客户端：请求体先转 Chat 形态，再发往 OpenAI 兼容端点
+    const clientBody = clientIsResponses ? wbResponses.toChat(req.body || {}) : req.body
     const reqBody = upstream.buildRequestBody(
-      req.body,
+      clientBody,
       entry.model,
       isStream,
       clientIsAnthropic,
@@ -229,17 +254,113 @@ async function handleRequest(req, res) {
         res.setHeader('Content-Type', 'text/event-stream')
         res.setHeader('Cache-Control', 'no-cache')
         res.setHeader('Connection', 'keep-alive')
+        res.setHeader('X-Accel-Buffering', 'no') // 反代逐帧透传：缺此头会被 Nginx 攒批，长流被客户端判为卡死
 
         const streamUsage = upstream.emptyUsage()
         const usageExtractor = upstream.createStreamUsageExtractor(clientIsAnthropic)
+        // Responses 客户端：上游 Chat SSE 逐行转换后写出；其余原样透传
+        const rsEmitter = clientIsResponses ? wbResponses.createStreamEmitter({ model: entry.ref }) : null
+        let rsBuffer = ''
+        let closed = false // 收尾标记（幂等）：正常 EOF、上游错误、空闲超时、下游断开都汇到这里
+        let sawDone = false // 已向下游写过 [DONE]（上游自带时不重复补）
+        let sawAnyData = false // 上游是否产出过任何字节（用于识别"200 空流"）
+        let idleTimer = null
+        const idleMs = 300000 // 流中空闲上限（与 WorkBuddy 链路一致）：超时即判上游卡死并主动收尾
 
+        // 统一收尾（幂等）：补 [DONE] 后 end 响应；调用方负责先断开上游
+        const finishStream = () => {
+          if (closed) return
+          closed = true
+          if (idleTimer) {
+            clearTimeout(idleTimer)
+            idleTimer = null
+          }
+          try {
+            if (rsEmitter) {
+              const tail = rsEmitter.end()
+              if (tail) res.write(tail)
+            } else if (!sawDone) {
+              res.write('data: [DONE]\n\n')
+              sawDone = true
+            }
+          } catch {
+            /* 下游已断开 */
+          }
+          try {
+            res.end()
+          } catch {
+            /* 下游已断开 */
+          }
+        }
+
+        // 空闲看门狗：上游长时间无字节 → 断开上游 + 补 error 帧收尾，避免下游无限挂住
+        const abortIdle = () => {
+          try {
+            upstreamRes.data.destroy()
+          } catch {
+            /* 忽略 */
+          }
+          logFailure({
+            ...baseLog,
+            model: entry.ref,
+            status: 504,
+            error: `upstream stream idle timeout (${idleMs}ms)`,
+            responseTime: Date.now() - startTime,
+            fallback: isFallback,
+            fallbackFrom: isFallback ? primaryRef : undefined,
+            stream: true
+          })
+          try {
+            if (rsEmitter) res.write(rsEmitter.fail('upstream stream idle timeout'))
+            else if (!sawDone) res.write('data: {"error":{"message":"upstream stream idle timeout","type":"upstream_error","code":"upstream_idle_timeout"}}\n\n')
+          } catch {
+            /* 下游已断开 */
+          }
+          finishStream()
+        }
+
+        // 刷新空闲计时（每收到一个上游字节就重置）
+        const armIdle = () => {
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(abortIdle, idleMs)
+          if (idleTimer.unref) idleTimer.unref()
+        }
+
+        // 注册当前活跃上游流：下游断开由请求级监听统一处理（避免重试循环里叠加 res 监听）
+        activeUpstreamStream = upstreamRes.data
+        armIdle()
         upstreamRes.data.on('data', (chunk) => {
+          armIdle()
+          sawAnyData = true
           upstream.mergeStreamUsage(streamUsage, usageExtractor.push(chunk))
-          res.write(chunk)
+          if (!rsEmitter) {
+            // 记录上游自带收尾标记：自带则不重复补发 [DONE]
+            if (!sawDone && chunk.indexOf('[DONE]') >= 0) sawDone = true
+            res.write(chunk)
+            return
+          }
+          rsBuffer += chunk.toString()
+          let idx
+          while ((idx = rsBuffer.indexOf('\n')) >= 0) {
+            const line = rsBuffer.slice(0, idx)
+            rsBuffer = rsBuffer.slice(idx + 1)
+            if (!line.trim()) continue
+            const out = rsEmitter.push(line.replace(/\r+$/, ''))
+            if (out) res.write(out)
+          }
         })
 
         upstreamRes.data.on('end', () => {
           upstream.mergeStreamUsage(streamUsage, usageExtractor.end())
+          if (closed) return // 已因空闲/断开收尾：不重复记日志与收尾
+          // 空流（上游 200 但零字节）：补 error 帧，避免下游把空响应当成正常完成而一直等
+          if (!sawAnyData && !rsEmitter) {
+            try {
+              res.write('data: {"error":{"message":"upstream returned an empty stream","type":"upstream_error","code":"upstream_empty_stream"}}\n\n')
+            } catch {
+              /* 下游已断开 */
+            }
+          }
           tokenStats.recordTokens(entry.ref, streamUsage)
           logger.log({
             ...baseLog,
@@ -252,10 +373,10 @@ async function handleRequest(req, res) {
             outputTokens: streamUsage.output,
             cacheReadTokens: streamUsage.cacheRead,
             cacheWriteTokens: streamUsage.cacheWrite,
-            totalTokens: upstream.usageTotal(streamUsage),
+            totalTokens: upstream.usageTotalOrNull(streamUsage),
             stream: true
           })
-          res.end()
+          finishStream()
         })
 
         upstreamRes.data.on('error', (err) => {
@@ -268,7 +389,15 @@ async function handleRequest(req, res) {
             fallbackFrom: isFallback ? primaryRef : undefined,
             stream: true
           })
-          try { res.end() } catch {}
+          if (closed) return
+          // 上游中途断流：补 error 帧 + [DONE]，避免下游一直等收尾
+          try {
+            if (rsEmitter) res.write(rsEmitter.fail(`upstream stream error: ${err.message}`))
+            else if (!sawDone) res.write('data: {"error":{"message":"upstream stream error","type":"upstream_error","code":"upstream_stream_error"}}\n\n')
+          } catch {
+            /* 下游已断开 */
+          }
+          finishStream()
         })
 
         return
@@ -304,10 +433,11 @@ async function handleRequest(req, res) {
         outputTokens: usage.output,
         cacheReadTokens: usage.cacheRead,
         cacheWriteTokens: usage.cacheWrite,
-        totalTokens: upstream.usageTotal(usage)
+        totalTokens: upstream.usageTotalOrNull(usage)
       })
 
-      return res.json(response.data)
+      // Responses 客户端：聚合结果转 Response 对象后返回
+      return res.json(clientIsResponses ? wbResponses.toResponse(response.data, entry.ref) : response.data)
     } catch (err) {
       lastError = err
       logFailure({ ...baseLog,
@@ -327,27 +457,34 @@ async function handleRequest(req, res) {
   res.status(500).json({
     error: 'All providers failed',
     detail: lastError?.message,
-    // 网关补充说明（gateway_hint，参照 hint.go；无提示时不带字段）
+    // 网关补充说明（gateway_hint；无提示时不带字段）
     ...(lastError?.gatewayHint ? { gateway_hint: lastError.gatewayHint } : {})
   })
 }
 
 // WorkBuddy 类型 Provider 的请求转发：账号池化 + 换号重试 + SSE 重建（由 runtime 内部闭环）
-async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic) {
+async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses) {
   const rt = workbuddy.getRuntime()
   if (!rt) {
     throw new Error('WorkBuddy 运行时未初始化')
   }
 
   const isStream = !!req.body?.stream
-  const clientIP = extractClientIP(req.headers)
+  const clientIP = iputil.extractClientIP(req)
   // WorkBuddy 源的推理档位走每个模型独立配置（不回落全局档位；未配置则不干预）
   const modelEffort = entry.model.reasoningEffort || ''
 
-  // Anthropic 客户端（/v1/messages）：请求体先转 OpenAI 形态，再进改写/上游管线
-  const fwdBody = JSON.stringify(clientIsAnthropic ? wbAnthropic.toOpenAI(req.body || {}) : (req.body || {}))
+  // Anthropic 客户端（/v1/messages）与 Responses 客户端（/v1/responses）：
+  // 请求体先转 OpenAI Chat 形态，再进改写/上游管线
+  const fwdBody = JSON.stringify(
+    clientIsAnthropic
+      ? wbAnthropic.toOpenAI(req.body || {})
+      : clientIsResponses
+        ? wbResponses.toChat(req.body || {})
+        : (req.body || {})
+  )
 
-  // 任务级日志上下文（与 handleRequest 同口径；用客户端原始请求体，保持日志口径不变）
+  // 任务级日志上下文（用客户端原始请求体，保持日志口径不变）
   const wbRawBody = JSON.stringify(req.body || {})
   const wbBaseLog = {
     taskKey: wbSession.extractTaskKey(wbRawBody) || undefined,
@@ -365,8 +502,12 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
       res.setHeader('X-Accel-Buffering', 'no')
     }
 
-    // Anthropic 客户端：重建帧先喂用量提取器，再经协议转换写出；OpenAI 客户端原样写出
-    const emitter = clientIsAnthropic ? wbAnthropic.createStreamEmitter({ model: entry.ref }) : null
+    // Anthropic / Responses 客户端：重建帧先喂用量提取器，再经协议转换写出；OpenAI 客户端原样写出
+    const emitter = clientIsAnthropic
+      ? wbAnthropic.createStreamEmitter({ model: entry.ref })
+      : clientIsResponses
+        ? wbResponses.createStreamEmitter({ model: entry.ref })
+        : null
 
     const streamUsage = upstream.emptyUsage()
     const usageExtractor = upstream.createStreamUsageExtractor(false)
@@ -381,6 +522,9 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
         reasoningEffort: modelEffort,
         // 客户端断开时立即停止换号轮转/退避等待
         isAborted: () => req.destroyed || res.writableEnded,
+        // Anthropic / Responses 通道的发射器丢弃 reasoning_content：思考帧对该客户端不可见，
+        // 传输层据此判定「空回答重试」是否安全（不能让客户端收到两份输出）
+        reasoningHidden: clientIsAnthropic || clientIsResponses,
         // 会话头族入站透传（X-Conversation-Request-ID / X-Trace-ID）
         inbound: {
           conversationRequestId: req.headers['x-conversation-request-id'],
@@ -436,7 +580,7 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
       outputTokens: streamUsage.output,
       cacheReadTokens: streamUsage.cacheRead,
       cacheWriteTokens: streamUsage.cacheWrite,
-      totalTokens: upstream.usageTotal(streamUsage),
+      totalTokens: upstream.usageTotalOrNull(streamUsage),
       stream: true
     })
     res.end()
@@ -473,29 +617,26 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
     fallbackFrom: isFallback ? primaryRef : undefined,
     uid: fwd?.uid,
     ttfbMs: fwd?.ttfbMs,
-    credits: fwd?.credits || undefined,
+    // 积分消耗：仅在上游真实提供时为数值（0 是有效值"免费"，与未提供区分）
+    credits: typeof fwd?.credits === 'number' ? fwd.credits : undefined,
     inputTokens: usage.input,
     outputTokens: usage.output,
     cacheReadTokens: usage.cacheRead,
     cacheWriteTokens: usage.cacheWrite,
-    totalTokens: upstream.usageTotal(usage)
+    totalTokens: upstream.usageTotalOrNull(usage)
   })
-  // Anthropic 客户端：聚合结果转 Anthropic Message 后返回
-  res.json(clientIsAnthropic ? wbAnthropic.toMessage(aggregated, entry.ref) : aggregated)
-}
-
-// 从请求头提取客户端 IP（X-Forwarded-For 第一段，回落 X-Real-IP）
-function extractClientIP(headersMap) {
-  const xff = headersMap['x-forwarded-for'] || headersMap['X-Forwarded-For'] || ''
-  if (xff) {
-    const first = String(xff).split(',')[0].trim()
-    if (first) return first
-  }
-  return String(headersMap['x-real-ip'] || headersMap['X-Real-IP'] || '').trim()
+  // Anthropic / Responses 客户端：聚合结果转对应协议形态后返回
+  const finalBody = clientIsAnthropic
+    ? wbAnthropic.toMessage(aggregated, entry.ref)
+    : clientIsResponses
+      ? wbResponses.toResponse(aggregated, entry.ref)
+      : aggregated
+  res.json(finalBody)
 }
 
 app.post('/v1/messages', handleRequest)
 app.post('/v1/chat/completions', handleRequest)
+app.post('/v1/responses', handleRequest)
 
 app.get('/v1/models', (req, res) => {
   const config = getConfig()
@@ -521,6 +662,85 @@ app.get('/v1/models', (req, res) => {
 
   res.json({ object: 'list', data: [...configured, ...extra] })
 })
+
+// ==================== Anthropic token 计数（Claude Code 预估用）====================
+
+// POST /v1/messages/count_tokens：WorkBuddy 通道发 max_tokens=1 的请求取上游真实 usage；
+// 通用 Provider 配了 Anthropic 端点则原样转发 count_tokens；都不可用时本地粗估，保证 Claude Code 不 404
+app.post('/v1/messages/count_tokens', async (req, res) => {
+  const body = req.body || {}
+  const { chain } = buildProviderChain(getConfig(), getState(), getFallback(), body)
+
+  // WorkBuddy 通道：真实计数（Anthropic 请求先转 OpenAI 形态；极小输出预算，空回答属预期不重试）
+  for (const entry of chain) {
+    if (!models.isWorkbuddyProvider(entry.provider)) continue
+    if (!workbuddy.getRuntime()) break
+    try {
+      const chatBody = {
+        ...wbAnthropic.toOpenAI(body),
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: 1
+      }
+      let aggregated = null
+      await workbuddy.forwardChat({
+        body: JSON.stringify(chatBody),
+        isStream: false,
+        model: entry.model.id,
+        reasoningEffort: entry.model.reasoningEffort || '',
+        noEmptyRetry: true,
+        isAborted: () => req.destroyed || res.writableEnded,
+        onDone: payload => {
+          aggregated = payload
+        }
+      })
+      const usage = upstream.extractUsage(aggregated, false) || upstream.emptyUsage()
+      // input_tokens 口径与 Anthropic 一致：未缓存输入 + 缓存读 + 缓存写
+      return res.json({ input_tokens: usage.input + usage.cacheRead + usage.cacheWrite })
+    } catch {
+      break // 计数失败不阻断客户端，降级到转发/估算
+    }
+  }
+
+  // 通用 Provider：Anthropic 端点原样转发（对方原生支持 count_tokens 时结果最准）
+  for (const entry of chain) {
+    const provider = entry.provider
+    if (models.isWorkbuddyProvider(provider)) continue
+    if (!provider.apiKey || !provider.baseURL) continue
+    try {
+      const base = String(provider.baseURL).replace(/\/+$/, '')
+      const resp = await axios.post(`${base}/v1/messages/count_tokens`, body, {
+        headers: upstream.resolveHeaders(provider, true),
+        timeout: 15000,
+        validateStatus: () => true
+      })
+      if (resp.status === 200 && resp.data && typeof resp.data.input_tokens === 'number') {
+        return res.json({ input_tokens: resp.data.input_tokens })
+      }
+    } catch {
+      /* 转发失败降级到估算 */
+    }
+  }
+
+  // 兜底：本地粗估（Claude Code 仅用于上下文进度显示，估算可用）
+  res.json({ input_tokens: estimateTokens(body) })
+})
+
+// 本地粗估 token 数（无真实计数通道时的兜底）：按文字种类分别估算——
+// CJK 字符按 1 字 ≈ 1 token（宁可高估留余量），其余字符按 4 字符 ≈ 1 token
+function estimateTokens(body) {
+  let text = ''
+  try {
+    text = JSON.stringify(body || {})
+  } catch {
+    return 1
+  }
+  // CJK 区间：CJK 标点/假名（\u3000-\u30ff）、扩展 A（\u3400-\u4dbf）、
+  // 基本汉字（\u4e00-\u9fff）、兼容汉字（\uf900-\ufaff）、全角形式（\uff00-\uffef）
+  const cjk = (text.match(/[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/g) || []).length
+  const rest = text.length - cjk
+  return Math.max(1, Math.ceil(cjk + rest / 4))
+}
 
 app.get('/api/state', (req, res) => {
   res.json(getState())
@@ -728,7 +948,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
         outputTokens: usage.output,
         cacheReadTokens: usage.cacheRead,
         cacheWriteTokens: usage.cacheWrite,
-        totalTokens: upstream.usageTotal(usage)
+        totalTokens: upstream.usageTotalOrNull(usage)
       })
     } catch (err) {
       return res.json({ ok: false, error: err.message, latency: Date.now() - start, model: model.id })
@@ -765,7 +985,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
       outputTokens: usage.output,
       cacheReadTokens: usage.cacheRead,
       cacheWriteTokens: usage.cacheWrite,
-      totalTokens: upstream.usageTotal(usage)
+      totalTokens: upstream.usageTotalOrNull(usage)
     })
   } catch (err) {
     const latency = Date.now() - start
@@ -1028,10 +1248,10 @@ app.get('/api/workbuddy/usage', (req, res) => {
   res.json({ ok: true, ...workbuddy.usageSnapshot(req.query.hours) })
 })
 
-// 积分变动流水（新的在前；limit 默认 200 上限 1000，uid 可选精确过滤）
+// 积分变动流水（新的在前；limit 默认 50 上限 1000，uid 可选精确过滤，offset 翻页）
 app.get('/api/workbuddy/credit-history', (req, res) => {
   if (!requireWorkbuddy(res)) return
-  res.json({ ok: true, ...workbuddy.creditHistory(req.query.limit, req.query.uid) })
+  res.json({ ok: true, ...workbuddy.creditHistory(req.query.limit, req.query.uid, req.query.offset) })
 })
 
 // 立即落盘用量数据（面板「刷新」或关闭前调用）
@@ -1041,10 +1261,16 @@ app.post('/api/workbuddy/usage/save', (req, res) => {
   res.json({ ok: true })
 })
 
-// 账号池统一维护的启用模型清单
-app.get('/api/workbuddy/models/enabled', (req, res) => {
+// 账号池统一维护的启用模型清单（附后台拉取到的思考档位，供 Provider 弹窗渲染下拉）
+// 上游模型缓存为空时先拉一次（1h 缓存；无可用账号/拉取失败静默降级到静态兜底档位）
+app.get('/api/workbuddy/models/enabled', async (req, res) => {
   if (!requireWorkbuddy(res)) return
-  res.json({ ok: true, models: workbuddy.getEnabledModels() })
+  try {
+    await workbuddy.listUpstreamModels(false)
+  } catch {
+    /* 拉取失败：档位回落静态兜底表 */
+  }
+  res.json({ ok: true, models: workbuddy.getEnabledModelsWithEfforts() })
 })
 
 // 保存启用模型清单，并同步写入所有 workbuddy 类型 Provider 的 models 字段
@@ -1059,18 +1285,25 @@ app.post('/api/workbuddy/models/enabled', (req, res) => {
   engine.saveServerConfig(serverConfig)
 
   // 同步到所有 workbuddy Provider（引用体系 provider/modelId 依赖此字段）
-  // 保留 Provider 侧已配置的模型级推理档位（按模型 id 匹配，不被账号池清单覆盖）
+  // 保留 Provider 侧已配置的模型级推理档位与上下文/输出上限（按模型 id 匹配，
+  // 不被账号池清单覆盖——这两项在 Provider 弹窗里可逐模型调整）
   const config = getConfig()
   let synced = 0
   for (const [name, raw] of Object.entries(config)) {
     const provider = toProviderView(raw)
     if (!models.isWorkbuddyProvider(provider)) continue
-    const effortByID = new Map((provider.models || []).map(m => [m.id, m.reasoningEffort || '']))
+    const savedByID = new Map((provider.models || []).map(m => [m.id, m]))
     config[name] = {
       ...raw,
       models: list.map(m => {
-        const effort = effortByID.get(m.id)
-        return effort ? { ...m, reasoningEffort: effort } : { ...m }
+        const saved = savedByID.get(m.id)
+        if (!saved) return { ...m }
+        return {
+          ...m,
+          maxContext: saved.maxContext ?? m.maxContext ?? null,
+          maxOutput: saved.maxOutput ?? m.maxOutput ?? null,
+          reasoningEffort: saved.reasoningEffort || ''
+        }
       })
     }
     synced++
@@ -1153,6 +1386,10 @@ app.get('/api/workbuddy/config', (req, res) => {
   res.json({
     promptMode: rt.cfg.promptMode,
     sanitizeFingerprints: rt.cfg.sanitizeFingerprints,
+    rewriteMode: rt.cfg.rewriteMode,
+    clientIdentity: rt.cfg.clientIdentity,
+    // 界面回填用：返回「覆盖 > 官方默认」的完整生效值（30 项，无空值）
+    identity: wbIdentity.effective(rt.cfg.identity),
     deviceTokenFile: rt.cfg.deviceTokenFile,
     pool: rt.pool.getConfig()
   })
@@ -1169,6 +1406,9 @@ app.put('/api/workbuddy/config', (req, res) => {
     if (typeof req.body?.promptMode === 'string') wb.promptMode = req.body.promptMode
     if (typeof req.body?.promptFile === 'string') wb.promptFile = req.body.promptFile
     if (typeof req.body?.sanitizeFingerprints === 'boolean') wb.sanitizeFingerprints = req.body.sanitizeFingerprints
+    if (req.body?.rewriteMode === 'compat' || req.body?.rewriteMode === 'native') wb.rewriteMode = req.body.rewriteMode
+    if (req.body?.clientIdentity === 'workbuddy' || req.body?.clientIdentity === 'codebuddy') wb.clientIdentity = req.body.clientIdentity
+    if (req.body?.identity && typeof req.body.identity === 'object') wb.identity = wbIdentity.normalize(req.body.identity)
     if (typeof req.body?.deviceTokenFile === 'string') wb.deviceTokenFile = req.body.deviceTokenFile
     serverConfig.workbuddy = wb
     engine.saveServerConfig(serverConfig)
@@ -1199,6 +1439,12 @@ app.get('/api/logs/size', (req, res) => {
 app.delete('/api/logs', (req, res) => {
   logger.clearLogs()
   res.json({ ok: true })
+})
+
+// 系统状态：本地版本与当前监听端口（设置页「系统状态」用；未监听时回落配置端口）
+app.get('/api/system/status', (req, res) => {
+  const addr = server && server.address()
+  res.json({ version: update.getLocalVersion(), port: (addr && addr.port) || engine.getServerConfig().port || 3000 })
 })
 
 // 请求数统计与 Token 统计同源，均来自持久化的按天汇总，避免两个数字口径不一致
@@ -1457,6 +1703,9 @@ function initWorkbuddy() {
       promptMode: wb.promptMode || 'custom',
       promptFile: wb.promptFile || '',
       sanitizeFingerprints: wb.sanitizeFingerprints !== false,
+      rewriteMode: wb.rewriteMode || 'compat',
+      clientIdentity: wb.clientIdentity || 'workbuddy',
+      identity: wb.identity || {},
       deviceTokenFile: wb.deviceTokenFile || '',
       log: msg => console.log(`[aiRoute] ${msg}`)
     })

@@ -47,6 +47,39 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">系统状态</h2>
+      <div class="card">
+        <div class="config-row">
+          <label class="config-label">服务端</label>
+          <div class="config-control">
+            <span v-if="sysStatus" class="sys-value">运行中 · v{{ sysStatus.version }} · 端口 {{ sysStatus.port }}</span>
+            <span v-else class="config-hint">未连接</span>
+          </div>
+        </div>
+        <div class="config-row">
+          <label class="config-label">内存占用</label>
+          <div class="config-control">
+            <span v-if="appMemory" class="sys-value">
+              合计 {{ formatBytes(appMemory.total) }}（主进程 {{ formatBytes(appMemory.main) }} · 界面 {{ formatBytes(appMemory.renderer) }} · GPU {{ formatBytes(appMemory.gpu) }}）
+            </span>
+            <span v-else class="config-hint">—</span>
+          </div>
+        </div>
+        <div class="config-row">
+          <label class="config-label">缓存（日志）</label>
+          <div class="config-control">
+            <span v-if="cacheSize" class="sys-value">{{ formatBytes(cacheSize.totalSize) }} · {{ cacheSize.fileCount }} 个文件</span>
+            <span v-else class="config-hint">—</span>
+            <button class="btn-ghost btn-sm" :disabled="clearing" @click="clearLogCache">
+              {{ clearing ? '清空中…' : '清空缓存' }}
+            </button>
+          </div>
+        </div>
+        <div class="config-hint">缓存为本地请求日志文件；清空后立即释放空间，日志页历史将一并清空</div>
+      </div>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">关于与更新</h2>
       <div class="card">
         <div class="config-row">
@@ -68,7 +101,7 @@
         </div>
         <div v-if="error" class="warning-box">⚠ {{ error }}</div>
         <div v-if="info && info.hasUpdate" class="update-block">
-          <div v-if="info.publishedAt" class="config-hint">发布时间：{{ info.publishedAt.slice(0, 10) }}</div>
+          <div v-if="info.publishedAt" class="config-hint">发布时间：{{ formatTime(info.publishedAt) }}</div>
           <pre v-if="info.notes" class="update-notes">{{ info.notes }}</pre>
           <div class="config-control">
             <button v-if="!savedPath" class="btn-primary" :disabled="downloading" @click="startDownload">
@@ -90,14 +123,19 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort } from '../api.js'
+import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort, getSystemStatus, getLogsSize, clearLogs } from '../api.js'
 import { showToast } from '../composables/useToast.js'
+import { formatBytes, formatTime } from '../utils/format.js'
 import { useUpdate } from '../composables/useUpdate.js'
 
 const serverPort = ref(3000) // 端口输入框的值
 const portChanged = ref(false) // 端口已保存但尚未重启生效
 const restarting = ref(false) // 是否正在重启服务
 const autoLaunch = ref(false) // 开机自启开关状态
+const sysStatus = ref(null) // 系统状态：{ version, port }；null 表示服务端不可达
+const appMemory = ref(null) // 应用内存占用（字节）：{ main, renderer, gpu, total }；浏览器模式为 null
+const cacheSize = ref(null) // 日志缓存占用：{ totalSize, fileCount }
+const clearing = ref(false) // 清空缓存进行中
 
 // 更新功能共享状态与方法（与侧边栏提示条同源）
 const { info, checking, downloading, percent, savedPath, error, runCheck, startDownload, openFolder, openReleasePage } = useUpdate()
@@ -196,7 +234,42 @@ async function loadData() {
   }
 }
 
-onMounted(loadData)
+// 加载系统状态：服务端版本/端口、应用内存、日志缓存占用；三项独立降级，互不阻塞
+async function loadSystemStatus() {
+  try {
+    sysStatus.value = await getSystemStatus()
+  } catch {
+    sysStatus.value = null
+  }
+  if (window.electronAPI?.getAppMemory) {
+    try {
+      appMemory.value = await window.electronAPI.getAppMemory()
+    } catch {}
+  }
+  try {
+    cacheSize.value = await getLogsSize()
+  } catch {}
+}
+
+// 清空日志缓存：二次确认后执行并刷新占用显示
+async function clearLogCache() {
+  if (!window.confirm('确定清空日志缓存吗？\n\n所有请求日志文件将被永久删除（不影响账号池与 Token 统计）。')) return
+  clearing.value = true
+  try {
+    await clearLogs()
+    showToast('缓存已清空')
+    await loadSystemStatus()
+  } catch (err) {
+    showToast('清空失败: ' + errorText(err), 'error', 4000)
+  } finally {
+    clearing.value = false
+  }
+}
+
+onMounted(() => {
+  loadData()
+  loadSystemStatus()
+})
 </script>
 
 <style scoped>
@@ -262,6 +335,11 @@ onMounted(loadData)
   font-size: 12px;
   color: var(--text-3);
   padding: 4px 0 8px;
+}
+
+.sys-value {
+  font-size: 13px;
+  color: var(--text-2);
 }
 
 .toggle-btn {

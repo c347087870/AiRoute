@@ -1,5 +1,4 @@
 // WorkBuddy 账号池：选号调度、冷却/熔断状态机、在途租约、状态持久化
-// 翻译自参考项目 internal/pool/*.go
 
 const fs = require('fs')
 const path = require('path')
@@ -61,7 +60,7 @@ function createPool(opts = {}) {
     return true
   }
 
-  // 对齐目录扫描结果：新账号加入、消失的账号剔除
+  // 目录扫描结果对齐：新账号加入、消失的账号剔除
   function syncToDir(auths) {
     const incoming = new Set()
     for (const a of auths || []) {
@@ -215,7 +214,7 @@ function createPool(opts = {}) {
       if (t.tier < bestTier) bestTier = t.tier
     }
 
-    // 成本探索（参照 pick.go）：免费层存在且有"无观测"候选时，每 costExploreMs
+    // 成本探索：免费层存在且有"无观测"候选时，每 costExploreMs
     // 把一次真实请求搭车改道给未知号（零新增上游请求），用真实观测替代推测
     if (cfg.costExploreMs > 0 && bestTier === 0 && reqModel) {
       const hasTier1 = cands.some(e => tierOf.get(e.uid).tier === 1)
@@ -434,7 +433,7 @@ function createPool(opts = {}) {
     return today4 + 24 * 3600 * 1000
   }
 
-  // 账号级软冷却（对齐重置墙钟 / 有界指数退避）
+  // 账号级软冷却（重置墙钟 / 有界指数退避）
   function cooldownSoftRate(uid, baseMs, resetAtMs, reason) {
     const e = byUID.get(uid)
     if (!e) return
@@ -673,7 +672,7 @@ function createPool(opts = {}) {
     return true
   }
 
-  // 写回积分明细（含快过期窗口）；快过期额度钳制在 [0, credits]（参照 SetCreditsDetailed）
+  // 写回积分明细（含快过期窗口）；快过期额度钳制在 [0, credits]
   function setCreditsDetailed(uid, credits, total, expiring, earliestExpiry, earliestRemaining) {
     const e = byUID.get(uid)
     if (!e) return
@@ -739,7 +738,7 @@ function createPool(opts = {}) {
     dirty = true
   }
 
-  // 记录一次实测扣费观测（参照 NoteModelCost(uid, model, credit, tokens)）：
+  // 记录一次实测扣费观测（uid / model / credit / tokens）：
   // 更新该 (账号,模型) 的成本账本（EMA 平滑 alpha=0.3），并顺带扣减余额内插估计。
   // credit：本次真实扣费积分（消耗量）；tokens：本次 token 总数（<=0 不记录）
   // 返回 { ok, costPer1k, freeTierEnded }

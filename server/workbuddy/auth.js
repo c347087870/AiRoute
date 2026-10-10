@@ -1,5 +1,4 @@
 // 账号凭证管理：双形态解析、原子落盘、目录扫描
-// 翻译自参考项目 internal/auth/auth.go
 
 const fs = require('fs')
 const path = require('path')

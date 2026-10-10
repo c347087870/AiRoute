@@ -58,10 +58,17 @@ function matchKeyword(entry, keyword) {
   return target.includes(keyword.toLowerCase())
 }
 
+// 「重试/降级」判定：换模型降级（fallback），或任务内调用失败后最终恢复（200 且留有错误）。
+// 与成功/失败是「过程经历」与「最终结果」两个维度，可同时命中（如降级后仍失败的条目）。
+function isDegraded(entry) {
+  return !!entry.fallback || (entry.status === 200 && !!entry.error)
+}
+
 function matchStatus(entry, statusFilter) {
   if (!statusFilter) return true
   if (statusFilter === 'success') return entry.status === 200
   if (statusFilter === 'failed') return entry.status !== 200
+  if (statusFilter === 'degraded') return isDegraded(entry)
   return String(entry.status) === String(statusFilter)
 }
 
@@ -102,6 +109,8 @@ function getLogs(options = {}) {
 
   const results = []
   for (const entry of merged) {
+    // 标记「重试/降级」：前端徽标与筛选共用同一判定口径
+    if (isDegraded(entry)) entry.degraded = true
     if (!matchStatus(entry, status)) continue
     if (!matchKeyword(entry, keyword)) continue
     results.push(entry)
@@ -175,11 +184,60 @@ function mergeTaskEntries(list) {
   return deriveTokensPerSec(acc)
 }
 
+// ===== 日志自动清理（保留天数 + 目录总量上限）=====
+
+const RETAIN_DAYS = 90 // 请求日志保留天数（超期文件自动删除）
+const MAX_TOTAL_BYTES = 512 * 1024 * 1024 // 日志目录总量上限（512MB，超限从最旧文件删起）
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000 // 清理节流：最多每小时一次（写入时触发）
+let lastPruneAt = 0
+
+// 日志文件名 → 日期键（YYYY-MM-DD；无日期的旧格式 usage.log 返回空串，不参与自动清理）
+function dayOfLogFile(name) {
+  const m = LOG_FILE_RE.exec(name)
+  return m && m[1] ? m[1].slice(1) : ''
+}
+
+// 自动清理日志：先删超期文件；目录总量超限时从最旧文件删起（最新文件永不删）
+function pruneLogs(now = Date.now()) {
+  if (now - lastPruneAt < PRUNE_INTERVAL_MS) return
+  lastPruneAt = now
+  const cutoffDay = getDayKey(now - RETAIN_DAYS * 86400000)
+  const dir = paths.getLogDir()
+  const remaining = []
+  for (const name of listLogFiles()) {
+    const day = dayOfLogFile(name)
+    if (day && day < cutoffDay) {
+      try {
+        fs.removeSync(path.join(dir, name))
+      } catch {
+        /* 文件并发消失忽略 */
+      }
+      continue
+    }
+    try {
+      remaining.push({ name, size: fs.statSync(path.join(dir, name)).size })
+    } catch {
+      /* 读不到大小则跳过（不计入总量） */
+    }
+  }
+  // 总量上限：从最旧（数组尾）删到阈值以内，索引 0（最新文件）永不删
+  let total = remaining.reduce((sum, f) => sum + f.size, 0)
+  for (let i = remaining.length - 1; i >= 1 && total > MAX_TOTAL_BYTES; i--) {
+    try {
+      fs.removeSync(path.join(dir, remaining[i].name))
+      total -= remaining[i].size
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
+
 // 写一条请求日志（纯追加，保留每次上游调用的原始记录）；
 // 带 taskKey 的记录在读取时按任务合并（一任务一条）。
 // 自动补序号 / uid 前 8 位 / token 速率派生字段
 function log(entry) {
   ensureLogDir()
+  pruneLogs()
   seqCounter++
   const enriched = deriveTokensPerSec({ seq: seqCounter, ...(entry || {}) })
   if (enriched.uid && !enriched.uid8) enriched.uid8 = String(enriched.uid).slice(0, 8)

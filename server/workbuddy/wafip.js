@@ -1,5 +1,4 @@
 // WAF IP 级拦截 fail-fast 状态机
-// 翻译自参考项目 internal/server/wafip.go
 //
 // 背景：WAF 403 拦的是网关出口 IP 而非账号——轮转会把一次客户端请求放大 MaxRotate 倍，
 // 同一出口 IP 继续打上游只会加重风控。判定：短窗内 ≥2 个**不同**账号接连命中 WAF 403

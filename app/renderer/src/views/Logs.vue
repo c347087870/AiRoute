@@ -22,6 +22,7 @@
         <option value="">全部状态</option>
         <option value="success">成功</option>
         <option value="failed">失败</option>
+        <option value="degraded">重试/降级</option>
       </select>
 
       <select v-model="limit" class="filter-select" title="显示条数">
@@ -35,7 +36,7 @@
     </div>
 
     <div class="card">
-      <div class="table-wrap" v-if="logs.length">
+      <div class="table-wrap scroll-log" v-if="logs.length">
         <table class="log-table">
           <thead>
             <tr>
@@ -67,19 +68,20 @@
                 <span :class="log.status === 200 ? 'text-green' : 'text-red'">
                   {{ log.status }}
                 </span>
+                <span v-if="log.degraded" class="outcome-tag" :title="degradedTitle(log)">{{ degradedTagText(log) }}</span>
               </td>
               <td>{{ log.responseTime }}ms</td>
               <td class="token-cell text-orange">{{ formatCredits(log.credits) }}</td>
               <td>{{ log.ttfbMs ? `${log.ttfbMs}ms` : '-' }}</td>
-              <td class="token-cell text-blue">{{ formatNumber(log.inputTokens) }}</td>
-              <td class="token-cell text-green">{{ formatNumber(log.outputTokens) }}</td>
+              <td class="token-cell text-blue">{{ formatTokenCell(log.inputTokens) }}</td>
+              <td class="token-cell text-green">{{ formatTokenCell(log.outputTokens) }}</td>
               <td class="token-cell" :class="log.cacheReadTokens ? 'text-purple' : 'text-muted'">
                 {{ formatCacheTokens(log.cacheReadTokens) }}
               </td>
               <td class="token-cell" :class="log.cacheWriteTokens ? 'text-orange' : 'text-muted'">
                 {{ formatCacheTokens(log.cacheWriteTokens) }}
               </td>
-              <td class="token-cell text-purple font-bold">{{ formatNumber(log.totalTokens) }}</td>
+              <td class="token-cell text-purple font-bold">{{ formatTokenCell(log.totalTokens) }}</td>
               <td class="token-cell text-muted">{{ log.tokensPerSec || '-' }}</td>
               <td>
                 <span v-if="log.fallback" class="text-yellow">
@@ -103,14 +105,13 @@
         <h3 class="credit-title">积分历史</h3>
         <span class="credit-hint text-muted">每次真实查到余额与上次比对，变动即留痕</span>
         <span class="credit-note text-muted">{{ creditNote }}</span>
-        <select v-model="creditLimit" class="filter-select credit-limit" title="读取条数">
-          <option :value="100">最近 100 条</option>
-          <option :value="300">最近 300 条</option>
-          <option :value="1000">最近 1000 条</option>
+        <select v-model="creditUid" class="filter-select credit-limit" title="按账号筛选">
+          <option value="">全部账号</option>
+          <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || String(a.uid).slice(0, 8) }}</option>
         </select>
-        <button class="btn-ghost btn-sm" @click="loadCreditHistory">重新读取</button>
+        <button class="btn-ghost btn-sm" @click="loadCreditHistory">刷新</button>
       </div>
-      <div class="table-wrap" v-if="creditEntries.length">
+      <div class="table-wrap scroll-credit" v-if="creditEntries.length">
         <table class="log-table">
           <thead>
             <tr>
@@ -133,6 +134,11 @@
         </table>
       </div>
       <div v-else class="empty">暂无积分变动记录</div>
+      <div class="credit-pager" v-if="creditTotal > 0">
+        <button class="btn-ghost btn-sm" :disabled="creditPage <= 1" @click="changeCreditPage(-1)">上一页</button>
+        <span class="text-muted">第 {{ creditPage }} / {{ creditTotalPages }} 页</span>
+        <button class="btn-ghost btn-sm" :disabled="creditPage >= creditTotalPages" @click="changeCreditPage(1)">下一页</button>
+      </div>
     </div>
   </div>
 </template>
@@ -147,12 +153,15 @@ const logs = ref([]) // 当前加载出来的日志列表（服务端已按任�
 const logSize = ref(null) // 日志目录占用 { totalSize, fileCount }
 const limit = ref(50) // 显示条数
 const modelFilter = ref('') // 模型筛选，空表示全部
-const statusFilter = ref('') // 状态筛选：'' / success / failed
+const statusFilter = ref('') // 状态筛选：'' / success / failed / degraded（重试/降级）
 const modelOptions = ref([]) // 模型下拉选项，来自日志中出现过的模型引用
 const accounts = ref([]) // 账号池账号列表，供「账号」列把 uid 映射为昵称
-const creditEntries = ref([]) // 积分变动流水（新的在前，账号列由 uid 映射为昵称）
-const creditLimit = ref(100) // 积分历史读取条数（100 / 300 / 1000）
-const creditNote = ref('') // 积分历史统计说明（条数 · 净变动）
+const creditEntries = ref([]) // 积分变动流水（当前页，新的在前，账号列由 uid 映射为昵称）
+const CREDIT_PAGE_SIZE = 50 // 积分历史每页条数（服务端 limit）
+const creditUid = ref('') // 积分历史账号筛选，空表示全部
+const creditPage = ref(1) // 积分历史当前页（从 1 开始）
+const creditTotal = ref(0) // 积分历史过滤后总条数（服务端返回）
+const creditNote = ref('') // 积分历史统计说明（总条数 · 净变动）
 
 // 是否存在生效中的筛选条件，用于区分两种空状态文案
 const hasActiveFilter = computed(() => {
@@ -162,6 +171,11 @@ const hasActiveFilter = computed(() => {
 // 缓存 Token 为 0 时显示占位符，非 0 时显示千分位数字
 function formatCacheTokens(value) {
   return value ? formatNumber(value) : '-'
+}
+
+// Token 单元：未知（上游未提供，null/undefined）显示 -，0 是有效值显示 0
+function formatTokenCell(value) {
+  return value === null || value === undefined ? '-' : formatNumber(value)
 }
 
 // 使用记录列：最多显示前 30 字，完整内容通过 title 悬停查看
@@ -176,6 +190,18 @@ function formatCredits(value) {
   const n = Number(value)
   if (!Number.isFinite(n) || n === 0) return '-'
   return String(Math.round(n * 1000) / 1000)
+}
+
+// 「重试/降级」徽标文本：降级（换模型）优先，其次重试（失败后恢复）
+function degradedTagText(log) {
+  return log.fallback ? '降级' : '重试'
+}
+
+// 「重试/降级」徽标悬停说明：优先展示降级链路，其次展示恢复前的错误
+function degradedTitle(log) {
+  if (log.fallback && log.fallbackFrom) return `降级：${log.fallbackFrom} → ${log.model}`
+  if (log.fallback) return '降级：由备用模型完成'
+  return `重试：${log.error || '中途出现失败后恢复'}`
 }
 
 // 账号列显示名：优先账号池昵称，未命中（账号已删或昵称为空）回退 uid 前 8 位，无 uid 显示 -
@@ -242,25 +268,40 @@ function deltaClass(delta) {
   return 'text-muted'
 }
 
-// 积分历史统计说明：条数与净变动（净值 0 不带符号）
-function creditNoteText(entries) {
-  if (!entries.length) return '暂无积分变动记录'
-  let net = 0
-  for (const e of entries) net += Number(e.delta) || 0
+// 积分历史统计说明：总条数与净变动（净值 0 不带符号）
+function creditNoteText(total, net) {
+  if (!total) return '暂无积分变动记录'
   const sign = net > 0 ? '+' : net < 0 ? '−' : ''
-  return `${entries.length} 条 · 净 ${sign}${formatNumber(Math.abs(net))}`
+  return `${total} 条 · 净 ${sign}${formatNumber(Math.abs(net))}`
 }
 
-// 加载积分变动流水；失败降级为空列表并提示，不影响日志主流程
+// 加载积分变动流水当前页；失败降级为空列表并提示，不影响日志主流程
 async function loadCreditHistory() {
   try {
-    const data = await wbCreditHistory(creditLimit.value)
+    const data = await wbCreditHistory({
+      limit: CREDIT_PAGE_SIZE,
+      uid: creditUid.value,
+      offset: (creditPage.value - 1) * CREDIT_PAGE_SIZE
+    })
     creditEntries.value = data?.entries || []
-    creditNote.value = creditNoteText(creditEntries.value)
+    creditTotal.value = Number(data?.total) || 0
+    creditNote.value = creditNoteText(creditTotal.value, Number(data?.net) || 0)
   } catch {
     creditEntries.value = []
+    creditTotal.value = 0
     creditNote.value = '加载失败'
   }
+}
+
+// 积分历史总页数（至少 1 页，避免出现「第 1 / 0 页」）
+const creditTotalPages = computed(() => Math.max(1, Math.ceil(creditTotal.value / CREDIT_PAGE_SIZE)))
+
+// 积分历史翻页：边界收紧后重新加载
+function changeCreditPage(delta) {
+  const next = creditPage.value + delta
+  if (next < 1 || next > creditTotalPages.value) return
+  creditPage.value = next
+  loadCreditHistory()
 }
 
 // 全量刷新：日志 + 模型选项 + 目录占用 + 账号池昵称 + 积分历史
@@ -291,8 +332,11 @@ async function clearAllLogs() {
 // 模型 / 状态 / 条数变化后立即重新加载
 watch([modelFilter, statusFilter, limit], loadLogs)
 
-// 积分历史读取条数变化后立即重新加载
-watch(creditLimit, loadCreditHistory)
+// 积分历史账号筛选变化：回到第一页重新加载
+watch(creditUid, () => {
+  creditPage.value = 1
+  loadCreditHistory()
+})
 
 onMounted(refreshAll)
 </script>
@@ -366,6 +410,25 @@ onMounted(refreshAll)
   padding: 6px 10px;
 }
 
+.credit-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 12px;
+  font-size: 12px;
+}
+
+.scroll-log {
+  max-height: 460px;
+  overflow: auto;
+}
+
+.scroll-credit {
+  max-height: 300px;
+  overflow: auto;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -415,6 +478,16 @@ onMounted(refreshAll)
 .text-yellow {
   color: var(--warning);
   font-size: 12px;
+}
+
+.outcome-tag {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--warning);
+  border-radius: 3px;
+  color: var(--warning);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .text-muted {

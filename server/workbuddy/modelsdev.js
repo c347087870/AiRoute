@@ -1,37 +1,35 @@
 // WorkBuddy 模型目录兜底第 4 级：models.dev 聚合目录按需拉取
-// 翻译自参考项目 internal/upstream/modelsdev.go（端点 / 解析 / 缓存语义）
 //
 // 定位：只对「上游动态值缺失 + 静态种子表未收录 + model.json 未缓存」的模型查
 // models.dev，是兜底的兜底——超时短（5s）、失败静默降级，绝不阻塞 /v1/models 主路径：
 // 查找异步化，本次请求直接返回兜底值，拉到后由 catalog 写 model.json 供下次命中。
 //
-// 缓存语义（对齐任务书）：成功索引 1h 内复用不重拉；失败 5min 负缓存内不重拉；
+// 缓存语义：成功索引 1h 内复用不重拉；失败 5min 负缓存内不重拉；
 // 首次未命中仅触发后台异步拉取，本次 lookup 返回 null。
 //
-// 数据源 schema（与参考一致）：{ "<provider>": { "models": { "<id>": { "limit":
+// 数据源 schema：{ "<provider>": { "models": { "<id>": { "limit":
 // { "context": N, "output": N } } } } }，模型 id 有裸名与带命名空间（openai/gpt-5.5）
 // 两种形态，均取尾段做索引 key；多 provider 同名分歧时官方 vendor 源优先，其余取众数。
 
 const axios = require('axios')
 const C = require('./constants')
 
-// 单次拉取超时：兜底的兜底，不值得等（参照 modelsDevTimeout）
+// 单次拉取超时：兜底的兜底，不值得等
 const FETCH_TIMEOUT_MS = 5000
 
-// 成功索引缓存时长：1h 内复用不再打 models.dev（参照任务书「1h 成功缓存」）
+// 成功索引缓存时长：1h 内复用不再打 models.dev
 const DEFAULT_SUCCESS_TTL_MS = 60 * 60 * 1000
 
-// 拉取失败负缓存时长：5min 内不重拉（参照任务书「5min 失败负缓存」）
+// 拉取失败负缓存时长：5min 内不重拉
 const DEFAULT_FAIL_COOLDOWN_MS = 5 * 60 * 1000
 
-// 值校验量级上限：context/output 超过 1e9 视为脏数据拒绝（参照 modelsDevValueMax）
+// 值校验量级上限：context/output 超过 1e9 视为脏数据拒绝
 const VALUE_MAX = 1e9
 
-// 响应体上限：聚合文档实测 ~4.7MB，留余量（参照 modelsDevMaxBody）
+// 响应体上限：聚合文档实测 ~4.7MB，留余量
 const MAX_BODY_BYTES = 32 << 20
 
 // 官方 vendor provider 优先名单：聚合网关自报的 limit 常与官方源分歧，官方源优先
-// （参照 modelsDevVendorSources）
 const VENDOR_SOURCES = new Set(['zai', 'moonshotai', 'moonshotai-cn', 'openai', 'google', 'deepseek', 'minimax'])
 
 // 模块级单例状态（纯函数 + 模块级缓存，禁止 class）

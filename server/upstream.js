@@ -82,12 +82,30 @@ function toNum(value) {
   return Number.isFinite(num) && num > 0 ? num : 0
 }
 
-function emptyUsage() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+// 数值解析（区分"没给"与"给了 0"）：缺省/空串/非法/负值 → null 表示上游未提供；0 是有效值
+function toNumOrNull(value) {
+  if (value === null || value === undefined || value === '') return null
+  const num = Number(value)
+  return Number.isFinite(num) && num >= 0 ? num : null
 }
 
+// 未知用量（上游没给 usage）：各字段为 null（"未提供"），与"给了 0"区分；
+// null 参与算术运算等价 0，累加统计不受影响，仅请求日志保留"未知"语义
+function emptyUsage() {
+  return { input: null, output: null, cacheRead: null, cacheWrite: null }
+}
+
+// 合计 token（数值口径，供累加统计）：缺失字段按 0 计
 function usageTotal(usage) {
-  return usage.input + usage.cacheRead + usage.cacheWrite + usage.output
+  return (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0) + (usage.output || 0)
+}
+
+// 合计 token（区分口径，供请求日志）：四项全缺失（null）时返回 null（"未知"），否则按缺失项记 0 求和
+function usageTotalOrNull(usage) {
+  const keys = ['input', 'output', 'cacheRead', 'cacheWrite']
+  const known = keys.some(k => usage && usage[k] !== null && usage[k] !== undefined)
+  if (!known) return null
+  return keys.reduce((sum, k) => sum + (Number(usage?.[k]) || 0), 0)
 }
 
 // 非流式响应中提取用量
@@ -97,20 +115,21 @@ function extractUsage(data, isAnthropic) {
 
   if (isAnthropic) {
     return {
-      input: toNum(data.usage.input_tokens),
-      output: toNum(data.usage.output_tokens),
-      cacheRead: toNum(data.usage.cache_read_input_tokens),
-      cacheWrite: toNum(data.usage.cache_creation_input_tokens)
+      input: toNumOrNull(data.usage.input_tokens),
+      output: toNumOrNull(data.usage.output_tokens),
+      cacheRead: toNumOrNull(data.usage.cache_read_input_tokens),
+      cacheWrite: toNumOrNull(data.usage.cache_creation_input_tokens)
     }
   }
 
-  const cached = toNum(data.usage.prompt_tokens_details?.cached_tokens)
-  const prompt = toNum(data.usage.prompt_tokens)
+  const cached = toNumOrNull(data.usage.prompt_tokens_details?.cached_tokens)
+  const prompt = toNumOrNull(data.usage.prompt_tokens)
   return {
-    input: Math.max(0, prompt - cached),
-    output: toNum(data.usage.completion_tokens),
+    // 未缓存输入 = prompt - cached；prompt 未提供时记 null（不假装 0）
+    input: prompt === null ? null : Math.max(0, prompt - (cached || 0)),
+    output: toNumOrNull(data.usage.completion_tokens),
     cacheRead: cached,
-    cacheWrite: 0
+    cacheWrite: null // OpenAI 协议无缓存写入项：null = 未提供（不是 0）
   }
 }
 
@@ -141,32 +160,32 @@ function parseUsageLine(line, isAnthropic) {
     const data = JSON.parse(dataStr)
 
     if (isAnthropic) {
-      // message_start 携带输入与缓存用量，message_delta 携带输出用量
+      // message_start 携带输入与缓存用量（无输出用量 → null），message_delta 携带输出用量
       if (data.type === 'message_start' && data.message?.usage) {
         const usage = data.message.usage
         return {
-          input: toNum(usage.input_tokens),
-          output: 0,
-          cacheRead: toNum(usage.cache_read_input_tokens),
-          cacheWrite: toNum(usage.cache_creation_input_tokens)
+          input: toNumOrNull(usage.input_tokens),
+          output: null,
+          cacheRead: toNumOrNull(usage.cache_read_input_tokens),
+          cacheWrite: toNumOrNull(usage.cache_creation_input_tokens)
         }
       }
       if (data.type === 'message_delta' && data.usage) {
         return {
-          input: toNum(data.usage.input_tokens),
-          output: toNum(data.usage.output_tokens),
-          cacheRead: toNum(data.usage.cache_read_input_tokens),
-          cacheWrite: toNum(data.usage.cache_creation_input_tokens)
+          input: toNumOrNull(data.usage.input_tokens),
+          output: toNumOrNull(data.usage.output_tokens),
+          cacheRead: toNumOrNull(data.usage.cache_read_input_tokens),
+          cacheWrite: toNumOrNull(data.usage.cache_creation_input_tokens)
         }
       }
     } else if (data.usage) {
-      const cached = toNum(data.usage.prompt_tokens_details?.cached_tokens)
-      const prompt = toNum(data.usage.prompt_tokens)
+      const cached = toNumOrNull(data.usage.prompt_tokens_details?.cached_tokens)
+      const prompt = toNumOrNull(data.usage.prompt_tokens)
       return {
-        input: Math.max(0, prompt - cached),
-        output: toNum(data.usage.completion_tokens),
+        input: prompt === null ? null : Math.max(0, prompt - (cached || 0)),
+        output: toNumOrNull(data.usage.completion_tokens),
         cacheRead: cached,
-        cacheWrite: 0
+        cacheWrite: null
       }
     }
   } catch {
@@ -202,13 +221,12 @@ function createStreamUsageExtractor(isAnthropic) {
   }
 }
 
-// 合并流式多帧用量：每个字段取最后一次出现的大于 0 的值
+// 合并流式多帧用量：每个字段取最后一次提供的值；null（未提供）不覆盖已有值，0 是有效值可覆盖
 function mergeStreamUsage(target, incoming) {
   if (!incoming) return
-  if (incoming.input > 0) target.input = incoming.input
-  if (incoming.output > 0) target.output = incoming.output
-  if (incoming.cacheRead > 0) target.cacheRead = incoming.cacheRead
-  if (incoming.cacheWrite > 0) target.cacheWrite = incoming.cacheWrite
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+    if (incoming[key] !== null && incoming[key] !== undefined) target[key] = incoming[key]
+  }
 }
 
 module.exports = {
@@ -221,5 +239,7 @@ module.exports = {
   mergeStreamUsage,
   emptyUsage,
   usageTotal,
-  toNum
+  usageTotalOrNull,
+  toNum,
+  toNumOrNull
 }

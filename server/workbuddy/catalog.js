@@ -1,5 +1,4 @@
 // WorkBuddy 模型目录兜底链：上下文窗口 / 输出上限 / 思考档位
-// 翻译自参考项目 internal/upstream/{context_catalog.go, effort_catalog.go, model_catalog.go}
 //
 // 查找链（上游动态值永远权威）：
 //  1. 上游动态值（maxInputTokens / maxOutputTokens）——权威，压过静态种子表与 model.json；
@@ -16,10 +15,10 @@ const path = require('path')
 const C = require('./constants')
 const modelsdev = require('./modelsdev')
 
-// 全链未收录模型的 context_length 兜底：1M（参照 DefaultContextWindow）
+// 全链未收录模型的 context_length 兜底：1M
 const DEFAULT_CONTEXT_WINDOW = 1000000
 
-// 上下文窗口 / 输出上限静态种子表（逐条来源见参考 context_catalog.go）
+// 上下文窗口 / 输出上限静态种子表
 // context 必为正；maxOutput 为 0 表示输出上限未知（省略不编造）
 const CONTEXT_SEED = {
   // ---- GLM 家族（z-ai）----
@@ -49,7 +48,7 @@ const CONTEXT_SEED = {
   'deepseek-v4.1-flash': { context: 1000000, maxOutput: 384000 } // 实测外推 + models.dev 共识
 }
 
-// 思考档位静态兜底表（参照 cnEffortFallback，逐条来源见 effort_catalog.go）
+// 思考档位静态兜底表
 const CN_EFFORT_SEED = {
   'deepseek-v4-flash': { efforts: ['low', 'high', 'max'] },
   'deepseek-v4.1-flash': { efforts: ['low', 'high', 'max'], defaultEffort: 'high' },
@@ -83,7 +82,7 @@ function num(v) {
   return Number.isFinite(n) ? Math.trunc(n) : 0
 }
 
-// 条目校验：context 正数 + 输出非负（参照 validCapEntry）
+// 条目校验：context 正数 + 输出非负
 function validEntry(e) {
   return !!e && num(e.context_length) > 0 && num(e.max_output_tokens) >= 0
 }

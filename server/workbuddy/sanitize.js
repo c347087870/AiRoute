@@ -1,5 +1,4 @@
 // 指纹脱敏：出站请求体中对客户端指纹串做剥离与最小改写，避免上游内容审核逐字误杀
-// 翻译自参考项目 internal/upstream/sanitize.go，行为逐字对齐
 
 // 特征预检子串（大小写敏感 Contains），任一命中才进入净化流程
 const SANITIZE_FEATURES = [

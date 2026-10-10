@@ -1,9 +1,8 @@
 // 系统提示词体系：出站前替换/追加网关自有 system 提示词，从源头消灭 system 来源的指纹误报
-// 翻译自参考项目 internal/prompt/prompt.go + defaultprompt.md
 
 const fs = require('fs')
 
-// 内置默认提示词（约 2KB，逐字取自参考项目 defaultprompt.md）
+// 内置默认提示词（约 2KB）
 const DEFAULT_PROMPT = `# 系统提示词
 
 你是一名工程助手，帮助用户完成软件工程任务。以下原则指导你的行为。

@@ -1,5 +1,4 @@
 // WorkBuddy 定时任务调度器：签到（含连登管家）/ 活跃上报 / 猫猫旅行 / token 保活 / 夜猫子 + 余额后台刷新
-// 翻译自参考项目 internal/scheduler/*.go 与 internal/upstream/{report,travel,streak,blackcat}.go
 // 纯函数风格（无 class）；依赖全部由调用方注入（见文件末尾 createScheduler 的 deps 说明）
 
 const crypto = require('crypto')
@@ -186,14 +185,21 @@ function createScheduler(deps) {
 
   // ===== 通用工具（闭包内，需 deps）=====
 
-  // 客户端调用选项（与 runtime rtOpts 同口径）
+  // 客户端调用选项（与 runtime rtOpts 同口径：identity 全字段透传 + 域名映射）
   function baseOpts() {
+    const id = typeof deps.identityFor === 'function' ? deps.identityFor() || {} : {}
     return {
-      clientVersion: C.DEFAULT_CLIENT_VERSION,
-      cliVersion: C.DEFAULT_CLI_VERSION,
+      // 客户端指纹与版本覆盖（留空回落官方默认；实时读取，热改后任务类请求同样跟随）
+      identity: id,
       clientName: 'WorkBuddy',
       userAgent: '',
-      passthroughIP: false
+      // 使用端身份：由 runtime 注入的 getter 实时读取（热改后任务类请求同样跟随）
+      clientIdentity: typeof deps.clientIdentityFor === 'function' ? deps.clientIdentityFor() : '',
+      passthroughIP: false,
+      // 域名三件套（identity 覆盖；留空回落 CN 默认）
+      chatBaseCN: id.chatBase || '',
+      billingBaseCN: id.billingBase || '',
+      webBaseCN: id.webBase || ''
     }
   }
 

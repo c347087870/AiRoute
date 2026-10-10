@@ -1,8 +1,6 @@
-// 用量 / 积分消耗统计（移植自参考项目 internal/usage/usage.go）
-//
-// 与 pool 的 token 台账区别：pool 是「每账号一个累计计数器」，没有时间维度；
-// 本模块按 (时间片, uid, model, rate) 分桶累计，可出「某小时各模型用了多少」
-// 「积分扣了多少」这类问题，且长期保留。
+// 用量记录（按时间片分桶）：与 pool 的 token 台账不同——pool 是每账号一个累计
+// 计数器、没有时间维度；本模块按 (时间片, uid, model, rate) 分桶累计，可回答
+//「某小时各模型用了多少 / 积分扣了多少」，且长期保留。
 //
 // 保留策略（分片粒度自动降级，总量有界）：
 //   - 近 USAGE_HOURLY_KEEP_HOURS 小时内：小时桶（细粒度，看尖峰）
@@ -11,7 +9,7 @@
 //
 // 落盘：data/usage.json，原子替换（tmp + rename）+ 防抖刷新，重启不丢。
 //
-// 实现约定：纯函数 + 闭包状态，禁止 class；中文注释。
+// 实现约定：纯函数 + 闭包状态。
 
 const fs = require('fs')
 const path = require('path')
@@ -36,6 +34,18 @@ function hourScopeOf(ms) {
 function dayScopeOf(ms) {
   const d = new Date(ms)
   return `d:${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+// 本地日期键（YYYY-MM-DD，不带分片前缀）
+function dayKeyOf(ms) {
+  return dayScopeOf(ms).slice(2)
+}
+
+// 本地日 0 点时间戳（「今天 / 昨天」窗口边界）
+function dayStartOf(ms) {
+  const d = new Date(ms)
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
 }
 
 // 解析分片键回本地时间戳（解析失败返回 NaN）
@@ -123,7 +133,9 @@ function accFinish(a) {
 }
 
 // 归一窗口小时数：默认 USAGE_HOURS_DEFAULT；<=0 → 全历史(0)；>上限 → 上限
+// 字符串窗口透传：'today'（今天 0 点起）/ 'yesterday'（昨天整段）
 function normHours(hours) {
+  if (hours === 'today' || hours === 'yesterday') return hours
   if (hours === null || typeof hours === 'undefined' || hours === '') return C.USAGE_HOURS_DEFAULT
   const n = Number(hours)
   if (!Number.isFinite(n) || n <= 0) return 0
@@ -350,12 +362,18 @@ function createUsage(opts = {}) {
 
   // 聚合所选窗口内的桶，产出面板一次拉取的全部用量视图数据
   //   hours 默认 USAGE_HOURS_DEFAULT；上限 USAGE_HOURS_MAX；0 = 全部历史（含日桶）
+  //   'today' = 本地今天 0 点起；'yesterday' = 昨天 0 点 ～ 今天 0 点（整段）
+  //   附带 yesterday：昨天本地日全天合计（与所选窗口无关）
   function snapshot(hoursArg) {
     const hours = normHours(hoursArg)
-    const windowed = hours > 0
+    const windowed = hours === 'today' || hours === 'yesterday' || hours > 0
     const nowMs = currentMs()
     const nowHour = Math.floor(nowMs / 3600000) * 3600000
-    const hourFrom = nowHour - (windowed ? (hours - 1) * 3600000 : 0)
+    const todayStart = dayStartOf(nowMs)
+    const windowFrom = hours === 'today' ? todayStart
+      : hours === 'yesterday' ? dayStartOf(nowMs - 86400000)
+        : nowHour - (windowed ? (hours - 1) * 3600000 : 0)
+    const windowTo = hours === 'yesterday' ? todayStart : 0
 
     const total = newAcc()
     const acctAgg = new Map()
@@ -367,13 +385,18 @@ function createUsage(opts = {}) {
 
     let since = ''
     let matched = 0
+    // 昨天（最近一个完整自然日）全天合计：独立于窗口选择
+    const yDay = dayKeyOf(nowMs - 86400000)
+    const yAcc = newAcc()
 
     for (const b of buckets.values()) {
       if (since === '' || b.s < since) since = b.s
+      const ts = parseScopeMs(b.s)
+      // 昨天汇总：小时桶与日桶都按本地日期归并
+      if (!isNaN(ts) && dayKeyOf(ts) === yDay) accAdd(yAcc, b)
       if (windowed) {
-        const ts = parseScopeMs(b.s)
-        // 解析失败的脏桶不进窗口聚合
-        if (isNaN(ts) || ts < hourFrom) continue
+        // 解析失败的脏桶不进窗口聚合；昨天窗口上边界为今天 0 点（排他）
+        if (isNaN(ts) || ts < windowFrom || (windowTo && ts >= windowTo)) continue
       }
       matched++
       accAdd(total, b)
@@ -435,7 +458,7 @@ function createUsage(opts = {}) {
     }
     const byAccount = keyed(acctAgg)
 
-    // 时序：日点升序在前，小时点升序在后（与参考口径一致）
+    // 时序：日点升序在前，小时点升序在后
     const series = []
     const dayKeys = Array.from(daySeries.keys()).sort()
     for (const k of dayKeys) series.push({ t: k, scope: 'day', ...accFinish(daySeries.get(k)) })
@@ -453,6 +476,7 @@ function createUsage(opts = {}) {
 
     return {
       totals: accFinish(total),
+      yesterday: { day: yDay, ...accFinish(yAcc) },
       by_account: byAccount,
       by_model: keyed(modelAgg),
       series,

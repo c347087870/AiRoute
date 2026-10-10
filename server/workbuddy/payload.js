@@ -1,15 +1,24 @@
 // 聊天请求体改写管线：出站前把客户端 body 改写为上游可接受的形态
-// 翻译自参考项目 internal/upstream/payload.go / thinking.go / cache_key.go / tool_pairing.go
-// 步骤顺序严格与参考实现一致（S1..S14），不可调整
+// 步骤顺序固定（S1..S14），不可调整
 
 const crypto = require('crypto')
+const C = require('./constants')
 const sanitize = require('./sanitize')
 
 // 档位序：off < minimal < low < medium < high < xhigh < max
 const EFFORT_RANK = { off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6 }
 
 // 完整管线：S1..S14
-// opts: { sanitize: bool, efforts: {model: [档位]}, defaultEfforts: {model: 默认档} }
+// opts: {
+//   sanitize: bool,                                   // 指纹脱敏开关
+//   efforts: {model: [档位]},                         // 各模型支持的档位（降级用）
+//   defaultEfforts: {model: 默认档},                  // 各模型默认档（补档用）
+//   contextWindow: number,                            // 模型上下文窗口（压缩判据；0/缺省不压缩）
+//   maxOutput: number,                                // 模型输出上限（max_tokens 兜底注入；0/缺省不注入）
+//   compressRatio: number,                            // 压缩阈值比例（默认 0.8；上游报超长后改用 0.5）
+//   compress: bool,                                   // 是否启用上下文压缩（默认启用）
+//   rewriteMode: 'compat' | 'native'                  // 改写档位（默认 compat 全量修补；native 只保留上游硬性步骤）
+// }
 function prepareBody(src, opts = {}) {
   if (!src) return src
   let obj
@@ -24,27 +33,46 @@ function prepareBody(src, opts = {}) {
   obj.stream = true
   // S3 max_completion_tokens 别名翻译
   translateMaxCompletionTokens(obj)
+  // S3b 输出上限兜底：客户端未指定时按模型配置注入，避免上游把输出预算压得过低，
+  // 思考模型会因此把预算全花在 reasoning 上、最终回答为空（finish_reason=length）
+  if (obj.max_tokens === undefined || obj.max_tokens === null) {
+    const limit = Number(opts.maxOutput) || 0
+    if (limit > 0) obj.max_tokens = limit
+  }
   // S4 stream_options 默认补 include_usage
   if (!Object.prototype.hasOwnProperty.call(obj, 'stream_options')) {
     obj.stream_options = { include_usage: true }
   }
-  // S5..S8 各类归一化
-  normalizeToolChoice(obj)
-  normalizeToolPatterns(obj)
+  // 改写档位：compat=默认全量修补；native=原生透传（跳过工具参数/工具历史/消息内容的主动修补，
+  // 只保留上游硬性要求与结构映射），供工具调用被改写导致异常时保真直通
+  const native = opts.rewriteMode === 'native'
+  // S5..S8 各类归一化（native 跳过工具类修补：tool_choice 归一、schema 修正）
+  if (!native) {
+    normalizeToolChoice(obj)
+    normalizeToolPatterns(obj)
+  }
+  // 角色与图片结构映射属上游硬性要求，两种档位都保留
   normalizeRoles(obj)
   normalizeImageURL(obj)
-  // S9 tool 配对两步：先重排再清理孤儿
+  // S9 上下文压缩（native 不压缩）
+  if (!native) {
+    // S9 上下文压缩（先于配对清理：裁掉最旧整轮后，再统一清理孤儿 tool_call）
+    const compressed = compressContext(obj, opts)
+    if (compressed) obj.messages = compressed
+  }
+  // S9 工具配对三步（各档位统一执行：属"让请求合法"的必要归一而非语义改写；不修会被上游以 11148/503 拒绝）
   if (Array.isArray(obj.messages)) {
+    obj.messages = mergeAdjacentToolCalls(obj.messages)
     obj.messages = repackToolResultBlocks(obj.messages)
     obj.messages = cleanupOrphanToolCalls(obj.messages)
   }
-  // S10 DeepSeek 思维链注入（先于档位降级：补入的默认档也要走降级）
+  // S10 DeepSeek 思维链注入（先于档位降级：补入的默认档也要走降级；native 不注入）
   const modelName = typeof obj.model === 'string' ? obj.model : ''
-  injectThinking(obj, lookupDefaultEffort(opts.defaultEfforts, modelName))
-  // S11 档位降级
+  if (!native) injectThinking(obj, lookupDefaultEffort(opts.defaultEfforts, modelName))
+  // S11 档位降级（上游对不支持的档位会 400，两种档位都保留）
   normalizeReasoningEffort(obj, opts.efforts)
-  // S12 reasoning_content 多轮回填
-  backfillReasoningContent(obj)
+  // S12 reasoning_content 多轮回填（native 跳过）
+  if (!native) backfillReasoningContent(obj)
   // S13 指纹脱敏（仅开关开启时）
   if (opts.sanitize) {
     if (Array.isArray(obj.messages)) sanitize.sanitizeMessages(obj.messages)
@@ -55,6 +83,118 @@ function prepareBody(src, opts = {}) {
   } catch {
     return src
   }
+}
+
+// S9：上下文压缩
+// 触发条件：估算 token 超过模型上下文窗口 × ratio（默认 0.8）；窗口未知（0）时不裁剪。
+// 裁剪单位是「轮」而不是「条」：一条 user 开启新的一轮，其后的 assistant / tool 结果
+// 全部归入同一轮。按条裁会把工具调用与其结果拆散，配对清理随后把两侧都删掉，反而丢更多。
+// system 消息独立成组且永不裁剪（它是指令）；最新一轮同样永不裁剪（那是本次提问，
+// 裁掉等于请求语义丢失）。返回裁剪后的 messages；未触发裁剪时返回 null（保留原数组）
+function compressContext(obj, opts) {
+  if (opts.compress === false) return null
+  const window = Number(opts.contextWindow) || 0
+  if (!(window > 0)) return null
+  const messages = obj.messages
+  if (!Array.isArray(messages) || messages.length === 0) return null
+
+  const ratio = clampRatio(opts.compressRatio)
+  const budget = Math.floor(window * ratio)
+  const groups = groupTurns(messages)
+  let kept = groups.length
+  let tokens = estimateTokens(messages)
+
+  // 从最旧的「非保护组」开始整组丢弃，直到估算值落进预算（至少留 minKeepTurns 组）
+  for (let i = 0; i < groups.length && tokens > budget; i++) {
+    const g = groups[i]
+    if (g.protected || kept <= C.CONTEXT_COMPRESS.minKeepTurns) continue
+    tokens -= g.tokens
+    g.dropped = true
+    kept--
+  }
+  if (!groups.some(g => g.dropped)) return null
+
+  const out = []
+  for (const g of groups) {
+    if (!g.dropped) out.push(...g.items)
+  }
+  return out
+}
+
+// 压缩比例合法性钳制（非法/越界一律回落默认值）
+function clampRatio(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0 || n >= 1) return C.CONTEXT_COMPRESS.ratio
+  return n
+}
+
+// 把 messages 切成「轮」：每条 user 与其后到下一轮之前的全部消息同属一组；
+// 开头连续的 system/developer 归为受保护的独立组（永不裁剪）
+function groupTurns(messages) {
+  const groups = []
+  let current = null
+  for (const m of messages) {
+    const role = m && typeof m === 'object' && !Array.isArray(m) ? String(m.role || '') : ''
+    const isSystem = role === 'system' || role === 'developer'
+    if (isSystem) {
+      // system 独立成组（受保护）；轮进行中出现的 system 也单独成组
+      current = { items: [m], tokens: tokenCountOf(m.content), protected: true, dropped: false }
+      groups.push(current)
+      continue
+    }
+    if (role === 'user' || !current) {
+      // user 开启新的一轮
+      current = { items: [m], tokens: tokenCountOf(m.content), protected: false, dropped: false }
+      // 消息里的 tool_calls 与 reasoning 也要计入（它们同样占用上游上下文）
+      current.tokens += tokenCountOf(m.tool_calls)
+      groups.push(current)
+      continue
+    }
+    current.items.push(m)
+    current.tokens += tokenCountOf(m.content) + tokenCountOf(m.tool_calls)
+  }
+  return groups
+}
+
+// 估算 token 总量（整条 messages 的近似值）
+function estimateTokens(messages) {
+  let sum = 0
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue
+    sum += tokenCountOf(m.content) + tokenCountOf(m.tool_calls)
+  }
+  return sum
+}
+
+// 单段内容估算：字符串按字节数折算，图片按固定值计，数组逐块累加
+function tokenCountOf(content) {
+  if (typeof content === 'string') {
+    return Math.ceil(Buffer.byteLength(content, 'utf8') / C.CONTEXT_COMPRESS.bytesPerToken)
+  }
+  if (Array.isArray(content)) {
+    let sum = 0
+    for (const part of content) {
+      if (!part || typeof part !== 'object') continue
+      // 图片/base64 块按固定值计，避免数 MB 的 base64 被按字节换算成天量 token
+      if (part.type === 'image_url' || part.type === 'image' || part.type === 'input_image') {
+        sum += C.CONTEXT_COMPRESS.imageTokens
+        continue
+      }
+      if (typeof part.text === 'string') sum += tokenCountOf(part.text)
+      else sum += tokenCountOf(part.content)
+    }
+    return sum
+  }
+  if (content && typeof content === 'object') {
+    let s = ''
+    try {
+      s = JSON.stringify(content)
+    } catch {
+      s = ''
+    }
+    return tokenCountOf(s)
+  }
+  return 0
 }
 
 // S3：把 max_completion_tokens 翻译为 max_tokens（别名一律删除；显式 max_tokens 优先）
@@ -172,6 +312,65 @@ function normalizeImageURL(obj) {
       }
     }
   }
+}
+
+// S9 工具配对第 0 步：合并背靠背相邻的同批 assistant 工具声明（须先于 repack 与 cleanup）
+// 形态一：本条 assistant 仅有非空 tool_calls 无正文 → 声明顺序拼接进上一条同型 assistant
+// 形态二：本条 assistant 是纯文本（连 tool_calls 键都没有）→ 折进上一条无正文的 calls assistant
+// 意义：deepseek 系对"拆成两条 assistant 的 tool_calls"直接 503/11148，合并成一条才通过；中间隔着消息说明不是同一批声明，一律不合并而交 repack 处理
+function mergeAdjacentToolCalls(messages) {
+  if (!Array.isArray(messages) || messages.length < 2) return messages
+  const out = []
+  let changed = false
+
+  for (const msg of messages) {
+    if (msg && typeof msg === 'object' && !Array.isArray(msg) && msg.role === 'assistant' && out.length > 0) {
+      const prev = out[out.length - 1]
+      const prevOk =
+        prev &&
+        typeof prev === 'object' &&
+        !Array.isArray(prev) &&
+        prev.role === 'assistant' &&
+        Array.isArray(prev.tool_calls) &&
+        prev.tool_calls.length > 0
+      const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : null
+
+      // 形态一：只有工具声明没有正文 → 并入上一条（顺序拼接，不去重，重复 id 交 cleanup 兜底）
+      if (prevOk && calls && calls.length > 0 && isEmptyContent(msg.content)) {
+        prev.tool_calls = prev.tool_calls.concat(calls)
+        mergeReasoningContent(prev, msg)
+        changed = true
+        continue
+      }
+
+      // 形态二：纯文本折进上一条（prev 自身无正文时才无损）
+      if (prevOk && !('tool_calls' in msg) && typeof msg.content === 'string' && msg.content !== '' && isEmptyContent(prev.content)) {
+        prev.content = msg.content
+        mergeReasoningContent(prev, msg)
+        changed = true
+        continue
+      }
+    }
+    out.push(msg)
+  }
+
+  return changed ? out : messages
+}
+
+// 判空口径：null/undefined、空串、长度 0 的数组都算空；非空数组（多模态）视为有内容，宁可不合并也不丢内容
+function isEmptyContent(v) {
+  if (v === null || v === undefined) return true
+  if (typeof v === 'string') return v === ''
+  if (Array.isArray(v)) return v.length === 0
+  return false
+}
+
+// 合并思维链：src 无 reasoning_content 则不动；dst 已有非空值则换行拼接，否则直接赋值（不丢思维链）
+function mergeReasoningContent(dst, src) {
+  const rc = typeof src.reasoning_content === 'string' ? src.reasoning_content : ''
+  if (!rc) return
+  const cur = typeof dst.reasoning_content === 'string' ? dst.reasoning_content : ''
+  dst.reasoning_content = cur ? `${cur}\n${rc}` : rc
 }
 
 // S9a：把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息挪到整组之后

@@ -1,12 +1,11 @@
 // WorkBuddy 成长任务模块：17 项任务一键完成 + 任务中心扫描
-// 翻译自参考项目 internal/upstream/{desktop,tasks,blackcat,report,travel}.go
-// 与 internal/panel/{autotask,taskcenter}.go；事件结构、事件名、域名与指纹族
-// 逐字对齐规格文档 04-growth-tasks.md。
+// 事件结构按上游规格固定。
 //
 // 三种指纹：
 //   CLI   —— {billingBase}/v2/report（BillingHeaders，无端标记头）
-//   桌面  —— {chatBase}/v2/report（DESKTOP_UA + workbuddy-desktop 事件族）
+//   桌面  —— {chatBase}/v2/report（桌面 UA + workbuddy-desktop 事件族）
 //   Web   —— {webBase}/v2/report（x-client-platform: web）
+// 以上 UA / 版本 / 事件体指纹均为官方默认值，可由配置 identity 逐项覆盖（见 identity.js）
 // 领奖走 Web 域 /activity/growth/tasks/{code}/claim（x-client-platform: web）。
 
 const crypto = require('crypto')
@@ -15,12 +14,12 @@ const headersMod = require('./headers')
 const errMod = require('./errors')
 const clientMod = require('./client')
 
-// ===== 节流与轮询参数（对齐 Go 源码常量）=====
+// ===== 节流与轮询参数 =====
 const REPORT_GAP = 1050 // 连续上报 / 项间节流（ms）
-const CLAIM_POLL_ATTEMPTS = 4 // 达标回读有界轮询次数（含首次读，对齐 claimPollAttempts=4）
-const CLAIM_POLL_GAP = 3000 // 达标回读轮询间隔（ms，对齐 claimPollGap=3s，总预算约 12s）
+const CLAIM_POLL_ATTEMPTS = 4 // 达标回读有界轮询次数（含首次读）
+const CLAIM_POLL_GAP = 3000 // 达标回读轮询间隔（ms，总预算约 12s）
 const ACCEPT_BATCH = 20 // 批量接受分片大小（上游对 task_codes 长度无公开上限，保守 20）
-const ACCEPT_BATCH_GAP = 1050 // 批量接受的批间节流（ms，对齐 acceptBatchGap）
+const ACCEPT_BATCH_GAP = 1050 // 批量接受的批间节流（ms）
 const MP_ACTION_GAP = 2000 // mp 任务写动作间隔（accept/回读之间，防频控）
 const MP_CHAT_EVENT_GAP = 45000 // mp 对话事件真人节奏间隔（ms；连发会被反作弊回滚）
 const MP_CHAT_EVENT_JITTER = 10000 // mp 对话事件随机抖动上限（ms）
@@ -41,9 +40,20 @@ const MP_TASK_CODES = new Set([
 ])
 const MP_OPEN_DAY_ACTIVITY_ID = 'school_open_day_2026' // 校园日 activityId（与开学季同活动关联）
 
-const DESKTOP_VERSION = '5.5.6' // 桌面指纹版本号
+const DESKTOP_VERSION = '5.5.6' // 桌面指纹版本号（默认值；identity.desktopVersion 可覆盖）
 const WEB_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36' // Web 事件体浏览器 UA（默认值；identity.webUA 可覆盖）
+
+// 读 identity 覆盖值（空/非法回落默认值；identity 由 runtime/scheduler 经 opts 下发）
+function idOf(opts, key, fallback) {
+  return headersMod.idv(opts, key) || fallback
+}
+
+// 读 identity 数值覆盖值（非正数回落默认值）
+function idNumOf(opts, key, fallback) {
+  const n = Number(headersMod.idv(opts, key))
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
 const BUDDY_APP_ID = 'cb_y5Dy46tPQGGWtueMxXbe' // 企鹅教师助手（Buddy_App_QQ 判据应用）
 const BUDDY_APP_NAME = '企鹅教师助手'
 const BUDDY_INCOMPLETE_MARKER = 'first_buddy task not completed yet' // 领养门槛未过标记
@@ -52,7 +62,7 @@ const THEME_KEY = 'theme-tkmwj7' // 和平精英激战金秋（Hp_Appearance 判
 const LIBRARY_DOC_URL = 'https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm'
 const SERVER_ID_RE = /^(cmb-)?[0-9a-f]{32}$/ // 服务端 requestId 形状
 
-// 可自动化任务的执行顺序（先解锁依赖项；对齐 Go autoActions 顺序）
+// 可自动化任务的执行顺序（先解锁依赖项）
 const TASK_ORDER = [
   'chat_5',
   'first_buddy',
@@ -186,7 +196,7 @@ function parseTasks(data) {
   return arr.map(normalizeTask)
 }
 
-// 单任务归一化（字段名对齐 Go Task）
+// 单任务归一化（字段名固定）
 function normalizeTask(raw) {
   const t = raw && typeof raw === 'object' ? raw : {}
   let current = num(t.current)
@@ -428,7 +438,8 @@ function reportChatActivity(client, auth, conversationID, requestID, opts) {
 // ===== 桌面指纹：事件链上报（{chatBase}/v2/report）=====
 
 // 公共桌面指纹字段（注入每个事件；业务字段可覆盖同名键）
-function desktopFingerprint(auth) {
+// 版本/commit/osVersion/核数/内存可由 identity 覆盖（desktopVersion / desktopCommit / desktopOsVersion / desktopCpuCores / desktopMemorySize）
+function desktopFingerprint(auth, opts) {
   const now = Date.now()
   return {
     timezone: 'Asia/Shanghai',
@@ -437,34 +448,34 @@ function desktopFingerprint(auth) {
     username: (auth && auth.nickname) || '',
     userNickname: (auth && auth.nickname) || '',
     product: 'SaaS',
-    releaseDate: 1789036585355,
-    commit: '5f9692923c93033111c51ad7b003eb80204a9b75',
+    releaseDate: idNumOf(opts, 'desktopReleaseDate', 1789036585355),
+    commit: idOf(opts, 'desktopCommit', '5f9692923c93033111c51ad7b003eb80204a9b75'),
     ideName: 'WorkBuddy',
     ideType: 'WorkBuddy',
-    ideVersion: DESKTOP_VERSION,
+    ideVersion: idOf(opts, 'desktopVersion', DESKTOP_VERSION),
     machineId: deriveID(auth, 'machine'),
     sessionId: deriveID(auth, 'session'),
     extName: 'workbuddy-desktop',
-    extVersion: DESKTOP_VERSION,
+    extVersion: idOf(opts, 'desktopVersion', DESKTOP_VERSION),
     os: 'win32',
     arch: 'x64',
-    osVersion: '10.0.26220',
-    cpuCores: 20,
-    memorySize: 24,
+    osVersion: idOf(opts, 'desktopOsVersion', '10.0.26220'),
+    cpuCores: idNumOf(opts, 'desktopCpuCores', 20),
+    memorySize: idNumOf(opts, 'desktopMemorySize', 24),
     timestamp: now,
     presentAt: now
   }
 }
 
 // 为每个业务事件注入公共桌面指纹（业务字段优先）
-function buildDesktopEvents(auth, events) {
-  const fp = desktopFingerprint(auth)
+function buildDesktopEvents(auth, events, opts) {
+  const fp = desktopFingerprint(auth, opts)
   return events.map(ev => Object.assign({}, fp, ev))
 }
 
 // 以桌面指纹上报事件数组
 async function reportDesktop(client, auth, events, opts) {
-  const res = await client.desktopReport(auth, buildDesktopEvents(auth, events), opts)
+  const res = await client.desktopReport(auth, buildDesktopEvents(auth, events, opts), opts)
   if (res.status >= 400) {
     throw new Error(`desktop report http ${res.status}: ${errMod.truncateMsg(res.text)}`)
   }
@@ -764,8 +775,8 @@ function firstCategory(categories) {
 
 // ===== Web 指纹：单事件上报（{webBase}/v2/report）=====
 
-// 构造 web 口径浏览器事件
-function buildWebEvent(auth, eventCode, pageURL, elementID, elementName) {
+// 构造 web 口径浏览器事件（os/osVersion/UA 可由 identity 覆盖：webOs / webOsVersion / webUA）
+function buildWebEvent(auth, eventCode, pageURL, elementID, elementName, opts) {
   return {
     eventCode,
     timestamp: Date.now(),
@@ -773,10 +784,10 @@ function buildWebEvent(auth, eventCode, pageURL, elementID, elementName) {
     pageURL,
     elementId: elementID,
     elementName,
-    os: 'Win32',
+    os: idOf(opts, 'webOs', 'Win32'),
     arch: '',
-    osVersion: '10.0',
-    userAgent: WEB_UA,
+    osVersion: idOf(opts, 'webOsVersion', '10.0'),
+    userAgent: idOf(opts, 'webUA', WEB_UA),
     machineId: deriveID(auth, 'webmachine'),
     userId: (auth && auth.uid) || '',
     userNickname: (auth && auth.nickname) || '',
@@ -842,7 +853,7 @@ async function setAppearanceTheme(client, auth, resourceKey, opts) {
     Authorization: `Bearer ${(auth && auth.accessToken) || ''}`,
     Accept: 'application/json, text/plain, */*',
     'Content-Type': 'application/json;charset=UTF-8',
-    'User-Agent': C.DESKTOP_UA,
+    'User-Agent': headersMod.desktopUA(opts),
     'X-Product': 'SaaS'
   }
   if (auth && auth.uid) headers['X-User-Id'] = auth.uid
@@ -858,7 +869,7 @@ async function marketExpertList(client, auth, expertType, opts) {
   const headers = {
     Authorization: `Bearer ${(auth && auth.accessToken) || ''}`,
     'Content-Type': 'application/json',
-    'User-Agent': C.DESKTOP_UA,
+    'User-Agent': headersMod.desktopUA(opts),
     'X-Domain': chatBase,
     'X-Product': 'SaaS'
   }
@@ -893,7 +904,7 @@ async function desktopChatWithExpert(client, auth, expertID, opts) {
     Authorization: `Bearer ${(auth && auth.accessToken) || ''}`,
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
-    'User-Agent': C.DESKTOP_UA,
+    'User-Agent': headersMod.desktopUA(opts),
     'X-Domain': chatBase,
     'X-Product': 'SaaS',
     'X-User-Id': (auth && auth.uid) || '',
@@ -903,7 +914,7 @@ async function desktopChatWithExpert(client, auth, expertID, opts) {
     'X-Agent-Type': 'main',
     'X-IDE-Name': 'WorkBuddy',
     'X-IDE-Type': 'WorkBuddy',
-    'X-IDE-Version': DESKTOP_VERSION,
+    'X-IDE-Version': idOf(opts, 'desktopVersion', DESKTOP_VERSION),
     'x-codebuddy-request': '1'
   }
   if (expertID) headers['X-Expert-Id'] = expertID
@@ -941,21 +952,23 @@ async function desktopChatWithExpert(client, auth, expertID, opts) {
 
 // ===== 小程序（mp）指纹：事件构造与上报 =====
 
-// mp 埋点公共指纹（与小程序 appservice 上报形状对齐；逐事件叠加，业务字段可覆盖）
-function mpEventBase(auth) {
+// mp 埋点公共指纹（按小程序 appservice 上报形状构造；逐事件叠加，业务字段可覆盖）
+// 版本/os/架构/machineId 可由 identity 覆盖（mpVersion / mpOs / mpOsVersion / mpArch / mpMachineId）
+function mpEventBase(auth, opts) {
+  const mpVersion = idOf(opts, 'mpVersion', '2.4.0')
   return {
     timestamp: Date.now(),
     ideType: 'WorkBuddy_MP',
-    ideVersion: '2.4.0',
+    ideVersion: mpVersion,
     extName: 'workbuddy-mp',
-    extVersion: '2.4.0',
+    extVersion: mpVersion,
     product: 'SaaS',
     ideName: 'wx_app_cloud',
     platform: 'mini_program',
-    os: 'windows',
-    osVersion: '11',
-    arch: 'x64',
-    machineId: '0655736a-607f-4d9d-b430-58176ee9a090',
+    os: idOf(opts, 'mpOs', 'windows'),
+    osVersion: idOf(opts, 'mpOsVersion', '11'),
+    arch: idOf(opts, 'mpArch', 'x64'),
+    machineId: idOf(opts, 'mpMachineId', '0655736a-607f-4d9d-b430-58176ee9a090'),
     timezone: 'Asia/Shanghai',
     userId: (auth && auth.uid) || '',
     userNickname: (auth && auth.nickname) || ''
@@ -1014,13 +1027,13 @@ function miniChatModelEvent(conversationID, modelID, modelName) {
 }
 
 // mp 指纹 expert_actual_use（Sequential_Tasks_2 判据载体；与 school 域口径勿混）
-function miniExpertUseEvent(expertID, expertName, expertType) {
+function miniExpertUseEvent(expertID, expertName, expertType, opts) {
   const t = expertType || 'agent'
   const name = expertName || expertID
   return {
     eventCode: 'expert_actual_use',
     reportDelay: 0,
-    extVersion: '2.2.8',
+    extVersion: idOf(opts, 'mpExtVersion', '2.2.8'),
     source: 'mini_program',
     id: expertID,
     name: expertID,
@@ -1032,7 +1045,8 @@ function miniExpertUseEvent(expertID, expertName, expertType) {
 }
 
 // mp 指纹灵感事件组（Sequential_Tasks_7 判据载体，2 条）
-function miniPlaybookEvents(caseID, caseName) {
+function miniPlaybookEvents(caseID, caseName, opts) {
+  const extVersion = idOf(opts, 'mpExtVersion', '2.2.8')
   const base = {
     id: caseID,
     name: caseName,
@@ -1043,7 +1057,7 @@ function miniPlaybookEvents(caseID, caseName) {
     skillNames: ''
   }
   const cta = Object.assign(
-    { eventCode: 'playbook_cta_click', source: 'discover', position: 1, extVersion: '2.2.8' },
+    { eventCode: 'playbook_cta_click', source: 'discover', position: 1, extVersion },
     base
   )
   const send = Object.assign(
@@ -1053,7 +1067,7 @@ function miniPlaybookEvents(caseID, caseName) {
       promptLength: 96,
       isOfficial: 1,
       conversationId: `wb2api-mp-pb-${clientToken()}`,
-      extVersion: '2.2.8'
+      extVersion
     },
     base
   )
@@ -1062,7 +1076,7 @@ function miniPlaybookEvents(caseID, caseName) {
 
 // 以 mp 指纹上报事件数组（逐事件叠加公共指纹；失败抛错）
 async function reportMP(client, auth, events, opts) {
-  const base = mpEventBase(auth)
+  const base = mpEventBase(auth, opts)
   const arr = (Array.isArray(events) ? events : [events]).map(ev => Object.assign({}, base, ev))
   const res = await client.reportMPEvent(auth, arr, opts)
   if (res && res.status >= 400) {
@@ -1104,7 +1118,7 @@ async function runFirstBuddy(ctx) {
   return { message: '已领取第一只 Buddy（+300 分 +8 能量）' }
 }
 
-// #3 Model_chat_GLM5.2：accept → glm-5.2 真实对话 → 对齐模型上报
+// #3 Model_chat_GLM5.2：accept → glm-5.2 真实对话 → 上报模型对话
 async function runModelChat(ctx) {
   const { client, auth, opts, deps } = ctx
   if (typeof deps.chatOnce !== 'function') {
@@ -1150,7 +1164,7 @@ async function runAutomationCreate(ctx) {
 // #8 Library_read：web 域读资料库介绍事件
 async function runLibraryRead(ctx) {
   const { client, auth, opts } = ctx
-  const ev = buildWebEvent(auth, 'web_element_click', LIBRARY_DOC_URL, 'library_doc_intro_click', 'WorkBuddy资料库介绍')
+  const ev = buildWebEvent(auth, 'web_element_click', LIBRARY_DOC_URL, 'library_doc_intro_click', 'WorkBuddy资料库介绍', opts)
   await reportWeb(client, auth, ev, opts)
   return { message: '已上报资料库介绍阅读事件' }
 }
@@ -1512,7 +1526,7 @@ async function runMiniExpert(ctx) {
     }
   }
   try {
-    await reportMP(client, auth, miniExpertUseEvent(e.expertID, name, e.expertType), opts)
+    await reportMP(client, auth, miniExpertUseEvent(e.expertID, name, e.expertType, opts), opts)
   } catch (err) {
     return { message: `上报 expert_actual_use 失败：${err.message}` }
   }
@@ -1587,7 +1601,7 @@ function runSequentialPlaybook(ctx) {
         desktopPlaybookPromptSequence(`wb2api-pb-${ms}`, `wb2api-pb-req-${ms}`, caseID, caseName),
         ctx.opts
       ),
-    () => reportMP(ctx.client, ctx.auth, miniPlaybookEvents(caseID, caseName), ctx.opts)
+    () => reportMP(ctx.client, ctx.auth, miniPlaybookEvents(caseID, caseName, ctx.opts), ctx.opts)
   )
 }
 
@@ -1595,7 +1609,7 @@ function runSequentialPlaybook(ctx) {
 const TASK_ACTIONS = {
   chat_5: { desc: '上报 5 条对话活跃事件（自动补足差额）', attempt: false, run: runChat5 },
   first_buddy: { desc: '上报解锁 → 同意协议 → 领取第一只 Buddy', attempt: false, run: runFirstBuddy },
-  'Model_chat_GLM5.2': { desc: '接受任务 → glm-5.2 真实对话一次 → 对齐模型上报', attempt: false, run: runModelChat },
+  'Model_chat_GLM5.2': { desc: '接受任务 → glm-5.2 真实对话一次 → 上报模型对话', attempt: false, run: runModelChat },
   RichMeow_Chat: { desc: '桌面指纹完整对话事件链上报', attempt: false, run: runRichMeow },
   Buddy_App: { desc: '上报「进入 Buddy 应用」事件链', attempt: false, run: runBuddyApp },
   Buddy_App_QQ: { desc: '上报「进入企鹅教师助手」事件链', attempt: false, run: runBuddyApp },
@@ -1820,9 +1834,9 @@ function createTaskRunner(deps = {}) {
   }
 
   // 一键完成单个任务（账号内串行）
-  async function runOne(auth, taskCode) {
+  async function runOne(auth, taskCode, options = {}) {
     return withAccountLock(auth, async () => {
-      const opts = mkOpts({})
+      const opts = mkOpts(options)
       const code = String(taskCode || '').trim()
       if (!TASK_ACTIONS[code]) {
         throw new Error(`该任务不可自动化（无对应动作）：${code}`)

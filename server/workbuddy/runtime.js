@@ -1,5 +1,4 @@
 // WorkBuddy 运行时：账号池、会话粘性、模型缓存、聊天转发（换号重试与错误处置闭环）
-// 翻译自参考项目 internal/server/handler.go 的主流程
 
 const fs = require('fs')
 const path = require('path')
@@ -20,6 +19,7 @@ const queueMod = require('./queue')
 const wafipMod = require('./wafip')
 const usageMod = require('./usage')
 const creditHistMod = require('./credithist')
+const identityMod = require('./identity')
 
 // 运行时单例（Express 与 Electron 主进程同进程，全局唯一）
 let rt = null
@@ -52,7 +52,7 @@ function init(opts = {}) {
   pool.load()
   pool.startFlusher()
 
-  // 凭证加载 → 池对齐（先 load 恢复状态，再注入凭证）
+  // 凭证加载 → 账号池对齐（先 load 恢复状态，再注入凭证）
   const auths = authMod.loadDir(authDir)
   pool.syncToDir(auths)
 
@@ -60,9 +60,8 @@ function init(opts = {}) {
   const usage = usageMod.createUsage({ dataDir, file: opts.usageFile })
   usage.load()
 
-  // 积分历史账本：把每次真实查到的余额与上次比对，变动即留痕（新账号首次只建
-  // 基线）。挂载在 client 的余额观察者上（余额查询是"积分变动"唯一可靠的观测口），
-  // 签到 / 活跃上报 / 旅行 / 保活 / 面板手动刷新全覆盖；落盘 data/credit-history.json
+  // 积分历史账本（留痕语义见 credithist.js）：挂 client 余额观察者，覆盖签到 /
+  // 活跃上报 / 旅行 / 保活 / 面板手动刷新，落盘 data/credit-history.json
   const creditHist = creditHistMod.createLedger({ dataDir, file: opts.creditHistoryFile })
   creditHist.load()
   client.setCreditObserver((uid, credits) => creditHist.observe(uid, credits))
@@ -92,11 +91,14 @@ function init(opts = {}) {
     if (logBuffer.length > 500) logBuffer.shift()
     sink(message)
   }
-  // 兼容既有调用：单参数视为系统日志；任务模块日志按前缀归入任务频道
+  // 单参数默认系统频道；任务模块统一走 taskLog（显式 task 频道）
+  // 保留前缀兜底：个别带 [WorkBuddy任务] 的旧格式消息仍归入任务频道
   const log = (message, channel) => {
     const ch = channel || (String(message).includes('[WorkBuddy任务]') ? 'task' : 'system')
     pushLog(ch, message)
   }
+  // 任务模块专用日志（成长任务执行器 / 执行队列 / 定时任务调度器）
+  const taskLog = message => pushLog('task', message)
 
   rt = {
     dataDir,
@@ -107,15 +109,21 @@ function init(opts = {}) {
     usage,
     creditHist,
     log,
+    taskLog,
     pushLog,
     logBuffer,
     cfg: {
       promptMode: opts.promptMode || 'custom', // custom / append / passthrough
       promptText,
       sanitizeFingerprints: opts.sanitizeFingerprints !== false,
+      rewriteMode: opts.rewriteMode === 'native' ? 'native' : 'compat', // 改写档位：compat 全量修补 / native 原生透传
+      // 使用端身份：workbuddy = 官方桌面端指纹（默认）/ codebuddy = 官方 IDE 指纹（官网「使用端」显示 CodeBuddy）
+      clientIdentity: opts.clientIdentity === 'codebuddy' ? 'codebuddy' : 'workbuddy',
+      // 客户端指纹与版本覆盖（UA / 版本号 / 事件体指纹 / 语言 / 域名；白名单归一化，空=官方默认）
+      identity: identityMod.normalize(opts.identity),
       softRateMs: opts.poolConfig?.softRateMs || C.POOL_DEFAULTS.softRateMs,
       callbackUrl: opts.callbackUrl || '',
-      deviceTokenFile: opts.deviceTokenFile || '' // 设备令牌文件路径（参照 upstream.device_token_file）
+      deviceTokenFile: opts.deviceTokenFile || '' // 设备令牌文件路径
     },
     models: { ts: 0, list: [], efforts: {}, defaultEfforts: {} },
     enabledModels: Array.isArray(opts.enabledModels) ? opts.enabledModels : [], // 账号池统一维护的启用模型清单
@@ -127,16 +135,16 @@ function init(opts = {}) {
   // 成长任务执行器（一键完成：事件上报 + 真实对话 + 自动领奖）
   rt.taskRunner = tasksMod.createTaskRunner({
     client,
-    log: rt.log,
+    log: taskLog,
     chatOnce
   })
 
   // 成长任务执行队列（账号内串行 / 账号间并发夹取 [1,4]，默认 2）
   rt.taskQueue = queueMod.createQueue({
     pool,
-    log: rt.log,
-    scanPending: auth => tasksMod.scanPendingCodes(auth),
-    runCode: (auth, code) => rt.taskRunner.runOne(auth, code)
+    log: taskLog,
+    scanPending: auth => tasksMod.scanPendingCodes(auth, rtOpts(rt)),
+    runCode: (auth, code) => rt.taskRunner.runOne(auth, code, rtOpts(rt))
   })
 
   // 定时任务调度器（签到/活跃/旅行/保活/夜猫子/成长队列 + 余额后台刷新）
@@ -146,8 +154,12 @@ function init(opts = {}) {
     auth: authMod,
     refreshTokenFor: a => refreshTokenFor(rt, a),
     refreshBalanceFor: a => refreshBalanceFor(rt, a),
-    log: rt.log,
+    log: taskLog,
     scheduleConfig: opts.scheduleConfig || {},
+    // 使用端身份（实时读取，热改后任务类请求同样跟随）
+    clientIdentityFor: () => rt.cfg.clientIdentity,
+    // 客户端指纹与版本覆盖（实时读取，热改后任务类请求同样跟随）
+    identityFor: () => rt.cfg.identity,
     // 到点触发成长任务队列（与「全账号入队执行」同管线）
     growthHook: () => {
       void rt.taskQueue.runQueueOnce()
@@ -184,7 +196,7 @@ function getRuntime() {
 async function oauthStart() {
   const r = ensure()
   cleanupLogins(r)
-  const { state, authUrl } = await client.oauthStart()
+  const { state, authUrl } = await client.oauthStart(rtOpts(r))
   r.logins.set(state, { created: Date.now() })
   r.log(`workbuddy: 发起 OAuth 添加账号（state=${state.slice(0, 8)}...）`)
   return { state, url: authUrl }
@@ -197,8 +209,8 @@ async function oauthPoll(state) {
   const sess = r.logins.get(state)
   if (!sess) throw new Error('unknown or expired state（请重新发起添加账号）')
 
-  const token = await client.oauthPollToken(state)
-  const account = await client.oauthFetchAccount(state, token.accessToken)
+  const token = await client.oauthPollToken(state, rtOpts(r))
+  const account = await client.oauthFetchAccount(state, token.accessToken, rtOpts(r))
   const uid = account?.uid || ''
   if (!authMod.validUID(uid)) {
     throw new Error('上游返回的 uid 含非法字符，拒绝落盘（防路径穿越）')
@@ -499,7 +511,7 @@ async function forwardChat(opts) {
   // 修复层用它做严格判定。名单来自「本请求声明的 tools」与「会话历史里出现过的工具名」
   // 两个来源——实测 tools 声明会在中转环节丢失，只认前者会让修复层在最需要它的场景失效
   const declaredTools = dsmlMod.toolNameAllowlist(baseBody)
-  // 会话/轮级键必须在提示词改写前取（参照 handler：改写会动 messages 内容，之后取会让键漂移）
+  // 会话/轮级键必须在提示词改写前取：改写会动 messages 内容，之后取会让键漂移
   const sessionKey = sessionMod.extractKey(baseBody)
   const turnKey = sessionMod.turnKey(baseBody)
   // 日志口径：使用记录（提问原文，≤1000 字）与任务键（一次提问一条日志，跨工具循环/重试）
@@ -507,7 +519,7 @@ async function forwardChat(opts) {
   const logTaskKey = sessionMod.extractTaskKey(baseBody) || turnKey
   // 会话头族 meta：轮转循环外生成一次 → 换号/重试/降级全部同 ID，后台不再碎片化
   const chatMeta = buildChatMeta(baseBody, { sessionKey, turnKey, inbound: opts.inbound })
-  // gateway_hint 判定上下文（必须在提示词改写前取，参照 handler：改写会动 messages 内容）
+  // gateway_hint 判定上下文（必须在提示词改写前取：改写会动 messages 内容）
   const hintCtx = hintContextOf(r, baseBody, model)
   // 用量统计的积分倍率：模型在 r.models.list 里的 rate 字段（缺失为 ''）
   const modelRate = modelRateOf(r, model)
@@ -516,7 +528,7 @@ async function forwardChat(opts) {
   body = applied.body
   let degradedApplied = applied.degradedApplied
 
-  // 粘性号：循环外解析一次；不可用时解绑并回落普通轮换（参照 handler unbindSticky）
+  // 粘性号：循环外解析一次；不可用时解绑并回落普通轮换
   let stickyUID = ''
   if (sessionKey) {
     const bound = r.session.resolveForModel(sessionKey, model, null)
@@ -532,14 +544,29 @@ async function forwardChat(opts) {
   const tried = new Set()
   let lastError = null
   let wafIpBlocked = false // WAF IP 级判定后终止轮转
+  // 模型上下文窗口与输出上限（所有尝试共用；请求级错误分支与管线都要用）
+  const caps = modelCapsOf(r, model)
+  // 上游报告上下文过长 → 下次尝试改用激进裁剪比例（0 表示用默认比例）
+  let compressRatio = 0
+  // 上游只产出思考、未产出最终回答（finish_reason=length）的换号重试剩余次数
+  let truncationRetries = C.TRUNCATION_RETRY.maxAttempts
+  // 空响应重试要放行失败账号（否则换号会退化成对同一账号空转）
+  let allowRetriedUID = false
 
-  for (let attempt = 0; attempt < C.MAX_ROTATE; attempt++) {
+  // 换号次数 = 常规轮转上限 + 截断/超长两种额外重试（各自独立计数）
+  const maxAttempts = C.MAX_ROTATE + C.TRUNCATION_RETRY.maxAttempts + 1
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const attemptStarted = Date.now()
     // 选号：粘性优先，其次池 pick
+    // relaxTried（空回答重试）时允许回落复用上次账号——失败未被罚号，严格排除 tried
+    // 可能直接无号可用；但只要能换到新号就换，故先按 tried 选，取不到才放开
+    const relaxTried = allowRetriedUID
+    allowRetriedUID = false
     let auth = null
     if (stickyUID && !tried.has(stickyUID)) auth = r.pool.pickByUID(stickyUID, model, null)
     if (!auth && stickyUID) unbindSticky() // 粘性号在当前模型不可用（冷却/占满/模型受限）→ 解绑
     if (!auth) auth = r.pool.pick({ tried, model })
+    if (!auth && relaxTried) auth = r.pool.pick({ model })
     if (!auth) {
       // 区分「账号不可用」与「该模型在账号池中暂时不可用」——后者切换模型即可恢复
       const diag = r.pool.diagnoseNoCandidate(model)
@@ -580,8 +607,15 @@ async function forwardChat(opts) {
       const snap = effortsSnapshot()
       let prepared = payloadMod.prepareBody(body, {
         sanitize: r.cfg.sanitizeFingerprints,
+        // 改写档位：native 原生透传 / compat 全量修补（工具调用保真场景用 native）
+        rewriteMode: r.cfg.rewriteMode,
         efforts: snap.efforts,
-        defaultEfforts: snap.defaultEfforts
+        defaultEfforts: snap.defaultEfforts,
+        // 上下文压缩判据与输出上限兜底（都来自模型目录；缺失则各自跳过）
+        contextWindow: caps.contextWindow,
+        maxOutput: caps.maxOutput,
+        // 上游报告过上下文过长时改用激进裁剪比例（见 catch 中的重试分支）
+        compressRatio: compressRatio
       })
       prepared = payloadMod.injectPromptCacheKey(prepared, auth.uid, sessionKey || '')
 
@@ -593,28 +627,51 @@ async function forwardChat(opts) {
 
       // ===== 成功路径 =====
       r.pool.noteSuccess(auth.uid)
-      // 成功即清该 (账号,模型) 的 11102 负缓存（参照实现 G 步的 BlockModelClear），
+      // 成功即清该 (账号,模型) 的 11102 负缓存，
       // 避免一次误封或上游抖动把模型锁死到退避到期（6h 起、封顶 24h）
       r.pool.blockModelClear(auth.uid, model)
       if (sessionKey) r.session.bind(sessionKey, auth.uid)
 
       let cost = null
       let ttfbMs = 0
+      let emptyAnswer = false
+      let aggregatedOut = null
       if (isStream) {
-        const out = await streamToClient(r, upstreamRes.stream, opts, releaseHeld, hintCtx, declaredTools)
+        const out = await streamToClient(r, upstreamRes.stream, { ...opts, rewriteMode: r.cfg.rewriteMode }, releaseHeld, hintCtx, declaredTools)
         cost = out.cost
         ttfbMs = out.ttfbMs
+        emptyAnswer = !!out.emptyAnswer
       } else {
         const text = await client.readAll(upstreamRes.stream, 64 * 1024 * 1024)
         releaseHeld()
         const aggregated = sseMod.aggregateSSE(text)
         // 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls
+        // 各档位统一执行（native 只关字段重建，标记修复关闭会导致工具调用标记泄漏成正文）
         const mrepair = dsmlMod.repairAggregatedResponse(aggregated, declaredTools, true)
         logMarkupRepair(r, mrepair, model, declaredTools)
         cost = costOfUsage(aggregated && aggregated.usage)
-        opts.onDone?.(aggregated)
+        emptyAnswer = isEmptyAnswer(aggregated)
+        aggregatedOut = aggregated
       }
-      // 成本台账：记录实测单价并内插扣减余额（参照 handler 的 NoteModelCost 接线）
+      // 只有思考、没有最终回答（输出预算被思考吃满）：换号重试一次
+      // 不调用 onDone 也不记用量为成功——调用方可能在 onDone 里已把响应交给客户端，
+      // 此时重试会让客户端收到两份回答
+      // opts.noEmptyRetry：调用方主动用极小输出预算（如 token 计数），空回答属预期，不重试
+      if (emptyAnswer && truncationRetries > 0 && !opts.noEmptyRetry) {
+        truncationRetries--
+        allowRetriedUID = true
+        recordUsageAttempt(r, { auth, model, rate: modelRate, startedAt: attemptStarted, ok: false, delta: cost })
+        r.pushLog(
+          'chat',
+          `模型只产出思考未产出回答（finish_reason=length）→ 换号重试 model=${model} uid=${auth.uid.slice(0, 8)}`,
+          'warn'
+        )
+        if (!(await sleepCancellable(backoffAfter(attempt), opts.isAborted))) break
+        continue
+      }
+      allowRetriedUID = false
+      if (!isStream && aggregatedOut) opts.onDone?.(aggregatedOut)
+      // 成本台账：记录实测单价并内插扣减余额
       recordModelCost(r, auth.uid, model, cost)
       // 用量/积分统计：每次尝试（成功）都记一条
       recordUsageAttempt(r, { auth, model, rate: modelRate, startedAt: attemptStarted, ok: true, delta: cost })
@@ -623,13 +680,14 @@ async function forwardChat(opts) {
         ? ` 输入=${cost.pt} 输出=${cost.ct} 积分=${cost.hasCredit ? Math.round(cost.credit * 1000) / 1000 : '-'}`
         : ' 输入=- 输出=- 积分=-'
       r.pushLog('chat', `对话成功 model=${model} uid=${auth.uid.slice(0, 8)} ${isStream ? 'stream' : 'sync'} 耗时=${Date.now() - startedAt}ms${usageText}`)
-      // credit：末帧 usage.credit 实测积分消耗（缺失时为 0），供请求日志「积分消耗」列
+      // credit：末帧 usage.credit 实测积分消耗；上游未提供时为 undefined（与"消耗为 0"区分），
+      // 供请求日志「积分消耗」列
       return {
         ok: true,
         uid: auth.uid,
         ttfbMs,
-        totalTokens: cost ? cost.totalTokens : 0,
-        credits: cost ? cost.credit : 0,
+        totalTokens: cost ? cost.totalTokens : null,
+        credits: cost && cost.hasCredit ? cost.credit : undefined,
         input: logInput,
         taskKey: logTaskKey
       }
@@ -656,6 +714,20 @@ async function forwardChat(opts) {
         continue
       }
 
+      // 上游报告上下文过长：改用激进裁剪比例重建请求体后重试（请求级错误，不罚号）。
+      // 预防性压缩按 80% 估算触发，估不准或上游实测上限更低时走到这里；
+      // 只在默认比例尚未切换、且窗口已知（可裁剪）时进行一次
+      if (
+        kind === errMod.ERR_KIND.PROMPT_TOO_LONG &&
+        !compressRatio &&
+        caps.contextWindow > 0
+      ) {
+        compressRatio = C.CONTEXT_COMPRESS.aggressiveRatio
+        tried.delete(auth.uid)
+        r.pushLog('chat', `上游报告上下文过长 → 按 ${Math.round(compressRatio * 100)}% 裁剪历史后重试（同请求）`)
+        continue
+      }
+
       // 错误处置（更新账号状态）
       applyErrorPolicy(r, auth.uid, err, model)
 
@@ -669,7 +741,9 @@ async function forwardChat(opts) {
       }
 
       // 请求级错误：不轮转，直接抛给调用方（补挂日志字段，供 router 失败日志完整记录）
+      // TIMEOUT：首字节超时换号多半再撞同一个慢上游，直接终止轮转
       if (
+        kind === errMod.ERR_KIND.TIMEOUT ||
         kind === errMod.ERR_KIND.PROMPT_TOO_LONG ||
         kind === errMod.ERR_KIND.IMAGE_INVALID ||
         kind === errMod.ERR_KIND.BAD_PARAMS ||
@@ -683,7 +757,7 @@ async function forwardChat(opts) {
       if (err.transport) r.pool.noteFailures(auth.uid)
       lastError = err
       r.pushLog('chat', `换号重试 model=${model} uid=${auth.uid.slice(0, 8)} kind=${kind} ${errMsgOf(err)}`)
-      // 轮转退避（参照 server/backoff.go）：base·2^n 封顶 8s，±25% 抖动；
+      // 轮转退避：base·2^n 封顶 8s，±25% 抖动；
       // 客户端断开（isAborted）或 IP 级 WAF 判定时立即停止轮转
       if (wafIpBlocked || !(await sleepCancellable(backoffAfter(attempt), opts.isAborted))) break
     }
@@ -762,7 +836,8 @@ function applyErrorPolicy(r, uid, err, model) {
     case errMod.ERR_KIND.PROMPT_TOO_LONG:
     case errMod.ERR_KIND.IMAGE_INVALID:
     case errMod.ERR_KIND.BAD_PARAMS:
-      return // 请求级错误不罚号
+    case errMod.ERR_KIND.TIMEOUT:
+      return // 请求级错误不罚号（首字节超时多为上游整体慢，与账号无关）
     default:
       pool.noteFailures(uid)
   }
@@ -773,7 +848,7 @@ function jitterDuration(baseMs) {
   return Math.round(baseMs * (0.75 + Math.random() * 0.5))
 }
 
-// 轮转退避时长（参照 server/backoff.go backoffAfter）：base·2^n 封顶 cap，再施加 ±25% 抖动
+// 轮转退避时长：base·2^n 封顶 cap，再施加 ±25% 抖动
 function backoffAfter(n) {
   const base = C.ROTATE_BACKOFF.baseMs
   if (!(base > 0)) return 0
@@ -783,7 +858,7 @@ function backoffAfter(n) {
   return jitterDuration(d)
 }
 
-// 可取消等待（参照 sleepCtx）：isAborted() 为真立即返回 false，等满返回 true
+// 可取消等待：isAborted() 为真立即返回 false，等满返回 true
 function sleepCancellable(ms, isAborted) {
   if (!(ms > 0)) return Promise.resolve(!(isAborted && isAborted()))
   return new Promise(resolve => {
@@ -805,7 +880,7 @@ function sleepCancellable(ms, isAborted) {
   })
 }
 
-// 请求体是否携带 image_url part（参照 hasImagePart：判不出就不给「模型不支持图片」指向）
+// 请求体是否携带 image_url part（判不出就不给「模型不支持图片」指向）
 function hasImagePart(bodyText) {
   let obj
   try {
@@ -824,7 +899,7 @@ function hasImagePart(bodyText) {
   return false
 }
 
-// gateway_hint 判定上下文（参照 handler.hintContext；必须在提示词改写前取）
+// gateway_hint 判定上下文（必须在提示词改写前取）
 function hintContextOf(r, bodyText, model) {
   const entry = (r.models.list || []).find(m => m && m.id === model)
   return {
@@ -842,7 +917,7 @@ function attachGatewayHint(err, kind, origin, ctx) {
   if (hint) err.gatewayHint = hint
 }
 
-// SSE error 帧附加 gateway_hint（参照 hint.FrameHintFunc）：非 error 帧或无 hint 原样返回
+// SSE error 帧附加 gateway_hint：非 error 帧或无 hint 原样返回
 function attachFrameHint(payloadText, hintCtx) {
   let obj
   try {
@@ -932,7 +1007,7 @@ function recordModelCost(r, uid, model, cost) {
   }
 }
 
-// 设备令牌文件读取（参照 device_token.go）：5 分钟缓存 + ≤1KB + 读失败优雅降级（不注入）
+// 设备令牌文件读取：5 分钟缓存 + ≤1KB + 读失败优雅降级（不注入）
 let dtFileCache = { path: '', token: '', readAt: 0 }
 function readDeviceTokenCached(filePath) {
   const p = String(filePath || '')
@@ -956,14 +1031,22 @@ function readDeviceTokenCached(filePath) {
 }
 
 // 流式转发：SSE 帧白名单重建 + 标记修复 + [DONE] 恰好一次 + 空流兜底
-// 返回值：Promise<costInfo|null>（末帧 usage 的成本台账输入）
+// opts.reasoningHidden：本通道是否对客户端隐藏思考内容（Anthropic 协议转换即如此），
+//   决定「思考帧」是否算客户端可见内容，进而决定空回答能否安全重试
+// 返回值：Promise<{ costInfo, ttfbMs, emptyAnswer }>
+// emptyAnswer = 上游收尾为 length（输出预算耗尽）且全程没有正文与工具调用：
+// 只有思考、没有最终回答，客户端此时会报「模型返回数据异常」——交由上层换号重试
 function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredTools) {
+  const reasoningHidden = !!opts.reasoningHidden
+  // 改写档位：native 时响应流只关字段重建（白名单收敛 / name 收敛 / id 续传全不做，帧字段保真），
+  // 标记修复仍开启——否则工具调用标记会以正文形式泄漏给客户端，工具调用必失败
+  const native = opts.rewriteMode === 'native'
   return new Promise(resolve => {
     // 标记修复（见 dsml.js）：上游在没有 tools 的请求里会把工具调用吐成正文标记，
     // 这里在透传前还原成 delta.tool_calls；名单为空时启用弱判定（tools 声明在
     // 链路上丢失是实测最常见的泄漏成因，只做严格判定等于对主场景不设防）
     const repair = dsmlMod.createMarkupRepair(declaredTools, true)
-    const rebuilder = sseMod.createFrameRebuilder({ repair })
+    const rebuilder = sseMod.createFrameRebuilder({ repair, passthrough: native })
     const idleMs = C.TIMEOUT_DEFAULTS.idleTimeoutMs
     let validFrames = 0
     let doneSent = false
@@ -974,17 +1057,31 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
     let costInfo = null
     const startedAt = Date.now()
     let ttfbMs = 0
+    // 回答形态统计（判定「只有思考、没有最终回答」）
+    let sawContent = false // 是否产出过正文
+    let sawToolCall = false // 是否产出过工具调用
+    let lengthFinish = false // 收尾原因是否为 length
+    let wroteVisible = false // 是否已向客户端写出过它可见的内容
 
     const finish = () => {
       if (finished) return
       finished = true
       if (idleTimer) clearInterval(idleTimer)
       releaseHeld()
-      resolve({ cost: costInfo, ttfbMs })
+      resolve({
+        cost: costInfo,
+        ttfbMs,
+        // 「只有思考」且客户端尚未拿到任何可见内容时才可重试：已写过说明客户端
+        // 持有一段半成品，重试会让它收到两份输出。思考内容是否算「可见」取决于
+        // 客户端协议——Anthropic 通道的发射器丢弃 reasoning_content，故传
+        // reasoningHidden 让本判定与客户端实际所见一致
+        emptyAnswer: lengthFinish && !sawContent && !sawToolCall && !wroteVisible
+      })
     }
 
     const writeFrame = payload => {
       if (doneSent) return
+      wroteFrames = true
       try {
         opts.onChunk?.(`data: ${payload}\n\n`)
       } catch {
@@ -1020,10 +1117,19 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
       if (trimmed.startsWith('data: ')) {
         const payload = trimmed.slice(6).trim()
         if (payload === '[DONE]') return 'done'
+        // 各档位统一过帧重建器：native 档由其内部直通模式只修标记、不重建字段
         const result = rebuilder.push(payload)
         if (result.valid) {
           validFrames++
           if (!ttfbMs) ttfbMs = Date.now() - startedAt // 首个有效帧到达耗时（TTFB）
+          // 回答形态统计：正文 / 工具调用 / 收尾原因（供上层判定「只有思考」）
+          const shape = frameShapeOf(result.payloads)
+          if (shape.content) sawContent = true
+          if (shape.toolCall) sawToolCall = true
+          if (shape.finish === 'length') lengthFinish = true
+          // 客户端可见性：隐藏思考的通道下，只有思考帧落地时不算已写出内容
+          if (!reasoningHidden && result.payloads.length) wroteVisible = true
+          if (shape.content || shape.toolCall) wroteVisible = true
           // 成本台账输入：末帧 usage（credit + token 总数）；标记修复可能把一帧
           // 展开成多帧，逐帧找携带 usage 的那一帧
           if (payload.includes('"usage"')) {
@@ -1040,7 +1146,7 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
             }
           }
         }
-        // error 帧附加 gateway_hint（参照 hint.FrameHintFunc），非 error 帧原样
+        // error 帧附加 gateway_hint，非 error 帧原样
         for (const p of result.payloads) writeFrame(attachFrameHint(p, hintCtx))
         return ''
       }
@@ -1062,12 +1168,18 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
       // 标记修复收尾：未判定的尾部字节一律原文回吐（绝不吞字节，未闭合的块连
       // 起始标记一起交还）；本流还原过调用但上游没给收尾帧时，补一帧
       // finish_reason: tool_calls（客户端才不会把「工具调用回合」读成「只说了话」）
-      const tail = rebuilder.finish()
-      for (let i = 0; i < tail.payloads.length; i++) {
-        writeFrame(tail.payloads[i])
-        if (i < tail.validCount) validFrames++
+      // native 直通档无字段重建，但仍有标记修复，收尾回吐照常执行（绝不吞字节）
+      if (rebuilder) {
+        const tail = rebuilder.finish()
+        const tailShape = frameShapeOf(tail.payloads)
+        if (tailShape.content) sawContent = true
+        if (tailShape.toolCall) sawToolCall = true
+        for (let i = 0; i < tail.payloads.length; i++) {
+          writeFrame(tail.payloads[i])
+          if (i < tail.validCount) validFrames++
+        }
+        logMarkupRepair(r, repair, opts.model, declaredTools)
       }
-      logMarkupRepair(r, repair, opts.model, declaredTools)
       if (validFrames === 0) {
         writeFrame('{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}')
       }
@@ -1117,7 +1229,52 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
   })
 }
 
-// 标记修复命中统计（对齐参考实现：还原成功记 INFO、识别到但拒绝记 WARN——
+// 一批已重建帧的回答形态：是否含正文 / 工具调用 / 收尾原因
+// 只认实际写出的内容，空串与空数组一律忽略（上游常发空 delta 的心跳帧）
+function frameShapeOf(payloads) {
+  const out = { content: false, toolCall: false, finish: '' }
+  for (const p of payloads) {
+    let obj
+    try {
+      obj = JSON.parse(p)
+    } catch {
+      continue
+    }
+    if (!obj || !Array.isArray(obj.choices)) continue
+    for (const choice of obj.choices) {
+      if (!choice || typeof choice !== 'object') continue
+      if (!out.finish && typeof choice.finish_reason === 'string' && choice.finish_reason) {
+        out.finish = choice.finish_reason
+      }
+      // 只统计最终回答：reasoning_content（思考）刻意不计，正是要区分的那一项
+      const delta = choice.delta && typeof choice.delta === 'object' ? choice.delta : {}
+      if (typeof delta.content === 'string' && delta.content) out.content = true
+      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) out.toolCall = true
+    }
+  }
+  return out
+}
+
+// 聚合结果是否为「只有思考、没有最终回答」（与流式路径 frameShapeOf 判定一致）
+function isEmptyAnswer(aggregated) {
+  const choice = (aggregated && Array.isArray(aggregated.choices) && aggregated.choices[0]) || {}
+  const message = choice.message && typeof choice.message === 'object' ? choice.message : {}
+  const hasContent = typeof message.content === 'string' && !!message.content
+  const hasCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+  return choice.finish_reason === 'length' && !hasContent && !hasCalls
+}
+
+// 模型上下文窗口与输出上限（供压缩判据与 max_tokens 兜底）
+// 上游模型目录命中优先，未命中回落静态兜底链；两者都拿不到时为 0（各自跳过对应动作）
+function modelCapsOf(r, model) {
+  const entry = (r.models.list || []).find(m => m && m.id === model)
+  return {
+    contextWindow: catalogMod.contextWindowOf(model, entry && entry.maxContext, { dataDir: r.dataDir }),
+    maxOutput: catalogMod.outputTokensOf(model, entry && entry.maxOutput, { dataDir: r.dataDir })
+  }
+}
+
+// 标记修复命中统计（还原成功记 INFO、识别到但拒绝记 WARN——
 // 排障时能一眼区分「没识别到」与「识别到但判定不通过」）
 function logMarkupRepair(r, repair, model, declaredTools) {
   if (!repair) return
@@ -1129,10 +1286,10 @@ function logMarkupRepair(r, repair, model, declaredTools) {
   }
 }
 
-// 会话头族 meta（参照 handler 的 chatMeta 装配）：
+// 会话头族 meta：
 // conversationID 透传客户端原值；客户端没有时（Anthropic / Claude Code 流量）回退会话键，
 // 否则 X-Conversation-ID 缺失、上游 prompt_cache_key 会退化为每账号一个常量——同账号下
-// 所有客户端共享一个不断被逐出的前缀缓存槽（对齐参考项目 #133）；conversationRequestID
+// 所有客户端共享一个不断被逐出的前缀缓存槽；conversationRequestID
 // 入站头透传优先，否则 轮级复合键 > 纯轮级键 > 会话级键 > 请求级随机；traceId 入站透传
 function buildChatMeta(body, keys = {}) {
   const inbound = keys.inbound || {}
@@ -1156,13 +1313,20 @@ function strOr(v) {
 
 // 运行时配置 → 客户端调用选项
 function rtOpts(r) {
+  const id = r.cfg.identity || {}
   return {
-    clientVersion: C.DEFAULT_CLIENT_VERSION,
-    cliVersion: C.DEFAULT_CLI_VERSION,
+    // 客户端指纹与版本覆盖（全字段透传，消费端留空回落官方默认；任务链路同样生效）
+    identity: id,
     clientName: 'WorkBuddy',
     userAgent: '',
+    // 使用端身份：出站 UA 与用量归属头（X-IDE-*）按此切换，热改后下一次请求即生效
+    clientIdentity: r.cfg.clientIdentity,
     passthroughIP: false,
-    // 设备令牌文件兜底（参照 device_token.go：5min 缓存 + ≤1KB + 读失败不注入）
+    // 域名三件套（identity.chatBase / billingBase / webBase；留空回落 CN 默认）
+    chatBaseCN: id.chatBase || '',
+    billingBaseCN: id.billingBase || '',
+    webBaseCN: id.webBase || '',
+    // 设备令牌文件兜底（5min 缓存 + ≤1KB + 读失败不注入）
     deviceTokenFileReader: () => readDeviceTokenCached(r.cfg.deviceTokenFile)
   }
 }
@@ -1177,36 +1341,55 @@ async function creditPackages(uid) {
   return client.resourcePackages(auth, { ...rtOpts(r), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
 }
 
-// 积分变动流水（新的在前；limit 默认 200、上限 1000，uid 可选精确过滤）
+// 积分变动流水（新的在前；limit 默认 50、上限 1000，uid 可选精确过滤，offset 翻页）
 // 账号昵称在读取时用池快照填充——账本只存 uid，上游改名后旧流水也跟着更新
-function creditHistory(limitArg, uidArg) {
+// 返回 total（过滤后总条数）与 net（过滤后净变动），供前端分页与统计说明
+function creditHistory(limitArg, uidArg, offsetArg) {
   const r = ensure()
   let limit = Math.trunc(Number(limitArg)) || 0
-  if (limit <= 0) limit = 200
+  if (limit <= 0) limit = 50
   if (limit > 1000) limit = 1000
   const uid = String(uidArg || '').trim()
+  const offset = Math.max(0, Math.trunc(Number(offsetArg)) || 0)
 
-  // 有 uid 过滤时必须先全量取回（账本上限默认 2000 条）：先截断再过滤会让筛选后的
-  // 条数看起来像历史缺失；无过滤时只取 limit 条，不为一次展示拷贝整个账本
-  const all = r.creditHist.read(uid ? 0 : limit)
+  // 统一全量取回（账本上限默认 2000 条）：total 与翻页要求不受截断影响，
+  // 过滤后再切页；2000 条浅拷贝的代价可忽略
+  const all = r.creditHist.read(0)
 
   const nicks = new Map()
   for (const st of r.pool.list()) {
     if (st.nickname) nicks.set(st.uid, st.nickname)
   }
 
-  const entries = []
+  const matched = []
+  let net = 0
   for (const e of all) {
     if (uid && e.uid !== uid) continue
-    entries.push({ ...e, account: nicks.get(e.uid) || '' })
-    if (entries.length >= limit) break
+    net += Number(e.delta) || 0
+    matched.push({ ...e, account: nicks.get(e.uid) || '' })
   }
-  return { entries, limit }
+  return { entries: matched.slice(offset, offset + limit), limit, offset, total: matched.length, net }
 }
 
-// 账号池统一维护的启用模型清单（供 Provider 同步）
+// 账号池统一维护的启用模型清单（供 Provider 同步；只含落盘字段，不附加派生信息）
 function getEnabledModels() {
   return ensure().enabledModels || []
+}
+
+// 启用模型清单 + 后台拉取到的思考档位（供 Provider 弹窗渲染下拉选项与默认值）
+// 档位来源：上游模型清单命中则用上游 supportedEfforts，未命中回落静态兜底表；
+// 仅用于界面展示，不写入 Provider 配置，避免把派生字段落进 models.json
+function getEnabledModelsWithEfforts() {
+  const r = ensure()
+  return (r.enabledModels || []).map(m => {
+    const entry = (r.models.list || []).find(x => x && x.id === m.id)
+    const upstreamEfforts = entry && Array.isArray(entry.efforts) ? entry.efforts : []
+    return {
+      ...m,
+      efforts: catalogMod.supportedEffortsOf(m.id, upstreamEfforts),
+      defaultEffort: catalogMod.defaultEffortOf(m.id, upstreamEfforts, entry && entry.defaultEffort)
+    }
+  })
 }
 
 // 设置启用模型清单（内存态；持久化由调用方写入 server-config）
@@ -1262,7 +1445,7 @@ async function taskRun(uid, taskCode) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
-  return taskCode ? r.taskRunner.runOne(auth, taskCode) : r.taskRunner.runAll(auth)
+  return taskCode ? r.taskRunner.runOne(auth, taskCode, rtOpts(r)) : r.taskRunner.runAll(auth, rtOpts(r))
 }
 
 // 任务执行进度快照
@@ -1278,7 +1461,7 @@ async function taskScan() {
     .filter(st => !st.disabled)
     .map(st => r.pool.authByUID(st.uid))
     .filter(Boolean)
-  return tasksMod.scanTasks(auths)
+  return tasksMod.scanTasks(auths, rtOpts(r))
 }
 
 // 全账号任务扫描（含 pending_count 汇总）
@@ -1299,7 +1482,7 @@ async function taskAccept(uid, codes) {
     await tasksMod.acceptTasks(auth, list, rtOpts(r))
     return { ok: true, accepted: list.length }
   }
-  const res = await tasksMod.acceptAllFor(auth, rtOpts(r), r.log)
+  const res = await tasksMod.acceptAllFor(auth, rtOpts(r), r.taskLog)
   return { ok: true, accepted: res.accepted, failed: res.failed }
 }
 
@@ -1315,7 +1498,7 @@ async function taskAcceptAll(uids) {
     const auth = r.pool.authByUID(st.uid)
     if (!auth) continue
     try {
-      const res = await tasksMod.acceptAllFor(auth, rtOpts(r), r.log)
+      const res = await tasksMod.acceptAllFor(auth, rtOpts(r), r.taskLog)
       accepted += res.accepted
       failed.push(...res.failed)
       accounts.push({ uid: st.uid, accepted: res.accepted })
@@ -1369,6 +1552,16 @@ function updateConfig(patch) {
   if (typeof patch.promptMode === 'string') r.cfg.promptMode = patch.promptMode
   if (typeof patch.promptFile === 'string') r.cfg.promptText = promptMod.loadPrompt(patch.promptFile)
   if (typeof patch.sanitizeFingerprints === 'boolean') r.cfg.sanitizeFingerprints = patch.sanitizeFingerprints
+  // 改写档位：仅接受 compat / native，其余值忽略（防脏配置写坏管线）
+  if (patch.rewriteMode === 'compat' || patch.rewriteMode === 'native') r.cfg.rewriteMode = patch.rewriteMode
+  // 使用端身份：仅接受 workbuddy / codebuddy，其余值忽略
+  if (patch.clientIdentity === 'workbuddy' || patch.clientIdentity === 'codebuddy') {
+    r.cfg.clientIdentity = patch.clientIdentity
+  }
+  // 客户端指纹与版本覆盖：白名单归一化后整体替换（未提交字段=清空回落官方默认）
+  if (patch.identity && typeof patch.identity === 'object') {
+    r.cfg.identity = identityMod.normalize(patch.identity)
+  }
   if (typeof patch.deviceTokenFile === 'string') r.cfg.deviceTokenFile = patch.deviceTokenFile
   if (patch.poolConfig) r.pool.updateConfig(patch.poolConfig)
 }
@@ -1427,6 +1620,7 @@ module.exports = {
   creditPackages,
   creditHistory,
   getEnabledModels,
+  getEnabledModelsWithEfforts,
   setEnabledModels,
   getLogs,
   // 用量 / 积分消耗统计

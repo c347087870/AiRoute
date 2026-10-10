@@ -1,5 +1,4 @@
 // SSE 帧重建与非流式聚合
-// 翻译自参考项目 internal/upstream/sse.go / truncation.go / usage.go
 const dsmlMod = require('./dsml')
 
 // 顶层白名单字段（存在且非 null 才保留）
@@ -75,6 +74,7 @@ function dropTruncatedToolCalls(calls) {
 // 还原成 delta.tool_calls
 function createFrameRebuilder(options = {}) {
   const repair = options.repair || null
+  const passthrough = options.passthrough === true // native 档：只跑标记修复，不做字段重建与白名单收敛
   const toolCallSeen = {} // index → 是否已输出过 name
   let firstID = ''
   let maxToolIdx = -1 // 上游已用过的最大 tool_call index（合成 index 从其后接续）
@@ -98,6 +98,11 @@ function createFrameRebuilder(options = {}) {
     }
 
     const frames = repair && repair.enabled() ? repairFrame(obj) : [obj]
+    if (passthrough) {
+      // native 档：本帧字段原样序列化回吐（帧保真，不收敛不剔除），仅标记修复展开出的合成帧才做规范重建
+      trackToolIdx(obj)
+      return { payloads: frames.map(f => (f === obj ? JSON.stringify(obj) : rebuildOne(f))), valid: true }
+    }
     return { payloads: frames.map(rebuildOne), valid: true }
   }
 
@@ -139,6 +144,17 @@ function createFrameRebuilder(options = {}) {
     return out
   }
 
+  // 记录上游已用过的最大 tool_call index（供合成调用接续编号，避免撞车）
+  function trackToolIdx(obj) {
+    if (!Array.isArray(obj.choices)) return
+    for (const choice of obj.choices) {
+      const calls = choice && choice.delta && Array.isArray(choice.delta.tool_calls) ? choice.delta.tool_calls : []
+      for (const call of calls) {
+        if (call && typeof call.index === 'number' && Math.trunc(call.index) > maxToolIdx) maxToolIdx = Math.trunc(call.index)
+      }
+    }
+  }
+
   // 单帧规范重建：strip name + id 续传 + maxToolIdx 跟踪 + 白名单，返回 payload 文本
   function rebuildOne(obj) {
     stripToolCallNames(obj)
@@ -150,15 +166,7 @@ function createFrameRebuilder(options = {}) {
       obj.id = firstID
     }
 
-    // 上游已用过的最大 tool_call index（供合成调用接续编号，避免撞车）
-    if (Array.isArray(obj.choices)) {
-      for (const choice of obj.choices) {
-        const calls = choice && choice.delta && Array.isArray(choice.delta.tool_calls) ? choice.delta.tool_calls : []
-        for (const call of calls) {
-          if (call && typeof call.index === 'number' && Math.trunc(call.index) > maxToolIdx) maxToolIdx = Math.trunc(call.index)
-        }
-      }
-    }
+    trackToolIdx(obj)
 
     const normalized = normalizeFrame(obj)
     return JSON.stringify(normalized)
@@ -166,7 +174,7 @@ function createFrameRebuilder(options = {}) {
 
   // 流末收尾：回吐尾缓冲（未判定的字节一律原文交还，未闭合的块连起始标记一起），
   // 若本流还原过调用、但上游从未给出收尾帧，补一帧 finish_reason: tool_calls。
-  // 返回 { payloads: 尾部帧, validCount: 其中应计入有效帧的帧数 }（对齐参考实现：
+  // 返回 { payloads: 尾部帧, validCount: 其中应计入有效帧的帧数 }：
   // 只有尾缓冲回吐帧计数，兜底收尾帧不计——避免把空流伪装成非空）
   function finish() {
     const payloads = []
@@ -277,7 +285,7 @@ function normalizeFrame(obj) {
     if (typeof v !== 'undefined' && v !== null) out[field] = v
   }
   if (typeof out.object === 'undefined') out.object = 'chat.completion.chunk'
-  if (typeof out.id === 'undefined') out.id = 'chatcmpl-wb2api'
+  if (typeof out.id === 'undefined') out.id = 'chatcmpl-airoute'
 
   out.choices = []
   if (Array.isArray(obj.choices)) {
@@ -409,7 +417,16 @@ function aggregateSSE(text) {
   if (state.toolOrder.length > 0) {
     const order = [...state.toolOrder].sort((a, b) => a - b)
     let calls = order.map(idx => state.toolCalls.get(idx)).filter(Boolean)
-    if (state.finishReason === 'length' || !state.sawDone) calls = dropTruncatedToolCalls(calls)
+    // 流未正常收尾（finish_reason=length 或没等到 [DONE]）时，arguments 残缺的调用
+    // 一律剔除：残缺 JSON 喂给客户端会解析失败，表现为「工具调用莫名中断」。
+    // 剔除动作要留痕——否则客户端只看到一批调用凭空消失，无从判断是上游截断
+    if (state.finishReason === 'length' || !state.sawDone) {
+      const kept = dropTruncatedToolCalls(calls)
+      if (kept.length !== calls.length) {
+        message.truncated_tool_calls = calls.length - kept.length
+      }
+      calls = kept
+    }
     if (calls.length > 0) message.tool_calls = calls
   }
 

@@ -1,33 +1,67 @@
 // WorkBuddy 出站请求头构造
-// 翻译自参考项目 internal/upstream/headers.go，头名与值格式逐字对齐
 
 const crypto = require('crypto')
 const C = require('./constants')
 
-// Accept-Language（固定 zh-CN）
-function acceptLanguage() {
-  return 'zh-CN'
+// 读 identity 覆盖值（缺失/非字符串返回空串；调用方按「空串回落默认」消费）
+function idv(opts, key) {
+  const v = opts && opts.identity ? opts.identity[key] : ''
+  return typeof v === 'string' ? v : ''
 }
 
-// Origin/Referer 基础域（固定 CN）
-function originRefererOf() {
-  return C.ORIGIN_REFERER_CN
+// Accept-Language（默认 zh-CN，identity.acceptLanguage 可覆盖）
+function acceptLanguage(opts = {}) {
+  return idv(opts, 'acceptLanguage') || 'zh-CN'
 }
 
-// 客户端出站 UA 三段式（chat / refresh / 模型目录共用）
+// Origin/Referer 基础域（默认 CN，identity.originReferer 可覆盖）
+function originRefererOf(account, opts = {}) {
+  return idv(opts, 'originReferer') || C.ORIGIN_REFERER_CN
+}
+
+// 客户端出站 UA（chat / refresh / 模型目录共用）：按「使用端身份」（opts.clientIdentity）组装——
+// workbuddy（默认）= 官方 WorkBuddy 桌面端三段式；codebuddy = 官方 CodeBuddy IDE 两段式
+// （官网积分记录「使用端」列按出站 UA 服务端归因，故身份切换即改这里）
+// identity 可整串覆盖（workbuddyUA / codebuddyUA），也可只覆盖版本号段
 function userAgent(account, opts = {}) {
   if (opts.userAgent) return opts.userAgent // 显式覆盖一切
-  const clientVersion = opts.clientVersion || C.DEFAULT_CLIENT_VERSION
-  const cliVersion = opts.cliVersion || C.DEFAULT_CLI_VERSION
-  return `WorkBuddy/${clientVersion} WorkBuddy/${clientVersion} CLI/${cliVersion}`
+  if (opts.clientIdentity === 'codebuddy') {
+    const ideVersion = idv(opts, 'ideVersion') || C.DEFAULT_IDE_VERSION
+    return idv(opts, 'codebuddyUA') || `CodeBuddyIDE/${ideVersion} CodeBuddy/${ideVersion}`
+  }
+  const clientVersion = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
+  const cliVersion = idv(opts, 'cliVersion') || C.DEFAULT_CLI_VERSION
+  return idv(opts, 'workbuddyUA') || `WorkBuddy/${clientVersion} WorkBuddy/${clientVersion} CLI/${cliVersion}`
 }
 
-// billing 域 UA：单段无 CLI 段；SaaS 归属模式不设 UA
+// 桌面端事件链 UA（默认按桌面版本 + CLI 版本段拼接；identity.desktopUA 可整串覆盖）
+function desktopUA(opts = {}) {
+  const dv = idv(opts, 'desktopVersion') || C.DEFAULT_DESKTOP_VERSION
+  const cliVersion = idv(opts, 'cliVersion') || C.DEFAULT_CLI_VERSION
+  return idv(opts, 'desktopUA') || `WorkBuddy/${dv} WorkBuddy/${dv} CLI/${cliVersion}`
+}
+
+// /v3/config 探测 UA（默认按 IDE 版本段拼接；identity.v3ConfigUA 可整串覆盖）
+function v3ConfigUA(opts = {}) {
+  const v = idv(opts, 'ideVersion') || C.DEFAULT_IDE_VERSION
+  return idv(opts, 'v3ConfigUA') || `CodeBuddyIDE/${v} CodeBuddy/${v}`
+}
+
+// OAuth 设备授权 UA（默认官方 CLI 串；identity.oauthUA 可整串覆盖）
+function oauthUA(opts = {}) {
+  return idv(opts, 'oauthUA') || C.CODEBUDDY_CLI_UA
+}
+
+// billing 域 UA：单段无 CLI 段；SaaS 归属模式不设 UA；codebuddy 身份用 CodeBuddy 品牌单段
 function billingUA(opts = {}) {
   const name = opts.clientName || 'WorkBuddy'
   if (name === 'SaaS') return ''
-  const clientVersion = opts.clientVersion || C.DEFAULT_CLIENT_VERSION
-  return `WorkBuddy/${clientVersion}`
+  if (opts.clientIdentity === 'codebuddy') {
+    const ideVersion = idv(opts, 'ideVersion') || C.DEFAULT_IDE_VERSION
+    return idv(opts, 'codebuddyBillingUA') || `CodeBuddy/${ideVersion}`
+  }
+  const clientVersion = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
+  return idv(opts, 'workbuddyBillingUA') || `WorkBuddy/${clientVersion}`
 }
 
 // 账号级稳定设备头派生：sha256("wb2a:"+purpose+":"+uid) 前 18 字节 hex（36 字符）
@@ -52,17 +86,22 @@ function resolveDeviceToken(account, opts = {}) {
   return ''
 }
 
-// 用量归属头：默认对齐官方桌面端指纹；SaaS 模式走旧行为
+// 用量归属头：默认使用官方桌面端指纹；SaaS 模式走旧行为；
+// codebuddy 身份跟随 CodeBuddy 品牌与 IDE 版本（后台用量归因与「使用端」口径一致）
 function attribHeaders(opts = {}) {
   const name = opts.clientName || 'WorkBuddy'
   if (name === 'SaaS') return { 'X-Product': 'SaaS' }
-  const clientVersion = opts.clientVersion || C.DEFAULT_CLIENT_VERSION
+  const codebuddy = opts.clientIdentity === 'codebuddy'
+  const ideName = codebuddy ? 'CodeBuddy' : name
+  const version = codebuddy
+    ? idv(opts, 'ideVersion') || C.DEFAULT_IDE_VERSION
+    : idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
   return {
     'X-Agent-Purpose': 'conversation',
-    'X-IDE-Name': name,
-    'X-IDE-Type': name,
-    'X-IDE-Version': clientVersion,
-    'X-Product': name
+    'X-IDE-Name': ideName,
+    'X-IDE-Type': ideName,
+    'X-IDE-Version': version,
+    'X-Product': ideName
   }
 }
 
@@ -89,7 +128,7 @@ function commonHeaders(account, opts = {}) {
     Referer: `${origin}/`,
     'User-Agent': userAgent(account, opts),
     'X-CodeBuddy-Request': '1', // 官方风控闸门头，所有 API 必带
-    'Accept-Language': acceptLanguage()
+    'Accept-Language': acceptLanguage(opts)
   }
   const uid = account?.uid || ''
   if (uid) {
@@ -162,7 +201,7 @@ function billingHeaders(account, opts = {}) {
     Accept: 'application/json',
     'Content-Type': 'application/json',
     'X-CodeBuddy-Request': '1',
-    'Accept-Language': acceptLanguage() // billing 域未走 commonHeaders，单独注入
+    'Accept-Language': acceptLanguage(opts) // billing 域未走 commonHeaders，单独注入
   }
   const ua = opts.userAgent || billingUA(opts)
   if (ua) headers['User-Agent'] = ua
@@ -196,7 +235,7 @@ function desktopHeaders(account, opts = {}) {
   const headers = {
     'Content-Type': 'application/json',
     Accept: '*/*',
-    'User-Agent': C.DESKTOP_UA,
+    'User-Agent': desktopUA(opts),
     'X-CodeBuddy-Request': '1',
     Authorization: `Bearer ${account?.accessToken || ''}`,
     'X-User-Id': account?.uid || '',
@@ -209,7 +248,7 @@ function desktopHeaders(account, opts = {}) {
 
 // 官网域请求头（web 口径领奖 / 上报）
 function webHeaders(account, opts = {}) {
-  const origin = originRefererOf() // Origin/Referer 固定 CN
+  const origin = originRefererOf(account, opts)
   return {
     'Content-Type': 'application/json',
     Accept: 'application/json',
@@ -230,7 +269,7 @@ function v3ConfigHeaders(account, opts = {}) {
     'X-Requested-With': 'XMLHttpRequest',
     Authorization: `Bearer ${account?.accessToken || ''}`,
     'X-Product': 'SaaS',
-    'User-Agent': opts.userAgent || C.CODEBUDDY_IDE_UA,
+    'User-Agent': opts.userAgent || v3ConfigUA(opts),
     'X-CodeBuddy-Request': '1'
   }
   const uid = account?.uid || ''
@@ -285,8 +324,12 @@ function extractClientIP(headers) {
 }
 
 module.exports = {
+  idv,
   userAgent,
   billingUA,
+  desktopUA,
+  v3ConfigUA,
+  oauthUA,
   deriveAccountStableID,
   resolveDeviceToken,
   newMessageID,

@@ -158,25 +158,34 @@
             </div>
             <div class="wb-model-chips">
               <div v-for="m in wbModelList" :key="m.id" class="wb-model-row">
-                <span class="wb-model-chip">{{ m.id }}</span>
-                <select
-                  class="effort-select-sm"
-                  :value="effortSelectValue(m)"
-                  @change="onEffortSelect(m, $event.target.value)"
-                >
-                  <option value="">默认（不干预）</option>
-                  <option value="low">low</option>
-                  <option value="high">high</option>
-                  <option value="max">max</option>
-                  <option value="xhigh">xhigh</option>
-                  <option value="__custom">自定义…</option>
-                </select>
-                <input v-model="m.reasoningEffort" class="effort-input" placeholder="或输入自定义值" />
+                <div class="wb-model-line">
+                  <span class="wb-model-chip">{{ m.id }}</span>
+                  <select
+                    class="effort-select-sm"
+                    :value="effortSelectValue(m)"
+                    @change="onEffortSelect(m, $event.target.value)"
+                  >
+                    <option value="">默认（不干预）</option>
+                    <option v-for="e in m.efforts" :key="e" :value="e">{{ e }}</option>
+                    <option value="__custom">自定义…</option>
+                  </select>
+                  <input v-if="m.custom" v-model="m.reasoningEffort" class="effort-input" placeholder="输入自定义档位" />
+                </div>
+                <div class="wb-model-line">
+                  <div class="limit-field">
+                    <span class="limit-label">最大上下文</span>
+                    <input v-model="m.maxContext" type="number" min="1" placeholder="留空" />
+                  </div>
+                  <div class="limit-field">
+                    <span class="limit-label">最大输出</span>
+                    <input v-model="m.maxOutput" type="number" min="1" placeholder="留空" />
+                  </div>
+                </div>
               </div>
               <span v-if="!wbModelList.length" class="wb-entry-empty">尚未配置模型，请到账号池页面勾选要启用的模型。</span>
             </div>
             <div class="wb-entry-hint">
-              推理档位逐模型独立配置（WorkBuddy 源不回落全局档位）：下拉可选 low / high / max / xhigh，或直接输入自定义值；选「默认」表示不改写客户端请求的档位。
+              推理档位逐模型独立配置（WorkBuddy 源不回落全局档位）：下拉列出该模型后台支持的全部档位，默认档已预选；选「默认」表示不改写客户端请求的档位，「自定义」可手填。最大上下文与最大输出取自后台拉取的值，可自行调整，留空表示不注入。
             </div>
           </div>
 
@@ -231,14 +240,11 @@
                 <span class="limit-label">推理档位</span>
                 <select
                   class="effort-select-sm"
-                  :value="effortSelectValue(model)"
+                  :value="effortSelectValue(model, EFFORT_PRESETS)"
                   @change="onEffortSelect(model, $event.target.value)"
                 >
                   <option value="">默认（不干预）</option>
-                  <option value="low">low</option>
-                  <option value="high">high</option>
-                  <option value="max">max</option>
-                  <option value="xhigh">xhigh</option>
+                  <option v-for="e in EFFORT_PRESETS" :key="e" :value="e">{{ e }}</option>
                   <option value="__custom">自定义…</option>
                 </select>
                 <input v-model="model.reasoningEffort" class="effort-input" placeholder="或输入自定义值" />
@@ -327,16 +333,27 @@ async function loadWorkbuddyData(existingModels) {
   wbModelList.value = buildWbModelList(existingModels)
 }
 
-// 由账号池启用清单构建 WorkBuddy 模型列表（保留当前 Provider 已配置的模型级档位）
+// 由账号池启用清单构建 WorkBuddy 模型列表
+// 档位候选来自后台拉取的 efforts；已配置过的档位优先回填，否则用后台默认档
+// 上下文与最大输出优先用 Provider 侧已配置值，未配置时回填后台拉取到的值
 function buildWbModelList(existingModels) {
-  const effortByID = new Map((existingModels || []).map(m => [m.id, m.reasoningEffort || '']))
-  return enabledModels.value.map(m => ({
-    id: m.id,
-    displayName: m.displayName || '',
-    maxContext: m.maxContext ?? null,
-    maxOutput: m.maxOutput ?? null,
-    reasoningEffort: effortByID.get(m.id) || ''
-  }))
+  const configured = new Map((existingModels || []).map(m => [m.id, m]))
+  return enabledModels.value.map(m => {
+    const saved = configured.get(m.id)
+    const efforts = Array.isArray(m.efforts) ? m.efforts.slice() : []
+    const savedEffort = (saved?.reasoningEffort || '').trim()
+    const defaultEffort = (m.defaultEffort || '').trim()
+    const effort = savedEffort || (efforts.includes(defaultEffort) ? defaultEffort : '')
+    return {
+      id: m.id, // 模型 id
+      displayName: m.displayName || '', // 显示名
+      maxContext: saved?.maxContext ?? m.maxContext ?? null, // 最大上下文（Provider 侧优先）
+      maxOutput: saved?.maxOutput ?? m.maxOutput ?? null, // 最大输出（Provider 侧优先）
+      efforts, // 该模型后台支持的档位候选
+      reasoningEffort: effort, // 当前档位（已配置优先，否则预选后台默认档）
+      custom: !!effort && !efforts.includes(effort) // 当前档位是否为列表外的自定义值
+    }
+  })
 }
 
 // 账号状态标签文案（与账号池页面保持同一口径）
@@ -353,19 +370,25 @@ function accountStateClass(acct) {
   return 'is-ok'
 }
 
-// 档位预设选项（下拉可快速选择；输入框可自由输入自定义值）
+// 通用 Provider 的档位候选（WorkBuddy 源改用后台拉取的候选，不用这里）
 const EFFORT_PRESETS = ['low', 'high', 'max', 'xhigh']
 
-// 档位下拉的当前显示值：预设值原样返回，自定义值返回 __custom，空值返回 ''（默认）
-function effortSelectValue(model) {
+// 档位下拉的当前显示值：空 = 默认（不干预）；命中候选档位原样返回；其余归入自定义
+// fallback：模型没有后台候选时使用的兜底候选（通用 Provider 传固定档位表）
+function effortSelectValue(model, fallback) {
   const v = (model.reasoningEffort || '').trim()
   if (!v) return ''
-  return EFFORT_PRESETS.includes(v) ? v : '__custom'
+  const efforts = Array.isArray(model.efforts) && model.efforts.length ? model.efforts : fallback || []
+  return efforts.includes(v) ? v : '__custom'
 }
 
-// 档位下拉变更：选预设即写入；选「自定义」不改值（由输入框接管）
+// 档位下拉变更：选候选档位即写入；选「默认」清空；选「自定义」进入手填
 function onEffortSelect(model, value) {
-  if (value === '__custom') return
+  if (value === '__custom') {
+    model.custom = true
+    return
+  }
+  model.custom = false
   model.reasoningEffort = value
 }
 
@@ -487,8 +510,8 @@ async function saveProvider() {
         .map(m => ({
           id: (m.id || '').trim(),
           displayName: (m.displayName || '').trim(),
-          maxContext: m.maxContext ?? null,
-          maxOutput: m.maxOutput ?? null,
+          maxContext: toLimitOrNull(m.maxContext),
+          maxOutput: toLimitOrNull(m.maxOutput),
           reasoningEffort: (m.reasoningEffort || '').trim()
         }))
         .filter(m => m.id)
@@ -785,20 +808,35 @@ onMounted(() => {
 .wb-account-state.is-warn { color: #D97706; background: #FFFBEB; }
 .wb-account-state.is-bad { color: #DC2626; background: #FEF2F2; }
 
-/* 模型清单列表（每行：模型 id + 推理档位输入） */
+/* 模型清单列表（每行：模型 id + 推理档位 + 上下文/输出上限） */
 .wb-model-chips {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 200px;
+  gap: 10px;
+  max-height: 300px;
   overflow-y: auto;
 }
 
-/* 单个模型行（id chip + 档位输入） */
+/* 单个模型块（两行：id + 档位；上下文 + 输出上限） */
 .wb-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-1);
+}
+
+/* 模型块内的一行 */
+.wb-model-line {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 模型块内的上下限输入行（两个字段等宽平分） */
+.wb-model-line .limit-field {
+  flex: 1;
+  min-width: 0;
 }
 
 /* 推理档位快捷选择（与右侧自定义输入框配合使用） */

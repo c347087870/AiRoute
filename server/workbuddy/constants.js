@@ -1,5 +1,5 @@
 // WorkBuddy（腾讯 CodeBuddy）上游协议常量
-// 全部取值来自参考项目 Go 源码的逐行翻译，勿凭经验增删
+// 全部取值为逐条实测、与上游协议对齐的固定值，勿凭经验增删
 
 // ===== 域名 =====
 const CHAT_BASE_CN = 'https://copilot.tencent.com' // CN 聊天域
@@ -12,8 +12,8 @@ const ORIGIN_REFERER_CN = 'https://www.codebuddy.cn' // 出站 Origin/Referer �
 // ===== 版本号（可被配置覆盖）=====
 const DEFAULT_CLIENT_VERSION = '5.5.4' // UA 的 WorkBuddy/<ver> 与 X-IDE-Version
 const DEFAULT_CLI_VERSION = '2.137.1' // UA 的 CLI/<ver> 段
-const DESKTOP_UA = 'WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1' // 桌面端事件链 UA
-const CODEBUDDY_IDE_UA = 'CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0' // /v3/config 探测 UA
+const DEFAULT_IDE_VERSION = '4.12.0' // 使用端身份 codebuddy 的 UA 版本段（CodeBuddyIDE/<ver> 与 CodeBuddy/<ver>）
+const DEFAULT_DESKTOP_VERSION = '5.5.6' // 桌面端事件链版本段（桌面 UA 两段 + 事件体 ideVersion/extVersion）
 const CODEBUDDY_CLI_UA = 'CLI/2.63.2 CodeBuddy/2.63.2' // OAuth 设备授权流程 UA
 
 // ===== 路径 =====
@@ -52,7 +52,7 @@ const OAUTH_ACCOUNT_PATH = '/v2/plugin/login/account' // 取账号信息
 // ===== 超时（毫秒）=====
 const TIMEOUT_DEFAULTS = {
   timeoutMs: 120000, // 短 RPC 总时长上限
-  headerTimeoutMs: 60000, // 聊天首字节前上限
+  headerTimeoutMs: 120000, // 聊天首字节前上限（超时后不再换号：同请求换号多半再撞慢上游）
   idleTimeoutMs: 300000, // 聊天流中空闲上限
   refreshTimeoutMs: 30000 // token 刷新 I/O 上限
 }
@@ -99,30 +99,44 @@ const SCHEDULE_DEFAULTS = {
 const SESSION_DEAD_THRESHOLD = 3 // 12153 连续 N 次才永久禁用
 const MAX_ROTATE = 3 // 单请求最多换号次数
 
-// ===== 轮转退避（参照 server/backoff.go）=====
+// ===== 轮转退避 =====
 const ROTATE_BACKOFF = {
   baseMs: 500, // 轮转退避基数（首次换号前等待）
   capMs: 8000, // 退避封顶 8s
   jitterFraction: 0.25 // ±25% 均匀抖动（打散同相位重试）
 }
 
-// ===== 连接层参数（参照 upstream/transport.go）=====
+// ===== 连接层参数 =====
 const TRANSPORT_DEFAULTS = {
   keepAliveMsecs: 15000, // TCP keepalive 探测周期 15s
   maxSockets: 64, // 单主机最大并发连接
   maxFreeSockets: 20 // 空闲连接池保留数
 }
 
-// ===== 设备令牌文件（参照 upstream/device_token.go）=====
+// ===== 设备令牌文件 =====
 const DEVICE_TOKEN_FILE = {
   cacheTtlMs: 5 * 60 * 1000, // 文件读取缓存 5 分钟
   maxLen: 1024 // 超过 1KB 视为异常，忽略不注入
 }
 
-// ===== WAF IP 级 fail-fast（参照 server/wafip.go）=====
+// ===== WAF IP 级 fail-fast =====
 const WAF_IP = {
   windowMs: 60 * 1000, // 判定滑动窗 + 激活时长 60s
   threshold: 2 // 窗内不同账号命中 WAF 403 达阈值即判 IP 级拦截
+}
+
+// ===== 上下文压缩 =====
+const CONTEXT_COMPRESS = {
+  ratio: 0.8, // 触发压缩的占用比例：估算 token 超过模型上下文窗口 × 该比例即裁历史
+  bytesPerToken: 4, // 估算口径：约 4 字节 ≈ 1 token（只用于判定是否超限，不求精确）
+  minKeepTurns: 1, // 压缩下限：无论超限多少，最新一轮（当前提问）永不裁剪
+  aggressiveRatio: 0.5, // 收到「上下文过长」错误后重试时的激进裁剪比例
+  imageTokens: 1600 // 单张图片按固定 token 计入（避免 base64 文本被按字节高估）
+}
+
+// ===== 截断（finish_reason=length）重试 =====
+const TRUNCATION_RETRY = {
+  maxAttempts: 1 // 检测到「只有思考、无最终回答」后额外换号重试次数（不降档）
 }
 
 // ===== 派发地点 =====
@@ -146,8 +160,8 @@ module.exports = {
   ORIGIN_REFERER_CN,
   DEFAULT_CLIENT_VERSION,
   DEFAULT_CLI_VERSION,
-  DESKTOP_UA,
-  CODEBUDDY_IDE_UA,
+  DEFAULT_IDE_VERSION,
+  DEFAULT_DESKTOP_VERSION,
   CODEBUDDY_CLI_UA,
   CHAT_COMPLETIONS_PATH,
   TOKEN_REFRESH_PATH,
@@ -184,6 +198,8 @@ module.exports = {
   TRANSPORT_DEFAULTS,
   DEVICE_TOKEN_FILE,
   WAF_IP,
+  CONTEXT_COMPRESS,
+  TRUNCATION_RETRY,
   MODELS_DEV_URL,
   MODEL_CATALOG_FILE,
   USAGE_HOURLY_KEEP_HOURS,

@@ -1,5 +1,4 @@
 // 上游错误分类：统一判定错误类型，决定账号处置与是否换号
-// 翻译自参考项目 internal/upstream/client.go 的 Classify 与 hint.go
 
 // 错误类型枚举（字符串值即日志/提示中使用的标识）
 const ERR_KIND = {
@@ -16,6 +15,7 @@ const ERR_KIND = {
   WAF_BLOCK: 'waf_block', // 403 + 非业务信封（WAF 页）
   PROMPT_TOO_LONG: 'prompt_too_long', // 11115 prompt 过长
   IMAGE_INVALID: 'image_invalid', // 图片格式/数据无效
+  TIMEOUT: 'timeout', // 首字节超时（本地判定，非上游响应）
   CLIENT: 'client' // 其他 4xx 兜底
 }
 
@@ -156,7 +156,7 @@ function isModelRateLimit(body) {
 }
 
 // 是否重复签到（幂等判定）
-// 参照 IsAlreadyCheckin(err)：只认"带分类的错误"（HTTP ≥400 或业务 code≠0 的响应体）；
+// 只认"带分类的错误"（HTTP ≥400 或业务 code≠0 的响应体）；
 // 2xx 成功与网络层错误一律不算幂等，否则会把真实签到成功误标为「已签到」
 function isAlreadyCheckin(status, body) {
   if (status < 400) return false
@@ -169,7 +169,7 @@ function isPromptTooLongStatus(status) {
   return status === 400 || status === 404 || status === 413
 }
 
-// 统一错误分类：判定顺序严格按参考项目，命中即返回
+// 统一错误分类：判定顺序固定，命中即返回
 function classify(status, body) {
   const raw = String(body || '')
   const lower = raw.toLowerCase()
@@ -277,10 +277,11 @@ const GATEWAY_HINTS = {
   [ERR_KIND.SESSION_DEAD]: 'account session expired at upstream; the account is disabled until re-login',
   [ERR_KIND.HARD_CREDIT]: 'account credits exhausted at upstream; waiting for daily check-in to restore',
   [ERR_KIND.MODEL_BLOCKED]: 'upstream has no such model on this backend; switch model or retry on another account',
-  [ERR_KIND.CONTENT_BLOCKED]: 'request content was rejected by content policy; adjust the prompt and retry'
+  [ERR_KIND.CONTENT_BLOCKED]: 'request content was rejected by content policy; adjust the prompt and retry',
+  [ERR_KIND.TIMEOUT]: 'upstream did not return response headers before the deadline; the gateway stops rotating accounts for this request, retry later'
 }
 
-// ===== gateway_hint（参照 upstream/hint.go）=====
+// ===== gateway_hint =====
 // error.message 永远是上游原文透传；gateway_hint 只做并列的网关视角补充说明，未覆盖形态返回空串
 
 // 11133 model_param_invalid 家族（宁宽勿漏：hint 是补充说明非权威分类）

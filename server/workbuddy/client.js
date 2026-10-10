@@ -1,5 +1,4 @@
 // WorkBuddy 上游 HTTP 客户端：OAuth、token 刷新、聊天转发、签到/余额/模型/成长域调用
-// 翻译自参考项目 internal/upstream/client.go 与 internal/panel/login.go
 
 const axios = require('axios')
 const http = require('http')
@@ -11,7 +10,7 @@ const catalog = require('./catalog')
 
 // ===== 基础 HTTP =====
 
-// 连接层加固（参照 upstream/transport.go）：keepAlive 复用 + 15s keepalive 探测 + 空闲池上限。
+// 连接层加固：keepAlive 复用 + 15s keepalive 探测 + 空闲池上限。
 // 说明：Node 无 ResponseHeaderTimeout 等价项，聊天首字节上限在 chatStream 用 AbortController 实现
 const keepAliveHttpAgent = new http.Agent({
   keepAlive: true,
@@ -26,7 +25,7 @@ const keepAliveHttpsAgent = new https.Agent({
   maxFreeSockets: C.TRANSPORT_DEFAULTS.maxFreeSockets
 })
 
-// 传输层失败后清空空闲连接池（参照 roundTripCloseIdle）：死连接可能仍留在空闲池里，
+// 传输层失败后清空空闲连接池：死连接可能仍留在空闲池里，
 // 等超时才过期，下一个请求会继续捡到它；只销毁空闲 socket，不影响在途请求
 function purgeIdleSockets() {
   for (const agent of [keepAliveHttpAgent, keepAliveHttpsAgent]) {
@@ -54,7 +53,7 @@ async function send(cfg) {
     responseType: cfg.responseType || 'text',
     validateStatus: () => true,
     maxRedirects: 0,
-    // 禁用 HTTP/2 协商，保持 HTTP/1.1（与参考实现 TLSNextProto 空映射同口径）
+    // 禁用 HTTP/2 协商，保持 HTTP/1.1
     httpAgent: cfg.agent || keepAliveHttpAgent,
     httpsAgent: cfg.agent || keepAliveHttpsAgent
   })
@@ -87,25 +86,25 @@ async function sendEnvelope(cfg) {
 
 // ===== OAuth 设备授权 =====
 
-// OAuth 通用请求头
-function oauthHeaders() {
-  const origin = C.ORIGIN_REFERER_CN
+// OAuth 通用请求头（UA 与 Origin 支持 identity 覆盖）
+function oauthHeaders(opts = {}) {
+  const origin = headersMod.originRefererOf(null, opts)
   return {
     'Content-Type': 'application/json',
     Accept: 'application/json, text/plain, */*',
     'X-Requested-With': 'XMLHttpRequest',
     Origin: origin,
     Referer: `${origin}/`,
-    'User-Agent': C.CODEBUDDY_CLI_UA
+    'User-Agent': headersMod.oauthUA(opts)
   }
 }
 
 // 步骤①：取授权 URL
-async function oauthStart() {
+async function oauthStart(opts = {}) {
   const data = await sendEnvelope({
     method: 'POST',
-    url: `${C.CHAT_BASE_CN}${C.OAUTH_STATE_PATH}?platform=CLI`,
-    headers: oauthHeaders(),
+    url: `${headersMod.chatBaseOf(null, opts)}${C.OAUTH_STATE_PATH}?platform=CLI`,
+    headers: oauthHeaders(opts),
     data: {},
     timeoutMs: 30000
   })
@@ -116,11 +115,11 @@ async function oauthStart() {
 }
 
 // 步骤③：取 token（pending 时业务 code != 0）
-async function oauthPollToken(state) {
+async function oauthPollToken(state, opts = {}) {
   const data = await sendEnvelope({
     method: 'GET',
-    url: `${C.CHAT_BASE_CN}${C.OAUTH_TOKEN_PATH}?state=${encodeURIComponent(state)}`,
-    headers: oauthHeaders(),
+    url: `${headersMod.chatBaseOf(null, opts)}${C.OAUTH_TOKEN_PATH}?state=${encodeURIComponent(state)}`,
+    headers: oauthHeaders(opts),
     timeoutMs: 30000
   })
   const accessToken = typeof data?.accessToken === 'string' ? data.accessToken : ''
@@ -134,12 +133,12 @@ async function oauthPollToken(state) {
 }
 
 // 步骤③b：取账号信息（失败不阻塞登录，返回 null）
-async function oauthFetchAccount(state, accessToken) {
+async function oauthFetchAccount(state, accessToken, opts = {}) {
   try {
     const data = await sendEnvelope({
       method: 'GET',
-      url: `${C.CHAT_BASE_CN}${C.OAUTH_ACCOUNT_PATH}?state=${encodeURIComponent(state)}`,
-      headers: { ...oauthHeaders(), Authorization: `Bearer ${accessToken}` },
+      url: `${headersMod.chatBaseOf(null, opts)}${C.OAUTH_ACCOUNT_PATH}?state=${encodeURIComponent(state)}`,
+      headers: { ...oauthHeaders(opts), Authorization: `Bearer ${accessToken}` },
       timeoutMs: 30000
     })
     return {
@@ -212,7 +211,7 @@ async function chatStream(auth, body, opts = {}) {
   const chatBase = headersMod.chatBaseOf(auth, opts)
   const url = `${chatBase}${C.CHAT_COMPLETIONS_PATH}`
   let res
-  // 首字节（响应头）前上限（参照 transport.go responseHeaderTimeout）：
+  // 首字节（响应头）前上限：
   // 只计响应头到达前，头到达后 SSE 长流不受影响（流中空闲由 idle 监控负责）
   const headerAbort = new AbortController()
   const headerTimer = setTimeout(() => headerAbort.abort(), C.TIMEOUT_DEFAULTS.headerTimeoutMs)
@@ -235,11 +234,13 @@ async function chatStream(auth, body, opts = {}) {
     const timedOut = headerAbort.signal.aborted
     const e = new Error(
       timedOut
-        ? `upstream response headers timeout (${C.TIMEOUT_DEFAULTS.headerTimeoutMs}ms)`
+        ? `upstream_timeout: no response headers within ${C.TIMEOUT_DEFAULTS.headerTimeoutMs}ms`
         : `transport failed: ${err.message}`
     )
-    e.kind = errMod.ERR_KIND.CLIENT
-    e.transport = true
+    // 首字节超时是请求级失败，不轮转也不罚号；传输层失败才计账号失败
+    e.kind = timedOut ? errMod.ERR_KIND.TIMEOUT : errMod.ERR_KIND.CLIENT
+    e.code = timedOut ? 'upstream_timeout' : undefined
+    e.transport = !timedOut
     throw e
   } finally {
     clearTimeout(headerTimer)
@@ -300,7 +301,7 @@ async function dailyCheckin(auth, opts = {}) {
     return { ok: false, message: `请求失败: ${err.message}`, kind: errMod.ERR_KIND.CLIENT }
   }
   if (res.status >= 400) {
-    // 幂等判定只对错误路径生效（参照 IsAlreadyCheckin：只认带分类的错误）
+    // 幂等判定只对错误路径生效：只认带分类的错误
     if (errMod.isAlreadyCheckin(res.status, res.text)) {
       return { ok: true, message: '今日已签到', already: true }
     }
@@ -651,8 +652,8 @@ async function claimReward(auth, taskCode, opts = {}) {
     Authorization: `Bearer ${(auth && auth.accessToken) || ''}`,
     Accept: 'application/json, text/plain, */*',
     'Content-Type': 'application/json',
-    Origin: C.WEB_BASE_CN,
-    Referer: `${C.WEB_BASE_CN}/profile/growth-center`,
+    Origin: webBase,
+    Referer: `${webBase}/profile/growth-center`,
     'x-client-platform': 'web'
   }
   const ua = headersMod.userAgent(auth, opts)
@@ -715,13 +716,14 @@ async function claimRewardMP(auth, taskCode, opts = {}) {
 }
 
 // 小程序上报请求头（X-Client-Product / X-Client-Version / X-Client-Platform: mp-weixin / X-Platform）
-function mpReportHeaders(auth) {
+// X-Client-Version 默认 2.4.0，可由 identity.mpVersion 覆盖
+function mpReportHeaders(auth, opts = {}) {
   const headers = {
     Authorization: `Bearer ${(auth && auth.accessToken) || ''}`,
     'Content-Type': 'application/json',
     Accept: 'application/json',
     'X-Client-Product': 'workbuddy-mp',
-    'X-Client-Version': '2.4.0',
+    'X-Client-Version': headersMod.idv(opts, 'mpVersion') || '2.4.0',
     'X-Client-Platform': 'mp-weixin',
     'X-Platform': 'wechatmp'
   }
@@ -729,14 +731,14 @@ function mpReportHeaders(auth) {
   return headers
 }
 
-// 小程序埋点上报：POST {BILLING_BASE_CN}/v2/report（body 为事件数组）
-// 注意：直接用 CN 计费域字段，不走 billingBase() 的 opts 覆盖
+// 小程序埋点上报：POST {billingBase}/v2/report（body 为事件数组）
+// billing 域地址走 billingBaseOf（identity.billingBase 可覆盖）
 async function reportMPEvent(auth, events, opts = {}) {
   const arr = Array.isArray(events) ? events : [events]
   const res = await send({
     method: 'POST',
-    url: `${C.BILLING_BASE_CN}${C.REPORT_PATH}`,
-    headers: mpReportHeaders(auth),
+    url: `${headersMod.billingBaseOf(auth, opts)}${C.REPORT_PATH}`,
+    headers: mpReportHeaders(auth, opts),
     data: arr,
     timeoutMs: C.TIMEOUT_DEFAULTS.timeoutMs
   })
@@ -923,7 +925,7 @@ function num(v) {
   return Number.isFinite(n) ? Math.trunc(n) : 0
 }
 
-// 把上游倍率原文规范化为可比较的数值键（对照参考项目 normalizeModelRate）。
+// 把上游倍率原文规范化为可比较的数值键。
 // 兼容 "x0.05" / "x0.05 credits" / "0.50x" 等形态；无法数值化时保留去除
 // credits 后缀与空白后的原文，避免编造倍率；缺失返回空串。
 function normalizeModelRate(raw) {

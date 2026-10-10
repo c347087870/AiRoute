@@ -1,4 +1,4 @@
-// WorkBuddy 移植模块的离线自动化测试
+// WorkBuddy 模块的离线自动化测试
 // 运行：node scripts/test-workbuddy.js（需 Node 14+，或用 Electron 内置 Node 运行）
 // 覆盖：指纹脱敏 / 提示词体系与降级 / 请求体改写管线 / SSE 重建与聚合 /
 //       错误分类 / 会话粘性 / 账号池冷却与选号 / 凭证双形态解析
@@ -253,24 +253,19 @@ async function main() {
 
   test('降级态触发后在 append 模式退化为替换', () => {
     prompt.degradeTrigger()
-    try {
-      assert.strictEqual(prompt.degradeActive(), true)
-      const body = JSON.stringify({
-        messages: [
-          { role: 'system', content: 'A' },
-          { role: 'system', content: 'B' },
-          { role: 'user', content: 'C' }
-        ]
-      })
-      const res = prompt.applyPromptMode(body, 'append', 'GW')
-      assert.strictEqual(res.degradedApplied, true)
-      const out = JSON.parse(res.body)
-      assert.strictEqual(out.messages[0].content, prompt.DEGRADED_PROMPT)
-      assert.strictEqual(out.messages.length, 2)
-    } finally {
-      // 不影响后续用例（无法直接清期，用时间推进模拟）
-      resetDegradeForTest()
-    }
+    assert.strictEqual(prompt.degradeActive(), true)
+    const body = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'A' },
+        { role: 'system', content: 'B' },
+        { role: 'user', content: 'C' }
+      ]
+    })
+    const res = prompt.applyPromptMode(body, 'append', 'GW')
+    assert.strictEqual(res.degradedApplied, true)
+    const out = JSON.parse(res.body)
+    assert.strictEqual(out.messages[0].content, prompt.DEGRADED_PROMPT)
+    assert.strictEqual(out.messages.length, 2)
   })
 
   test('nextMidnightCST：跨月与整点边界', () => {
@@ -449,7 +444,7 @@ async function main() {
         noise: 'x'
       })
     )
-    const out = JSON.parse(res.payload)
+    const out = JSON.parse(res.payloads[0])
     assert.ok(!('noise' in out))
     assert.ok(!('bogus_field' in out.choices[0].delta))
     assert.strictEqual(out.choices[0].finish_reason, null)
@@ -459,7 +454,7 @@ async function main() {
     const rebuilder = sse.createFrameRebuilder()
     const payloadStr = JSON.stringify({ error: { message: 'blocked by security policy', code: 11128 }, extra: 1 })
     const res = rebuilder.push(payloadStr)
-    assert.strictEqual(res.payload, payloadStr)
+    assert.strictEqual(res.payloads[0], payloadStr)
   })
 
   test('tool_calls name 每 index 只保留一次', () => {
@@ -467,11 +462,11 @@ async function main() {
     const f1 = JSON.parse(
       rebuilder.push(
         JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 't1', function: { name: 'Bash', arguments: '' } }] } }] })
-      ).payload
+      ).payloads[0]
     )
     assert.strictEqual(f1.choices[0].delta.tool_calls[0].function.name, 'Bash')
     const f2 = JSON.parse(
-      rebuilder.push(JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'Bash', arguments: '{}' } }] } }] })).payload
+      rebuilder.push(JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'Bash', arguments: '{}' } }] } }] })).payloads[0]
     )
     assert.ok(!('name' in f2.choices[0].delta.tool_calls[0].function), '后续片应删除 name')
   })
@@ -479,7 +474,7 @@ async function main() {
   test('首帧 id 续传（后续帧缺 id 用缓存值）', () => {
     const rebuilder = sse.createFrameRebuilder()
     rebuilder.push(JSON.stringify({ id: 'chatcmpl-abc', choices: [] }))
-    const f2 = JSON.parse(rebuilder.push(JSON.stringify({ choices: [{ delta: { content: 'x' } }] })).payload)
+    const f2 = JSON.parse(rebuilder.push(JSON.stringify({ choices: [{ delta: { content: 'x' } }] })).payloads[0])
     assert.strictEqual(f2.id, 'chatcmpl-abc')
   })
 
@@ -1537,7 +1532,7 @@ async function main() {
     assert.strictEqual(merged[0].title, '默认', '重复项应保留默认口径条目')
   })
 
-  test('claim 轮询参数对齐参考（4 次 × 3s）', () => {
+  test('claim 轮询参数（4 次 × 3s）', () => {
     assert.strictEqual(tasksMod.CLAIM_POLL_ATTEMPTS, 4)
     assert.strictEqual(tasksMod.CLAIM_POLL_GAP, 3000)
   })
@@ -1758,6 +1753,55 @@ async function main() {
     assert.strictEqual(catalogMod.defaultEffortOf('deepseek-v4.1-flash', [], ''), 'high')
     assert.strictEqual(catalogMod.defaultEffortOf('glm-5.2', ['minimal'], 'ultra'), '')
     assert.strictEqual(catalogMod.defaultEffortOf('glm-5.2', ['minimal', 'ultra'], 'ultra'), 'ultra')
+  })
+
+  test('上下文压缩：超预算时整轮裁剪，system 与最近轮次保留', () => {
+    const msgs = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U1' + 'x'.repeat(4000) },
+      { role: 'assistant', content: 'A1' },
+      { role: 'user', content: 'U2' + 'y'.repeat(4000) },
+      { role: 'assistant', content: 'A2' },
+      { role: 'user', content: 'U3 last' }
+    ]
+    const out = JSON.parse(payload.prepareBody(JSON.stringify({ model: 'm', messages: msgs }), { contextWindow: 1200 }))
+    assert.strictEqual(out.messages[0].role, 'system', 'system 永不裁剪')
+    assert.ok(
+      out.messages.some(m => m.content === 'U3 last'),
+      '最近一轮必须保留'
+    )
+    assert.ok(out.messages.length < msgs.length, '应发生裁剪')
+  })
+
+  test('上下文压缩：窗口未知（0）时不裁剪', () => {
+    const msgs = [
+      { role: 'user', content: 'U1' + 'x'.repeat(4000) },
+      { role: 'user', content: 'U2' + 'y'.repeat(4000) }
+    ]
+    const out = JSON.parse(payload.prepareBody(JSON.stringify({ model: 'm', messages: msgs }), { contextWindow: 0 }))
+    assert.strictEqual(out.messages.length, 2)
+  })
+
+  test('上下文压缩：裁掉工具轮不留孤儿 tool 结果', () => {
+    const msgs = [
+      { role: 'user', content: 'U1' + 'x'.repeat(6000) },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: 'R1' + 'y'.repeat(6000) },
+      { role: 'user', content: 'U2 last' }
+    ]
+    const out = JSON.parse(payload.prepareBody(JSON.stringify({ model: 'm', messages: msgs }), { contextWindow: 1200 }))
+    assert.strictEqual(out.messages.filter(m => m.role === 'tool').length, 0, '裁掉的一轮不应留下孤儿 tool 结果')
+    assert.strictEqual(out.messages[out.messages.length - 1].content, 'U2 last')
+  })
+
+  test('输出上限兜底：未指定 max_tokens 时注入模型上限，显式值不被覆盖', () => {
+    const base = { model: 'm', messages: [{ role: 'user', content: 'hi' }] }
+    const injected = JSON.parse(payload.prepareBody(JSON.stringify(base), { maxOutput: 131072 }))
+    assert.strictEqual(injected.max_tokens, 131072)
+    const explicit = JSON.parse(payload.prepareBody(JSON.stringify({ ...base, max_tokens: 999 }), { maxOutput: 131072 }))
+    assert.strictEqual(explicit.max_tokens, 999)
+    const none = JSON.parse(payload.prepareBody(JSON.stringify(base), {}))
+    assert.strictEqual(none.max_tokens, undefined, '模型上限未知时不注入')
   })
 
   test('client.mapModelEntry 接线兜底链（上游优先 / 种子兜底）', () => {
@@ -2032,6 +2076,19 @@ async function main() {
     u.stop()
   })
 
+  test("snapshot('today'/'yesterday')：本地自然日窗口", () => {
+    const clk = Date.parse('2026-05-01T10:00:00')
+    let c = clk - 24 * 3600000 // 昨天 10 点
+    const u = usageMod.createUsage({ file: '', now: () => c })
+    u.record({ uid: 'y', model: 'm1', rate: '', ok: true, pt: 5, ct: 0, tt: 5, latMs: 100, tps: 1, credit: 0, hasCredit: false })
+    c = clk
+    u.record({ uid: 't', model: 'm1', rate: '', ok: true, pt: 1, ct: 0, tt: 1, latMs: 100, tps: 1, credit: 0, hasCredit: false })
+    assert.strictEqual(u.snapshot('today').totals.req, 1, '今天窗口只含今天的记录')
+    assert.strictEqual(u.snapshot('yesterday').totals.req, 1, '昨天窗口只含昨天的记录')
+    assert.strictEqual(u.snapshot('yesterday').totals.pt, 5, '昨天窗口内容正确')
+    u.stop()
+  })
+
   test('倍率解析与模型条目 rate 字段', () => {
     assert.strictEqual(clientMod.normalizeModelRate('x0.79'), '0.79')
     assert.strictEqual(clientMod.normalizeModelRate('x0.05 credits'), '0.05')
@@ -2159,17 +2216,26 @@ async function main() {
     r.pool.list = () => [{ uid: 'u1', nickname: '账号一' }]
     try {
       const a = runtimeMod.creditHistory()
-      assert.strictEqual(a.limit, 200, '默认 200')
+      assert.strictEqual(a.limit, 50, '默认 50')
       assert.strictEqual(a.entries.length, 3)
+      assert.strictEqual(a.offset, 0, '默认偏移 0')
+      assert.strictEqual(a.total, 3, '返回过滤后总条数')
+      assert.strictEqual(a.net, 60, '净变动合计（60-30+30）')
       assert.strictEqual(a.entries[0].account, '账号一', '昵称读取时填充')
       assert.strictEqual(a.entries[1].account, '', '池内无此账号时昵称为空串')
       assert.strictEqual(runtimeMod.creditHistory(2).entries.length, 2, 'limit 截断')
       assert.strictEqual(runtimeMod.creditHistory(5000).limit, 1000, '上限 1000')
-      assert.strictEqual(runtimeMod.creditHistory(-1).limit, 200, '非法 limit 回落默认')
-      assert.strictEqual(runtimeMod.creditHistory('abc').limit, 200, '非数字 limit 回落默认')
+      assert.strictEqual(runtimeMod.creditHistory(-1).limit, 50, '非法 limit 回落默认')
+      assert.strictEqual(runtimeMod.creditHistory('abc').limit, 50, '非数字 limit 回落默认')
       const e = runtimeMod.creditHistory(100, 'u1')
       assert.strictEqual(e.entries.length, 2, 'uid 过滤')
+      assert.strictEqual(e.total, 2, 'uid 过滤后总数')
+      assert.strictEqual(e.net, 90, 'uid 过滤后净变动（60+30）')
       assert.ok(e.entries.every(x => x.uid === 'u1'))
+      const pg = runtimeMod.creditHistory(1, '', 1)
+      assert.strictEqual(pg.entries.length, 1, 'offset 翻页')
+      assert.strictEqual(pg.entries[0].uid, 'u2', '翻页命中第 2 条')
+      assert.strictEqual(pg.total, 3, '翻页不影响总条数')
     } finally {
       r.creditHist = savedLedger
       r.pool.list = savedList
@@ -2389,12 +2455,7 @@ async function main() {
   console.log('全部通过')
 }
 
-// 降级态重置（测试用）：直接改写模块内部变量不可行，用时间推进模拟过期
-function resetDegradeForTest() {
-  // degradeUntil 是模块内私有变量；通过「把系统时间视角移到次日」不可行，
-  // 这里采用折中：再次调用 applyPromptMode 时若仍处降级期属预期行为，
-  // 故后续用例避免依赖降级态为 false 的断言。
-}
+// 降级态（degradeUntil）为模块内私有变量，用例间无法主动清除；后续用例避免依赖「未降级」断言
 
 main().catch(err => {
   console.error('测试运行异常:', err)

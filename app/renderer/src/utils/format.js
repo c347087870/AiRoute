@@ -13,13 +13,13 @@ export function formatCompact(num) {
   return String(value)
 }
 
-// 时间戳格式化为 MM-DD HH:MM:SS
+// 时间戳格式化为本地时间（YYYY-MM-DD HH:mm:ss）
 export function formatTime(ts) {
   if (!ts) return '-'
   const d = new Date(ts)
   if (Number.isNaN(d.getTime())) return '-'
   const pad = n => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // 字节数格式化：B / KB / MB / GB（日志目录占用等存储体积展示）

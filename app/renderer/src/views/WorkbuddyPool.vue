@@ -32,9 +32,6 @@
       <div class="card wb-card">
         <div class="wb-toolbar">
           <button class="btn-primary btn-sm" :disabled="!!oauth" @click="startAddAccount">+ 添加账号</button>
-          <button class="btn-ghost btn-sm" :disabled="modelsLoading" @click="pickModels">
-            {{ modelsLoading ? '拉取中…' : '选择模型' }}
-          </button>
           <button class="btn-ghost btn-sm" :disabled="busyAll" @click="checkinAll">
             {{ busyAll === 'checkin' ? '执行中…' : '全部签到' }}
           </button>
@@ -85,10 +82,10 @@
                 <td class="nowrap">{{ acct.checkinDone ? '已签到' : '-' }}</td>
                 <td class="nowrap">{{ fmtNum(acct.tokenUsageToday) }}</td>
                 <td class="nowrap">{{ fmtNum(acct.tokenUsageTotal) }}</td>
-                <td class="nowrap">{{ acct.lastCheckinAt ? formatClock(acct.lastCheckinAt) : '-' }}</td>
+                <td class="nowrap">{{ acct.lastCheckinAt ? formatTime(acct.lastCheckinAt) : '-' }}</td>
                 <td class="nowrap">
                   <template v-if="acct.lastKeepaliveAt">
-                    {{ formatClock(acct.lastKeepaliveAt) }}
+                    {{ formatTime(acct.lastKeepaliveAt) }}
                     <span :class="acct.lastKeepaliveOk ? 'wb-ok' : 'wb-bad'">{{ acct.lastKeepaliveOk ? '成功' : '失败' }}</span>
                   </template>
                   <span v-else>-</span>
@@ -141,7 +138,7 @@
           <span class="wb-kv-label">禁用原因 / 时间</span>
           <span class="wb-kv-value">
             {{ detailAcct.disabled
-              ? (detailAcct.disabledReason || '未知原因') + ' / ' + (detailAcct.disabledAt ? formatClock(detailAcct.disabledAt) : '-')
+              ? (detailAcct.disabledReason || '未知原因') + ' / ' + (detailAcct.disabledAt ? formatTime(detailAcct.disabledAt) : '-')
               : '-' }}
           </span>
         </div>
@@ -153,7 +150,7 @@
           <span class="wb-kv-label">快过期积分</span>
           <span class="wb-kv-value">
             {{ detailAcct.creditsExpiring || 0 }}（最早批次剩余 {{ detailAcct.creditsEarliestRemaining || 0 }}，到期
-            {{ detailAcct.creditsEarliestExpiry ? formatClock(detailAcct.creditsEarliestExpiry) : '-' }}）
+            {{ detailAcct.creditsEarliestExpiry ? formatTime(detailAcct.creditsEarliestExpiry) : '-' }}）
           </span>
         </div>
         <div class="wb-kv">
@@ -163,13 +160,13 @@
         <div class="wb-kv">
           <span class="wb-kv-label">最近签到</span>
           <span class="wb-kv-value">
-            {{ detailAcct.lastCheckinAt ? formatClock(detailAcct.lastCheckinAt) : '-' }}{{ detailAcct.checkinDone ? '（今日已签到）' : '' }}
+            {{ detailAcct.lastCheckinAt ? formatTime(detailAcct.lastCheckinAt) : '-' }}{{ detailAcct.checkinDone ? '（今日已签到）' : '' }}
           </span>
         </div>
         <div class="wb-kv">
           <span class="wb-kv-label">最近保活</span>
           <span class="wb-kv-value">
-            {{ detailAcct.lastKeepaliveAt ? formatClock(detailAcct.lastKeepaliveAt) + (detailAcct.lastKeepaliveOk ? ' 成功' : ' 失败') : '-' }}
+            {{ detailAcct.lastKeepaliveAt ? formatTime(detailAcct.lastKeepaliveAt) + (detailAcct.lastKeepaliveOk ? ' 成功' : ' 失败') : '-' }}
           </span>
         </div>
         <div class="wb-kv"><span class="wb-kv-label">累计错误次数</span><span class="wb-kv-value">{{ detailAcct.errTotal || 0 }}</span></div>
@@ -178,7 +175,7 @@
           <div v-if="!(detailAcct.rateLimitedModels || []).length" class="wb-note">无</div>
           <div v-else class="wb-model-limited">
             <div v-for="m in detailAcct.rateLimitedModels" :key="m.model">
-              {{ m.model }}｜{{ m.kind === 'model_unavailable' ? '该后端无此模型' : '模型级限流' }}｜解除 {{ formatClock(m.until) }}
+              {{ m.model }}｜{{ m.kind === 'model_unavailable' ? '该后端无此模型' : '模型级限流' }}｜解除 {{ formatTime(m.until) }}
             </div>
           </div>
         </div>
@@ -246,13 +243,20 @@
     <div v-if="tab === 'usage'">
       <div class="card wb-card">
         <div class="wb-toolbar">
-          <select v-model.number="usageHours" class="wb-select" @change="loadUsage">
+          <select v-model="usageHours" class="wb-select" @change="loadUsage">
             <option v-for="opt in USAGE_WINDOWS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
           <button class="btn-ghost btn-sm" @click="loadUsage">{{ usageLoading ? '加载中…' : '刷新' }}</button>
           <button class="btn-ghost btn-sm" :disabled="usageSaving" @click="saveUsage">{{ usageSaving ? '保存中…' : '立即落盘' }}</button>
+          <span
+            class="wb-count"
+            v-if="usageData && usageData.yesterday"
+            :title="`${usageData.yesterday.day} 全天合计（与所选窗口无关）`"
+          >
+            昨天：{{ formatInt(usageData.yesterday.req) }} 次请求 · {{ formatInt(usageData.yesterday.tt) }} Token · {{ formatCredit(usageData.yesterday.cr) }} 积分
+          </span>
           <span class="wb-count" v-if="usageData">
-            数据起点 {{ usageData.since || '-' }} · {{ usageData.buckets }} 桶 · {{ formatBytes(usageData.file_bytes) }}
+            数据起点 {{ sinceText(usageData.since) }} · {{ usageData.buckets }} 桶 · {{ formatBytes(usageData.file_bytes) }}
           </span>
         </div>
 
@@ -661,7 +665,7 @@
       </div>
 
       <div class="card wb-card">
-        <div class="section-title">提示词模式与指纹脱敏</div>
+        <div class="section-title">提示词模式、改写档位、使用端身份与指纹脱敏</div>
         <div class="wb-note">
           提示词模式决定出站前如何处理客户端 system 消息（防上游内容审核误杀）；指纹脱敏对用户/assistant
           消息里的客户端指纹串做剥离。两者互不替代，建议同时开启。
@@ -682,6 +686,30 @@
           </label>
         </div>
         <div class="config-row">
+          <span class="config-label">改写档位</span>
+          <select v-model="cfgForm.rewriteMode" class="wb-select">
+            <option value="compat">compat（默认：参数修正 + 工具配对清理 + 上下文压缩 + 标记修复）</option>
+            <option value="native">native（原生透传：工具定义/历史/响应帧保真直通）</option>
+          </select>
+        </div>
+        <div class="wb-note">
+          compat 会对请求参数与工具历史做主动修补（tool_choice 归一、schema 修正、配对清理、上下文压缩），
+          并对响应流做帧重建与标记修复；native 只保留上游硬性的协议步骤（强制流式、档位降级、角色/图片映射），
+          工具调用被改写导致异常时可切此档保真直通（若上游对原始参数报错，需切回 compat）。
+        </div>
+        <div class="config-row">
+          <span class="config-label">使用端身份</span>
+          <select v-model="cfgForm.clientIdentity" class="wb-select">
+            <option value="workbuddy">WorkBuddy 桌面端（默认：官网「使用端」显示 WorkBuddy）</option>
+            <option value="codebuddy">CodeBuddy IDE（官网「使用端」显示 CodeBuddy）</option>
+          </select>
+        </div>
+        <div class="wb-note">
+          切换出站请求的 User-Agent 与用量归属头（X-IDE-*）。官网积分记录的「使用端」列按出站 UA
+          服务端归因：WorkBuddy 桌面端 = 官方桌面端指纹，CodeBuddy IDE = 官方 IDE 指纹。
+          保存后即时热生效（下一次请求开始）。UA 与版本细节可在下方「客户端指纹与版本覆盖」卡片中逐项覆盖。
+        </div>
+        <div class="config-row">
           <span class="config-label">设备令牌文件</span>
           <input
             v-model="cfgForm.deviceTokenFile"
@@ -698,6 +726,210 @@
             {{ cfgSaving ? '保存中…' : '保存配置' }}
           </button>
           <span class="wb-note">保存后立即生效（热更新），并写入 server-config.json 持久化。</span>
+        </div>
+      </div>
+
+      <div class="card wb-card">
+        <div class="section-title">客户端指纹与版本覆盖（高级）</div>
+        <div class="wb-note">
+          出站请求的版本号、User-Agent、事件体指纹、语言与域名的逐项配置，输入框已填入当前生效值（未配置过时为官方默认值）。
+          保存时全部写入 server-config.json 固化（不允许留空），上游升版或活动变更时在此直接调整，无需改代码。
+        </div>
+
+        <!-- ===== WorkBuddy 大类：主链路 / 桌面事件链 / Web / 小程序 ===== -->
+        <div class="fp-major-title">WorkBuddy<span class="fp-major-sub">主链路 / 桌面事件链 / Web / 小程序</span></div>
+
+        <div class="fp-group-title">版本号<span class="fp-risk mid">中风险</span></div>
+        <div class="fp-grid">
+          <div class="fp-item">
+            <span class="fp-label">WorkBuddy 主链路版本</span>
+            <input v-model="cfgForm.identity.clientVersion" class="wb-input" placeholder="默认 5.5.4" />
+            <span class="fp-hint">对话 / token 刷新 UA 两段与 X-IDE-Version（使用端 = WorkBuddy 时）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">CLI 版本段</span>
+            <input v-model="cfgForm.identity.cliVersion" class="wb-input" placeholder="默认 2.137.1" />
+            <span class="fp-hint">WorkBuddy 主链路 UA 与桌面事件链 UA 的 CLI 段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">桌面事件链版本</span>
+            <input v-model="cfgForm.identity.desktopVersion" class="wb-input" placeholder="默认 5.5.6" />
+            <span class="fp-hint">桌面 UA 两段 + 成长任务事件体 ideVersion / extVersion</span>
+          </div>
+        </div>
+
+        <div class="fp-group-title">请求头 UA<span class="fp-risk high">高风险</span>（上游风控与归因判据，非必要勿改）</div>
+        <div class="fp-grid">
+          <div class="fp-item">
+            <span class="fp-label">WorkBuddy 主链路 UA（整串）</span>
+            <input v-model="cfgForm.identity.workbuddyUA" class="wb-input" placeholder="默认 WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1" />
+            <span class="fp-hint">对话 / token 刷新等主链路请求的完整 UA 串</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">billing 域 UA（WorkBuddy）</span>
+            <input v-model="cfgForm.identity.workbuddyBillingUA" class="wb-input" placeholder="默认 WorkBuddy/5.5.4" />
+            <span class="fp-hint">签到 / 余额 / 礼包请求（使用端 = WorkBuddy 时）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">桌面事件链 UA（整串）</span>
+            <input v-model="cfgForm.identity.desktopUA" class="wb-input" placeholder="默认 WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1" />
+            <span class="fp-hint">成长任务上报 / 专家市场 / 专家对话链路</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">Web 事件体浏览器 UA</span>
+            <input v-model="cfgForm.identity.webUA" class="wb-input" placeholder="默认 Chrome/152 Windows 桌面版" />
+            <span class="fp-hint">web 域上报事件体的 userAgent 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">mp 小程序版本</span>
+            <input v-model="cfgForm.identity.mpVersion" class="wb-input" placeholder="默认 2.4.0" />
+            <span class="fp-hint">小程序上报头 X-Client-Version + mp 事件体 ideVersion / extVersion</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">mp 事件扩展版本</span>
+            <input v-model="cfgForm.identity.mpExtVersion" class="wb-input" placeholder="默认 2.2.8" />
+            <span class="fp-hint">mp 专家召唤 / 灵感事件 extVersion</span>
+          </div>
+        </div>
+
+        <!-- ===== CodeBuddy 大类：IDE 主链路 / 模型探测 / 登录流程 ===== -->
+        <div class="fp-major-title">CodeBuddy<span class="fp-major-sub">IDE 主链路 / 模型探测 / 登录流程</span></div>
+
+        <div class="fp-group-title">版本号<span class="fp-risk mid">中风险</span></div>
+        <div class="fp-grid">
+          <div class="fp-item">
+            <span class="fp-label">CodeBuddy 主链路版本</span>
+            <input v-model="cfgForm.identity.ideVersion" class="wb-input" placeholder="默认 4.12.0" />
+            <span class="fp-hint">对话 / 刷新 UA 两段与 X-IDE-Version（使用端 = CodeBuddy 时）</span>
+          </div>
+        </div>
+
+        <div class="fp-group-title">请求头 UA<span class="fp-risk high">高风险</span>（上游风控与归因判据，非必要勿改）</div>
+        <div class="fp-grid">
+          <div class="fp-item">
+            <span class="fp-label">CodeBuddy 主链路 UA（整串）</span>
+            <input v-model="cfgForm.identity.codebuddyUA" class="wb-input" placeholder="默认 CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0" />
+            <span class="fp-hint">使用端 = CodeBuddy 时的主链路完整 UA 串</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">billing 域 UA（CodeBuddy）</span>
+            <input v-model="cfgForm.identity.codebuddyBillingUA" class="wb-input" placeholder="默认 CodeBuddy/4.12.0" />
+            <span class="fp-hint">签到 / 余额 / 礼包请求（使用端 = CodeBuddy 时）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">/v3/config 探测 UA（整串）</span>
+            <input v-model="cfgForm.identity.v3ConfigUA" class="wb-input" placeholder="默认 CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0" />
+            <span class="fp-hint">官方 IDE 模型目录探测接口（缺失版本号会 400 code=12403）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">OAuth 登录 UA（整串）</span>
+            <input v-model="cfgForm.identity.oauthUA" class="wb-input" placeholder="默认 CLI/2.63.2 CodeBuddy/2.63.2" />
+            <span class="fp-hint">设备码登录授权流程（独立版本体系，不随版本号拼接）</span>
+          </div>
+        </div>
+
+        <div class="fp-group-title">事件体指纹<span class="fp-risk mid">中风险</span>（成长任务判据字段，改错 = 任务不计分）</div>
+        <div class="fp-grid">
+          <div class="fp-item">
+            <span class="fp-label">桌面 commit</span>
+            <input v-model="cfgForm.identity.desktopCommit" class="wb-input" placeholder="默认 5f9692…（git hash）" />
+            <span class="fp-hint">桌面事件体 commit 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">桌面 releaseDate</span>
+            <input v-model="cfgForm.identity.desktopReleaseDate" class="wb-input" placeholder="默认 1789036585355" />
+            <span class="fp-hint">桌面事件体 releaseDate（数字时间戳，仅数字）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">桌面 osVersion</span>
+            <input v-model="cfgForm.identity.desktopOsVersion" class="wb-input" placeholder="默认 10.0.26220" />
+            <span class="fp-hint">桌面事件体操作系统版本</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">桌面 cpuCores</span>
+            <input v-model="cfgForm.identity.desktopCpuCores" class="wb-input" placeholder="默认 20" />
+            <span class="fp-hint">桌面事件体 CPU 核数（仅数字）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">桌面 memorySize</span>
+            <input v-model="cfgForm.identity.desktopMemorySize" class="wb-input" placeholder="默认 24" />
+            <span class="fp-hint">桌面事件体内存（GB，仅数字）</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">Web os</span>
+            <input v-model="cfgForm.identity.webOs" class="wb-input" placeholder="默认 Win32" />
+            <span class="fp-hint">web 事件体 os 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">Web osVersion</span>
+            <input v-model="cfgForm.identity.webOsVersion" class="wb-input" placeholder="默认 10.0" />
+            <span class="fp-hint">web 事件体 osVersion 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">mp os</span>
+            <input v-model="cfgForm.identity.mpOs" class="wb-input" placeholder="默认 windows" />
+            <span class="fp-hint">mp 事件体 os 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">mp osVersion</span>
+            <input v-model="cfgForm.identity.mpOsVersion" class="wb-input" placeholder="默认 11" />
+            <span class="fp-hint">mp 事件体 osVersion 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">mp arch</span>
+            <input v-model="cfgForm.identity.mpArch" class="wb-input" placeholder="默认 x64" />
+            <span class="fp-hint">mp 事件体 arch 字段</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">mp machineId</span>
+            <input v-model="cfgForm.identity.mpMachineId" class="wb-input" placeholder="默认 0655736a-…（固定 UUID）" />
+            <span class="fp-hint">mp 事件体设备 ID（固定值，跨事件一致）</span>
+          </div>
+        </div>
+
+        <div class="fp-group-title">语言与域名<span class="fp-risk high">高风险（域名）</span><span class="fp-risk safe">安全（语言）</span></div>
+        <div class="fp-grid">
+          <div class="fp-item">
+            <span class="fp-label">Accept-Language</span>
+            <input v-model="cfgForm.identity.acceptLanguage" class="wb-input" placeholder="默认 zh-CN" />
+            <span class="fp-hint">所有出站请求的语言头</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">聊天域 chatBase</span>
+            <input v-model="cfgForm.identity.chatBase" class="wb-input" placeholder="默认 https://copilot.tencent.com" />
+            <span class="fp-hint">对话 / 桌面事件链 / growth 任务判据域名</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">计费域 billingBase</span>
+            <input v-model="cfgForm.identity.billingBase" class="wb-input" placeholder="默认 https://www.codebuddy.cn" />
+            <span class="fp-hint">签到 / 余额 / CLI 活跃上报 / mp 上报域名</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">官网域 webBase</span>
+            <input v-model="cfgForm.identity.webBase" class="wb-input" placeholder="默认 https://www.workbuddy.cn" />
+            <span class="fp-hint">web 域上报 / 领奖域名</span>
+          </div>
+          <div class="fp-item">
+            <span class="fp-label">Origin / Referer 基础域</span>
+            <input v-model="cfgForm.identity.originReferer" class="wb-input" placeholder="默认 https://www.codebuddy.cn" />
+            <span class="fp-hint">出站 Origin/Referer 的基础域（须带 http:// 或 https://）</span>
+          </div>
+        </div>
+        <div class="wb-note" style="margin-top: 8px">
+          域名字段须以 http:// 或 https:// 开头；长度超过 256 字符或含换行/控制字符的输入会被后端拒绝（防请求头注入）。
+        </div>
+
+        <div class="fp-group-title">保持内置（非配置项）</div>
+        <div class="wb-note">
+          成长活动判据 ID（企鹅教师助手 / 和平精英主题 / 校园日 / 旅行点位 / 灵感案例与专家 ID 等）——
+          上游更换活动时需随版本更新代码；机器指纹派生盐（wb2a:）——修改会导致全部账号设备 ID 重置，存在风控风险，故不开放。
+        </div>
+
+        <div class="wb-actions-row">
+          <button class="btn-primary btn-sm" :disabled="cfgSaving" @click="saveConfig">
+            {{ cfgSaving ? '保存中…' : '保存配置' }}
+          </button>
+          <span class="wb-note">与上方配置一并提交，保存后热更新并持久化。</span>
         </div>
       </div>
 
@@ -849,7 +1081,6 @@ const busyUid = ref('')
 const oauth = ref(null)
 // OAuth 轮询定时器句柄
 let pollTimer = null
-
 // ==================== 积分构成状态 ====================
 
 // 积分页当前选中的账号 uid
@@ -861,16 +1092,17 @@ const creditLoading = ref(false)
 
 // ==================== 用量 / 积分消耗状态 ====================
 
-// 用量窗口选项（value 为小时数，0 = 全部历史）
+// 用量窗口选项（value 为小时数或字符串窗口：today = 今天 0 点起 / yesterday = 昨天整段；0 = 全部历史）
 const USAGE_WINDOWS = [
-  { value: 24, label: '24 小时' },
+  { value: 'today', label: '今天' },
+  { value: 'yesterday', label: '昨天' },
   { value: 72, label: '72 小时' },
   { value: 168, label: '7 天' },
   { value: 720, label: '30 天' },
   { value: 0, label: '全部' }
 ]
-// 当前选中的用量窗口（小时数）
-const usageHours = ref(72)
+// 当前选中的用量窗口（小时数或字符串：today = 今天 0 点起 / yesterday = 昨天整段；默认今天）
+const usageHours = ref('today')
 // 用量快照数据（totals / 各维度 / 文件占用）
 const usageData = ref(null)
 // 用量加载中标记
@@ -878,9 +1110,11 @@ const usageLoading = ref(false)
 // 用量落盘中标记
 const usageSaving = ref(false)
 
-// 当前用量窗口的中文标注（两张维度表标题用，如「近 72 小时」「全部历史」）
+// 当前用量窗口的中文标注（两张维度表标题用，如「今天」「近 72 小时」「全部历史」）
 const usageWindowLabel = computed(() => {
   if (usageHours.value === 0) return '全部历史'
+  if (usageHours.value === 'today') return '今天'
+  if (usageHours.value === 'yesterday') return '昨天'
   const hit = USAGE_WINDOWS.find(opt => opt.value === usageHours.value)
   return hit ? `近 ${hit.label}` : `${usageHours.value} 小时`
 })
@@ -969,8 +1203,68 @@ const runningTask = ref('')
 
 // 运行时配置快照（池参数只读展示）
 const cfg = ref({ pool: {} })
-// 可编辑的运行时配置表单（提示词模式 / 指纹脱敏 / 设备令牌）
-const cfgForm = ref({ promptMode: 'custom', sanitizeFingerprints: true, deviceTokenFile: '' })
+// 指纹与版本覆盖表单的空白模板（键名与后端 identity.js 白名单一一对应；空串 = 使用官方默认值）
+function emptyIdentity() {
+  return {
+    // 版本号
+    clientVersion: '', ideVersion: '', cliVersion: '', desktopVersion: '',
+    // WorkBuddy / CodeBuddy 请求头 UA 与 mp 版本
+    workbuddyUA: '', codebuddyUA: '', workbuddyBillingUA: '', codebuddyBillingUA: '',
+    desktopUA: '', v3ConfigUA: '', oauthUA: '', webUA: '', mpVersion: '', mpExtVersion: '',
+    // 事件体指纹
+    desktopCommit: '', desktopReleaseDate: '', desktopOsVersion: '', desktopCpuCores: '', desktopMemorySize: '',
+    webOs: '', webOsVersion: '',
+    mpOs: '', mpOsVersion: '', mpArch: '', mpMachineId: '',
+    // 语言与域名
+    acceptLanguage: '', chatBase: '', billingBase: '', webBase: '', originReferer: ''
+  }
+}
+
+// 指纹与版本覆盖的字段中文名（保存前空值校验提示用；键序与表单展示顺序一致）
+const IDENTITY_LABELS = {
+  // WorkBuddy 大类（主链路 / 桌面事件链 / Web / 小程序）
+  clientVersion: 'WorkBuddy 主链路版本',
+  cliVersion: 'CLI 版本段',
+  desktopVersion: '桌面事件链版本',
+  workbuddyUA: 'WorkBuddy 主链路 UA',
+  workbuddyBillingUA: 'billing 域 UA（WorkBuddy）',
+  desktopUA: '桌面事件链 UA',
+  webUA: 'Web 事件体浏览器 UA',
+  mpVersion: 'mp 小程序版本',
+  mpExtVersion: 'mp 事件扩展版本',
+  // CodeBuddy 大类（IDE 主链路 / 模型探测 / 登录流程）
+  ideVersion: 'CodeBuddy 主链路版本',
+  codebuddyUA: 'CodeBuddy 主链路 UA',
+  codebuddyBillingUA: 'billing 域 UA（CodeBuddy）',
+  v3ConfigUA: '/v3/config 探测 UA',
+  oauthUA: 'OAuth 登录 UA',
+  desktopCommit: '桌面 commit',
+  desktopReleaseDate: '桌面 releaseDate',
+  desktopOsVersion: '桌面 osVersion',
+  desktopCpuCores: '桌面 cpuCores',
+  desktopMemorySize: '桌面 memorySize',
+  webOs: 'Web os',
+  webOsVersion: 'Web osVersion',
+  mpOs: 'mp os',
+  mpOsVersion: 'mp osVersion',
+  mpArch: 'mp arch',
+  mpMachineId: 'mp machineId',
+  acceptLanguage: 'Accept-Language',
+  chatBase: '聊天域 chatBase',
+  billingBase: '计费域 billingBase',
+  webBase: '官网域 webBase',
+  originReferer: 'Origin / Referer 基础域'
+}
+
+// 可编辑的运行时配置表单（提示词模式 / 改写档位 / 使用端身份 / 指纹脱敏 / 设备令牌 / 指纹与版本覆盖）
+const cfgForm = ref({
+  promptMode: 'custom',
+  rewriteMode: 'compat',
+  clientIdentity: 'workbuddy',
+  sanitizeFingerprints: true,
+  deviceTokenFile: '',
+  identity: emptyIdentity()
+})
 // 配置保存中标记
 const cfgSaving = ref(false)
 
@@ -1114,12 +1408,6 @@ async function copyAuthUrl() {
   } catch {
     showToast('复制失败，请手动选中复制', 'error')
   }
-}
-
-// 「选择模型」按钮：跳转到模型 Tab 并拉取上游模型
-function pickModels() {
-  tab.value = 'models'
-  if (!upstreamModels.value.length) loadModels(true)
 }
 
 // 单号签到
@@ -1656,8 +1944,12 @@ async function loadConfig() {
     cfg.value = { pool: data.pool || {} }
     cfgForm.value = {
       promptMode: data.promptMode || 'custom',
+      rewriteMode: data.rewriteMode === 'native' ? 'native' : 'compat',
+      clientIdentity: data.clientIdentity === 'codebuddy' ? 'codebuddy' : 'workbuddy',
       sanitizeFingerprints: data.sanitizeFingerprints !== false,
-      deviceTokenFile: data.deviceTokenFile || ''
+      deviceTokenFile: data.deviceTokenFile || '',
+      // 后端返回「覆盖 > 官方默认」的完整生效值（30 项）；用空白模板打底防御字段缺失
+      identity: { ...emptyIdentity(), ...(data.identity && typeof data.identity === 'object' ? data.identity : {}) }
     }
   } catch (err) {
     showToast('运行时配置加载失败: ' + errText(err), 'error')
@@ -1666,6 +1958,14 @@ async function loadConfig() {
 
 // 保存运行时配置（热生效，并持久化到 server-config.json）
 async function saveConfig() {
+  // 指纹与版本覆盖不允许空值：列出所有空项并提示保存失败（不提交）
+  const emptyLabels = Object.keys(IDENTITY_LABELS)
+    .filter(k => !String((cfgForm.value.identity || {})[k] ?? '').trim())
+    .map(k => IDENTITY_LABELS[k])
+  if (emptyLabels.length) {
+    showToast('保存失败：以下项不能为空 —— ' + emptyLabels.join('、'), 'error', 6000)
+    return
+  }
   cfgSaving.value = true
   try {
     await wbUpdateConfig({ ...cfgForm.value })
@@ -1866,6 +2166,12 @@ function formatBytes(value) {
   if (n >= 1048576) return `${Math.round(n / 104857.6) / 10} MB`
   if (n >= 1024) return `${Math.round(n / 102.4) / 10} KB`
   return `${n} B`
+}
+
+// 数据起点格式化：小时桶键（YYYY-MM-DDTHH）转「YYYY-MM-DD HH 时」，日桶键（YYYY-MM-DD）原样
+function sinceText(s) {
+  if (!s) return '-'
+  return String(s).includes('T') ? String(s).replace('T', ' ') + ' 时' : String(s)
 }
 
 // 统一提取接口错误文案
@@ -2212,6 +2518,92 @@ function errText(err) {
   align-items: center;
   gap: 12px;
   padding-top: 10px;
+}
+
+/* ===== 指纹与版本覆盖卡片 ===== */
+
+/* 大类标题（WorkBuddy / CodeBuddy，与上方组以分隔线区隔） */
+.fp-major-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-1);
+  margin: 22px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fp-major-sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+/* 分组标题（带风险色标） */
+.fp-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin: 14px 0 8px;
+}
+
+/* 风险色标（安全 / 中风险 / 高风险） */
+.fp-risk {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.fp-risk.safe {
+  color: #4fb46e;
+  background: rgba(79, 180, 110, 0.12);
+}
+
+.fp-risk.mid {
+  color: #d8a657;
+  background: rgba(216, 166, 87, 0.12);
+}
+
+.fp-risk.high {
+  color: #e06c75;
+  background: rgba(224, 108, 117, 0.12);
+}
+
+/* 覆盖项自适应双列网格 */
+.fp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px 16px;
+}
+
+/* 单个覆盖项（标签 + 输入 + 说明） */
+.fp-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 指纹输入框清空（placeholder 可见）时标红提示，保存将被拦截 */
+.fp-grid .wb-input:placeholder-shown {
+  border-color: #e06c75;
+}
+
+.fp-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.fp-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.5;
 }
 
 .wb-link {

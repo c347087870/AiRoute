@@ -27,7 +27,7 @@ server/credit-history.json
 
 # 工具本地数据
 .codebuddy/
-
+.claude/
 # lockfile
 pnpm-lock.yaml
 app/package-lock.json

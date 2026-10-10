@@ -71,6 +71,11 @@ export function clearLogs() {
   return api.delete('/api/logs').then(r => r.data)
 }
 
+// 系统状态：本地版本与当前监听端口（设置页「系统状态」用）
+export function getSystemStatus() {
+  return api.get('/api/system/status').then(r => r.data)
+}
+
 // 请求统计（今日/累计，含失败数），与 Token 统计同源
 export function getStats() {
   return api.get('/api/stats').then(r => r.data)
@@ -324,7 +329,7 @@ export function wbCreditPackages(uid) {
   return api.get(`/api/workbuddy/accounts/${encodeURIComponent(uid)}/credits`, { timeout: 60000 }).then(r => r.data)
 }
 
-// 用量 / 积分消耗统计（hours 默认 72，上限 1440，0 = 全历史）
+// 用量 / 积分消耗统计（hours 默认 72，上限 1440，0 = 全历史；today/yesterday 为本地自然日窗口）
 export function wbUsage(hours = 72) {
   return api.get('/api/workbuddy/usage', { params: { hours } }).then(r => r.data)
 }
@@ -334,9 +339,9 @@ export function wbUsageSave() {
   return api.post('/api/workbuddy/usage/save', {}).then(r => r.data)
 }
 
-// 积分变动流水（新的在前；limit 默认 200 上限 1000）
-export function wbCreditHistory(limit = 100) {
-  return api.get('/api/workbuddy/credit-history', { params: { limit } }).then(r => r.data)
+// 积分变动流水（新的在前；limit 默认 50 上限 1000；uid 精确过滤；offset 翻页）
+export function wbCreditHistory({ limit = 50, uid = '', offset = 0 } = {}) {
+  return api.get('/api/workbuddy/credit-history', { params: { limit, uid, offset } }).then(r => r.data)
 }
 
 // 账号池统一维护的启用模型清单
