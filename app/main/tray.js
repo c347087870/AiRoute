@@ -70,6 +70,17 @@ function refreshTrayMenu() {
   }
 }
 
+// 托盘退出：先移除托盘图标再优雅退出，并带强制兜底，确保进程不残留、无托盘幽灵图标
+function quitApp() {
+  try {
+    if (trayRef) trayRef.destroy()
+  } catch {}
+  trayRef = null
+  app.isQuitting = true
+  app.quit()
+  setTimeout(() => app.exit(0), 800)
+}
+
 async function updateMenu(tray, mainWindow) {
   let currentModel = 'unknown'
   let providers = {}
@@ -120,7 +131,7 @@ async function updateMenu(tray, mainWindow) {
     },
     { type: 'separator' },
     { label: '打开面板', click: () => mainWindow.show() },
-    { label: '退出', click: () => { app.exit(0) } }
+    { label: '退出', click: quitApp }
   ])
 
   tray.setContextMenu(contextMenu)

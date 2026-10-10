@@ -89,6 +89,8 @@ function createWindow() {
   }
 
   mainWindow.on('close', (e) => {
+    // 仅在「退出应用」流程中放行关闭；普通关窗仍然最小化到托盘
+    if (app.isQuitting) return
     e.preventDefault()
     mainWindow.hide()
   })
@@ -139,6 +141,11 @@ app.whenReady().then(async () => {
   }
 
   createWindow()
+})
+
+// 任何退出路径（托盘退出 / 系统关机等）都先标记状态，确保窗口 close 不再被拦截
+app.on('before-quit', () => {
+  app.isQuitting = true
 })
 
 app.on('window-all-closed', () => {
