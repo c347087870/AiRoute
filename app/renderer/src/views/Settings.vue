@@ -102,7 +102,6 @@
         <div v-if="error" class="warning-box">⚠ {{ error }}</div>
         <div v-if="info && info.hasUpdate" class="update-block">
           <div v-if="info.publishedAt" class="config-hint">发布时间：{{ formatTime(info.publishedAt) }}</div>
-          <pre v-if="info.notes" class="update-notes">{{ info.notes }}</pre>
           <div class="config-control">
             <button v-if="!savedPath" class="btn-primary" :disabled="downloading" @click="startDownload">
               {{ downloading ? `下载中 ${percent}%` : `下载新版本 v${info.latest}` }}
@@ -387,21 +386,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.update-notes {
-  background: var(--bg-page);
-  border: 1px solid var(--border-1);
-  border-radius: 10px;
-  padding: 12px 14px;
-  font-size: 12px;
-  color: var(--text-2);
-  line-height: 1.7;
-  max-height: 180px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
 }
 
 .progress-track {

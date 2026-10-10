@@ -1,6 +1,22 @@
 const { app, BrowserWindow, ipcMain, Menu, dialog, shell } = require('electron')
 const path = require('path')
+const net = require('net')
+const http = require('http')
 const { createTray, refreshTrayMenu } = require('./tray')
+
+// 单实例：重复启动时聚焦已有窗口并退出本次，避免多托盘实例与端口争用
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
 
 let mainWindow = null
 
@@ -8,6 +24,46 @@ Menu.setApplicationMenu(null)
 
 function getServerEntry() {
   return path.join(__dirname, '..', 'server', 'router.js')
+}
+
+// 读取已配置端口（与 server 侧一致：无配置时默认 3000）
+function readConfiguredPort(dataDir) {
+  try {
+    const cfg = require('fs-extra').readJsonSync(path.join(dataDir, 'server-config.json'))
+    const port = Number(cfg && cfg.port)
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) return port
+  } catch {}
+  return 3000
+}
+
+// 端口预检：能绑定视为空闲；被占用时尝试读取占用者的服务版本（供提示信息使用）
+function checkPortFree(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer()
+    probe.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') resolve(false)
+      else {
+        console.warn('[aiRoute] 端口预检异常:', err.message)
+        resolve(true)
+      }
+    })
+    probe.once('listening', () => probe.close(() => resolve(true)))
+    probe.listen(port)
+  })
+}
+
+function fetchBusyServerVersion(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/system/status', timeout: 1200 }, (res) => {
+      let body = ''
+      res.on('data', (d) => { body += d })
+      res.on('end', () => {
+        try { resolve(JSON.parse(body).version || '') } catch { resolve('') }
+      })
+    })
+    req.on('timeout', () => { req.destroy(); resolve('') })
+    req.on('error', () => resolve(''))
+  })
 }
 
 function createWindow() {
@@ -40,7 +96,9 @@ function createWindow() {
   createTray(mainWindow)
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (!gotTheLock) return // 未获得单实例锁：进程正在退出
+
   // 生产模式：在主进程中直接启动 Express server（非阻塞，秒启动）
   if (app.isPackaged) {
     const dataDir = path.join(app.getPath('userData'), 'data')
@@ -60,6 +118,20 @@ app.whenReady().then(() => {
     const modelsPath = path.join(dataDir, 'models.json')
     if (!fs.existsSync(modelsPath)) {
       fs.writeJsonSync(modelsPath, {}, { spaces: 2 })
+    }
+    // 端口预检：旧版实例仍在运行时（占用端口）给出明确提示并退出，
+    // 避免新界面连到旧服务，出现「功能是新的、版本号是旧的」混合状态
+    const port = readConfiguredPort(dataDir)
+    if (!(await checkPortFree(port))) {
+      const busyVersion = await fetchBusyServerVersion(port)
+      dialog.showErrorBox(
+        'AiRoute 启动失败',
+        `端口 ${port} 已被占用${busyVersion ? `（占用者服务版本为 v${busyVersion}）` : ''}。\n\n` +
+        '可能仍有旧版 AiRoute 在运行（含系统托盘图标），请完全退出旧版后重新启动本程序。\n' +
+        '若确认并非 AiRoute，请检查该端口是否被其他程序占用。'
+      )
+      app.quit()
+      return
     }
     // Express 使用事件循环，不会阻塞 Electron 窗口
     require(getServerEntry())
