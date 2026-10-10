@@ -99,6 +99,37 @@ function syncToRelease() {
   }
 }
 
+// 打包后版本自检：asar 内应用 package.json 与 exe 文件版本必须与根 package.json 一致，
+// 不一致直接失败，避免版本错误的产物被同步到 release
+function verifyBuild(version) {
+  const errors = []
+
+  const asarPath = path.join(buildOutputDir, 'win-unpacked', 'resources', 'app.asar')
+  try {
+    const raw = fs.readFileSync(asarPath).toString('latin1')
+    const m = raw.match(/"name":\s*"aiRoute",\s*"version":\s*"([^"]+)"/)
+    if (!m) errors.push('asar 内未找到应用 package.json 的版本号')
+    else if (m[1] !== version) errors.push(`asar 内版本 ${m[1]} != package.json 的 ${version}`)
+  } catch (err) {
+    errors.push(`读取 asar 失败: ${err.message}`)
+  }
+
+  const exePath = path.join(buildOutputDir, 'AiRoute.exe')
+  try {
+    const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${exePath}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
+    if (meta !== version) errors.push(`exe 元数据版本 ${meta} != package.json 的 ${version}`)
+  } catch (err) {
+    errors.push(`读取 exe 元数据失败: ${err.message.split('\n')[0]}`)
+  }
+
+  if (errors.length) {
+    console.error('[aiRoute] ✖ 版本自检未通过：')
+    for (const e of errors) console.error(`  - ${e}`)
+    process.exit(1)
+  }
+  console.log(`[aiRoute] ✔ 版本自检通过：asar 与 exe 元数据均为 ${version}`)
+}
+
 // === 构建流程 ===
 
 console.log('[aiRoute] 正在清理构建环境...')
@@ -144,6 +175,7 @@ buildRenderer.on('close', (code) => {
     }
     console.log('[aiRoute] 打包完成！')
     console.log('[aiRoute] 输出: app/dist-electron/AiRoute.exe')
+    verifyBuild(require(path.join(root, 'package.json')).version)
     syncToRelease()
   })
 })
