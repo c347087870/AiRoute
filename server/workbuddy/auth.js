@@ -3,6 +3,54 @@
 const fs = require('fs')
 const path = require('path')
 
+// ===== 区域（realm）=====
+// 国内版（cn）与国际版（global）用同一套 OAuth 路径，仅域名/UA/头族不同。
+// 落盘字段 `realm`（嵌套形 auth.realm）；缺失时按 domain 后缀推断，
+// 再回落 cn——旧凭证文件不含该字段，必须能安全地判为国内版。
+
+const REALM_CN = 'cn'
+const REALM_GLOBAL = 'global'
+
+// 国际版域名族（裸域与任意子域）。国内版 OAuth 返回 www.codebuddy.cn，
+// 国际版返回 workbuddy.ai 家族域名。
+function isGlobalDomain(domain) {
+  const d = String(domain || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '')
+  if (!d) return false
+  return d === 'workbuddy.ai' || d.endsWith('.workbuddy.ai')
+}
+
+// 归一化区域取值（用于「解析已存在的凭证文件」这一场景）。
+// 优先级：domain 是上游 OAuth 真实返回值 → 最可信；realm 是本地记录。
+// 两者矛盾时以 domain 为准：凭证可能被手工编辑或早期版本写入错误 realm，
+// 把国内账号判成国际版会让请求发往境外域名而全量失败（反之亦然）。
+// 注意：OAuth 刚落盘时**不要**用本函数，应直接用 resolveRealmForLogin（用户显式选择优先）。
+function resolveRealm(realm, domain) {
+  const r = String(realm || '').trim().toLowerCase()
+  const hasDomain = !!String(domain || '').trim()
+  if (hasDomain) {
+    // domain 有明确指向：workbuddy.ai 家族 → global；否则 → cn
+    // （即使 realm 声称 global，domain 是国内也判 cn —— 宁可走国内链路可用，
+    //  也不要因误判把请求全发到境外而全盘失败）
+    return isGlobalDomain(domain) ? REALM_GLOBAL : REALM_CN
+  }
+  // 没有 domain 信息（老凭证/手工构造）才采信显式 realm
+  return r === REALM_GLOBAL ? REALM_GLOBAL : REALM_CN
+}
+
+// 登录落盘时用的区域解析：**用户显式选择优先**。
+// OAuth 刚拿到的 domain 可能尚未反映区域（或上游返回空），而用户已明确选了中国际版，
+// 此时必须尊重用户选择，否则国际版永远无法添加。
+function resolveRealmForLogin(realm, domain) {
+  const r = String(realm || '').trim().toLowerCase()
+  if (r === REALM_GLOBAL) return REALM_GLOBAL
+  if (r === REALM_CN) return REALM_CN
+  return isGlobalDomain(domain) ? REALM_GLOBAL : REALM_CN
+}
+
 // UID 白名单校验（防路径穿越）：仅字母/数字/下划线/连字符，长度 ≤ 64
 function validUID(uid) {
   if (!uid || uid.length > 64) return false
@@ -27,11 +75,14 @@ function parseAuth(raw) {
   const accessToken = typeof src.accessToken === 'string' ? src.accessToken.trim() : ''
   if (!accessToken) return null
 
+  const domain = str(src.domain)
   return {
     uid: str(acct.uid),
     enterpriseId: str(acct.enterpriseId),
     nickname: str(acct.nickname),
-    domain: str(src.domain),
+    domain,
+    // 区域：显式字段优先，缺失按 domain 推断（旧凭证 → 国内版）
+    realm: resolveRealm(src.realm, domain),
     accessToken,
     refreshToken: str(src.refreshToken),
     expiresAt: Number.isFinite(Number(src.expiresAt)) ? Math.floor(Number(src.expiresAt)) : 0,
@@ -57,7 +108,10 @@ function saveAtomic(auth) {
       accessToken: auth.accessToken,
       refreshToken: auth.refreshToken,
       expiresAt: auth.expiresAt,
-      domain: auth.domain
+      domain: auth.domain,
+      // 区域落盘：刷新 token 时不回写会导致重启后按 domain 重新推断（国际版域名可推断，
+      // 但显式落盘可避免上游换了 domain 取值后判定漂移）
+      realm: auth.realm || REALM_CN
     },
     account: {
       uid: auth.uid,
@@ -127,5 +181,11 @@ module.exports = {
   saveAtomic,
   pathFor,
   loadDir,
-  needsRefresh
+  needsRefresh,
+  // 区域判定
+  REALM_CN,
+  REALM_GLOBAL,
+  resolveRealm,
+  resolveRealmForLogin,
+  isGlobalDomain
 }

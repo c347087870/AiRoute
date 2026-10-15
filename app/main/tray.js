@@ -26,7 +26,12 @@ function refLabel(providers, ref) {
   const provider = providers[providerName]
   if (!provider) return ref
 
-  const providerLabel = provider.displayName || providerName
+  // 国际版源补区域后缀（与分组标题口径一致），避免同名时看不出切的是哪个源
+  const base = provider.displayName || providerName
+  const providerLabel =
+    provider.type === 'workbuddy' && provider.region === 'global' && !base.includes('国际版') && !/global/i.test(base)
+      ? `${base}（国际版）`
+      : base
   const models = provider.models || []
   const model = modelId ? models.find(m => m.id === modelId) : models[0]
   return model ? `${providerLabel} / ${model.displayName || model.id}` : providerLabel
@@ -106,8 +111,16 @@ async function updateMenu(tray, mainWindow) {
   }
 
   // 每个 Provider 一组，组内是该 Provider 的全部模型
+  // 国际版源补区域后缀：WorkBuddy 国内/国际是两个独立源，显示名可能相同
+  const providerLabel = (name, provider) => {
+    const base = provider.displayName || name
+    if (provider.type !== 'workbuddy') return base
+    if (provider.region !== 'global') return base
+    if (base.includes('国际版') || /global/i.test(base)) return base
+    return `${base}（国际版）`
+  }
   const providerItems = Object.entries(providers).map(([name, provider]) => ({
-    label: provider.displayName || name,
+    label: providerLabel(name, provider),
     submenu: (provider.models || []).map(model => {
       const ref = `${name}/${model.id}`
       return {

@@ -37,7 +37,7 @@ const SANITIZE_REWRITES = [
 // 剥离层正则：键值形态 header 整段删除（要求冒号，大小写不敏感）
 const RE_HDR = /x-anthropic-billing-header:[^;\n]*;?[ \t\n\f\r]*/gi
 // 剥离层正则：尾随裸键值整段删除（循环至稳定）
-const RE_KV = /\bcc_[a-z0-9_]+=[^;\n]*;?[ \t\n\f\r]*/gi
+const RE_KV = /\bcc_[a-z0-9_]+=[^;\s]*;?[ \t\n\f\r]*/gi
 // 兜底层正则：残留裸 header 键名最小缩写（不要求冒号，大小写不敏感）
 const RE_BARE_HDR = /x-anthropic-billing-header/gi
 

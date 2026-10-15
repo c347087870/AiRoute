@@ -6,7 +6,7 @@
         <span v-if="logSize" class="log-size text-muted">
           日志已占用 {{ formatBytes(logSize.totalSize) }} · {{ logSize.fileCount }} 个文件
         </span>
-        <button class="btn-danger btn-sm" @click="clearAllLogs">清空</button>
+        <button class="btn-danger btn-sm" :disabled="clearing" @click="clearAllLogs">清空</button>
         <button class="btn-ghost btn-sm" @click="refreshAll">刷新</button>
       </div>
     </div>
@@ -160,6 +160,7 @@ const creditEntries = ref([]) // 积分变动流水（当前页，新的在前�
 const CREDIT_PAGE_SIZE = 50 // 积分历史每页条数（服务端 limit）
 const creditUid = ref('') // 积分历史账号筛选，空表示全部
 const creditPage = ref(1) // 积分历史当前页（从 1 开始）
+const clearing = ref(false) // 清空日志请求进行中（防重入）
 const creditTotal = ref(0) // 积分历史过滤后总条数（服务端返回）
 const creditNote = ref('') // 积分历史统计说明（总条数 · 净变动）
 
@@ -286,6 +287,13 @@ async function loadCreditHistory() {
     creditEntries.value = data?.entries || []
     creditTotal.value = Number(data?.total) || 0
     creditNote.value = creditNoteText(creditTotal.value, Number(data?.net) || 0)
+    // 流水被裁剪或筛选后总数变小 → 当前页码可能越界（表现为空列表 + 「第 2 / 1 页」）。
+    // 收敛到最后一页后重新取一次（页码已在范围内，递归只可能发生一层）
+    const pages = Math.max(1, Math.ceil(creditTotal.value / CREDIT_PAGE_SIZE))
+    if (creditPage.value > pages) {
+      creditPage.value = pages
+      await loadCreditHistory()
+    }
   } catch {
     creditEntries.value = []
     creditTotal.value = 0
@@ -315,17 +323,21 @@ function resetFilters() {
   statusFilter.value = ''
 }
 
-// 清空全部日志，二次确认后执行
+// 清空全部日志，二次确认后执行（防重入：进行中禁用按钮）
 async function clearAllLogs() {
+  if (clearing.value) return
   const confirmed = window.confirm('确定要清空全部日志吗？\n\n此操作不可恢复，所有请求记录将被永久删除。')
   if (!confirmed) return
 
+  clearing.value = true
   try {
     await clearLogs()
     await refreshAll()
     showToast('日志已清空')
   } catch (err) {
     showToast('清空日志失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
+  } finally {
+    clearing.value = false
   }
 }
 

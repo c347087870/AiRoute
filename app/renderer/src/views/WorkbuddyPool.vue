@@ -32,7 +32,12 @@
       <div class="card wb-card">
         <div class="wb-toolbar">
           <button class="btn-primary btn-sm" :disabled="!!oauth" @click="startAddAccount">+ 添加账号</button>
-          <button class="btn-ghost btn-sm" :disabled="busyAll" @click="checkinAll">
+          <button
+            class="btn-ghost btn-sm"
+            :disabled="busyAll || !cnAccountCount"
+            :title="cnAccountCount ? '' : '国际版账号不支持签到，请先添加国内版账号'"
+            @click="checkinAll"
+          >
             {{ busyAll === 'checkin' ? '执行中…' : '全部签到' }}
           </button>
           <button class="btn-ghost btn-sm" :disabled="!!busyAll" @click="refreshBalanceAll">
@@ -40,9 +45,38 @@
           </button>
         </div>
 
+        <!-- 添加账号：先选区域（国际版与国内版的域名/OAuth 入口不同） -->
+        <div v-if="addPanel" class="wb-add-realm">
+          <div class="wb-add-realm-title">选择账号区域后开始登录</div>
+          <div class="wb-add-realm-opts">
+            <label class="wb-realm-opt" :class="{ active: addRealm === 'cn' }">
+              <input type="radio" value="cn" v-model="addRealm" />
+              <span class="wb-realm-name">国内版</span>
+              <span class="wb-realm-host">copilot.tencent.com</span>
+            </label>
+            <label class="wb-realm-opt" :class="{ active: addRealm === 'global' }">
+              <input type="radio" value="global" v-model="addRealm" />
+              <span class="wb-realm-name">国际版</span>
+              <span class="wb-realm-host">www.workbuddy.ai</span>
+            </label>
+          </div>
+          <div class="wb-add-realm-actions">
+            <button class="btn-primary btn-sm" @click="confirmStartAddAccount">开始登录</button>
+            <button class="btn-ghost btn-sm" @click="addPanel = false">取消</button>
+          </div>
+          <div class="wb-add-realm-note">
+            国际版无签到与成长任务，仅支持对话、余额、保活；添加后请在「Provider 管理」新建对应的国际版源。
+          </div>
+        </div>
+
         <!-- OAuth 登录流程（页内区块，非弹窗） -->
         <div v-if="oauth" class="wb-oauth">
-          <div class="wb-oauth-title">请在浏览器中完成 WorkBuddy 登录授权</div>
+          <div class="wb-oauth-title">
+            请在浏览器中完成 WorkBuddy 登录授权
+            <span class="wb-realm-tag" :class="oauth.realm === 'global' ? 'global' : 'cn'">
+              {{ oauth.realm === 'global' ? '国际版' : '国内版' }}
+            </span>
+          </div>
           <div class="wb-oauth-url" :title="oauth.url">{{ oauth.url }}</div>
           <div class="wb-oauth-actions">
             <button class="btn-primary btn-sm" @click="openAuthUrl">打开授权链接</button>
@@ -61,6 +95,7 @@
             <thead>
               <tr>
                 <th>昵称</th>
+                <th>区域</th>
                 <th>状态</th>
                 <th>积分</th>
                 <th>今日签到</th>
@@ -75,11 +110,16 @@
               <tr v-for="acct in accounts" :key="acct.uid">
                 <td class="nowrap">{{ acct.nickname || '（未命名账号）' }}</td>
                 <td class="nowrap">
+                  <span class="wb-realm-tag" :class="acct.realm === 'global' ? 'global' : 'cn'">
+                    {{ acct.realm === 'global' ? '国际版' : '国内版' }}
+                  </span>
+                </td>
+                <td class="nowrap">
                   <span class="wb-state" :class="stateClass(acct)">{{ stateLabel(acct) }}</span>
                   <span v-if="acct.runningAction" class="wb-running">{{ runningLabel(acct.runningAction) }}</span>
                 </td>
                 <td class="nowrap">{{ acct.credits }}</td>
-                <td class="nowrap">{{ acct.checkinDone ? '已签到' : '-' }}</td>
+                <td class="nowrap">{{ acct.checkinDone ? '已签到' : (acct.realm === 'global' ? '不支持' : '-') }}</td>
                 <td class="nowrap">{{ fmtNum(acct.tokenUsageToday) }}</td>
                 <td class="nowrap">{{ fmtNum(acct.tokenUsageTotal) }}</td>
                 <td class="nowrap">{{ acct.lastCheckinAt ? formatTime(acct.lastCheckinAt) : '-' }}</td>
@@ -91,7 +131,12 @@
                   <span v-else>-</span>
                 </td>
                 <td class="nowrap">
-                  <button class="btn-ghost btn-sm" :disabled="busyUid === acct.uid" @click="doCheckin(acct)">签到</button>
+                  <button
+                    class="btn-ghost btn-sm"
+                    :disabled="busyUid === acct.uid || acct.realm === 'global'"
+                    :title="acct.realm === 'global' ? '国际版无签到能力' : ''"
+                    @click="doCheckin(acct)"
+                  >签到</button>
                   <button class="btn-ghost btn-sm" :disabled="busyUid === acct.uid" @click="doBalance(acct)">余额</button>
                   <button class="btn-ghost btn-sm" :disabled="busyUid === acct.uid" @click="doKeepalive(acct)">保活</button>
                   <button class="btn-ghost btn-sm" @click="openDetail(acct)">详情</button>
@@ -397,21 +442,49 @@
     <!-- ==================== Tab 4：模型和档位 ==================== -->
     <div v-if="tab === 'models'">
       <div class="card wb-card">
+        <!-- 区域切换：国内版与国际版的模型清单完全不同，必须分开管理 -->
+        <div class="wb-realm-switch">
+          <button
+            v-for="r in modelRegions"
+            :key="r.value"
+            class="wb-realm-btn"
+            :class="{ active: modelRegion === r.value }"
+            @click="switchModelRegion(r.value)"
+          >
+            <span class="wb-realm-btn-name">{{ r.label }}</span>
+            <span class="wb-realm-btn-host">{{ r.host }}</span>
+            <span class="wb-realm-btn-count">{{ r.count }} 个账号</span>
+          </button>
+        </div>
+
         <div class="wb-toolbar">
-          <button class="btn-primary btn-sm" :disabled="modelsLoading" @click="loadModels(true)">
+          <button
+            class="btn-primary btn-sm"
+            :disabled="modelsLoading || !modelRegionAccountCount"
+            :title="modelRegionAccountCount ? '' : '该区域还没有账号，请先到「账号池」添加'"
+            @click="loadModels(true)"
+          >
             {{ modelsLoading ? '拉取中…' : '拉取上游模型' }}
           </button>
           <button class="btn-ghost btn-sm" :disabled="modelsSaving || !upstreamModels.length" @click="saveEnabledModels">
             {{ modelsSaving ? '保存中…' : '保存启用模型' }}
           </button>
-          <span class="wb-count">已勾选 {{ enabledModelIds.length }} / {{ upstreamModels.length }}</span>
+          <span class="wb-count">
+            {{ modelRegion === 'global' ? '国际版' : '国内版' }}：已勾选 {{ enabledModelIds.length }} / {{ upstreamModels.length }}
+          </span>
         </div>
 
         <div class="wb-note">
-          勾选后的清单是账号池统一维护的启用模型，保存时会自动同步写入所有 WorkBuddy 类型 Provider 的模型列表。
+          勾选后的清单是<strong>{{ modelRegion === 'global' ? '国际版' : '国内版' }}</strong>账号池统一维护的启用模型，
+          保存时会自动同步写入<strong>同区域</strong>的 WorkBuddy Provider 模型列表（不影响另一区域）。
         </div>
 
-        <div v-if="!upstreamModels.length" class="wb-empty">还没有模型数据，点击「拉取上游模型」获取。</div>
+        <div v-if="!modelRegionAccountCount" class="wb-empty">
+          还没有{{ modelRegion === 'global' ? '国际版' : '国内版' }}账号，请先到「账号池」页签通过 OAuth 添加。
+        </div>
+        <div v-else-if="!upstreamModels.length" class="wb-empty">
+          还没有模型数据，点击「拉取上游模型」获取{{ modelRegion === 'global' ? '国际版' : '国内版' }}模型清单。
+        </div>
         <div v-else class="table-wrap">
           <table class="wb-table">
             <thead>
@@ -452,9 +525,10 @@
     <!-- ==================== Tab 4：成长任务 ==================== -->
     <div v-if="tab === 'tasks'">
       <div class="card wb-card">
-        <div class="wb-toolbar">
+        <!-- 国际版没有成长任务体系：这里只列国内版账号，并用提示说明被排除的账号数 -->
+        <div v-if="taskAccounts.length" class="wb-toolbar">
           <select v-model="taskUid" class="wb-select" @change="onTaskAccountChange">
-            <option v-for="acct in accounts" :key="acct.uid" :value="acct.uid">
+            <option v-for="acct in taskAccounts" :key="acct.uid" :value="acct.uid">
               {{ acct.nickname || acct.uid.slice(0, 12) }}
             </option>
           </select>
@@ -472,6 +546,20 @@
           </button>
           <span v-if="taskRunning" class="wb-count">进度 {{ taskProgressText }}</span>
           <span v-if="selectedTaskCodes.length" class="wb-count">已选 {{ selectedTaskCodes.length }} 项</span>
+        </div>
+
+        <!-- 无国内账号：成长任务不可用（国际版没有成长体系） -->
+        <div v-else class="wb-empty">
+          成长任务仅国内版账号可用。
+          <template v-if="globalAccountCount">
+            当前只有 {{ globalAccountCount }} 个国际版账号——上游不为国际版提供成长体系（签到 / 任务 / 旅行 / 连登 / 夜猫子均不可用），
+            国际版仍可正常对话、查余额与保活。
+          </template>
+          <template v-else>请先到「账号池」页签添加国内版账号。</template>
+        </div>
+
+        <div v-if="taskAccounts.length && globalAccountCount" class="wb-note">
+          已自动排除 {{ globalAccountCount }} 个国际版账号（无成长任务体系）。
         </div>
 
         <!-- 全账号扫描结果 -->
@@ -574,6 +662,13 @@
 
         <div class="wb-note">时点填小时（0-23），多个用英文逗号分隔，例如 9,21；留空将回落为默认时点。</div>
 
+        <!-- 区域能力说明：国际版账号会被其中四类任务自动跳过 -->
+        <div v-if="globalAccountCount" class="wb-note">
+          <strong>区域差异</strong>：签到 / 旅行 / 成长任务 / 夜猫子这四类<strong>对国际版账号无效</strong>，
+          调度时会自动跳过（上游不为国际版提供这些能力）；
+          <strong>活跃上报与 token 保活对两地都有效</strong>。当前有 {{ globalAccountCount }} 个国际版账号会被跳过。
+        </div>
+
         <div class="table-wrap">
           <table class="wb-table">
             <thead>
@@ -625,6 +720,65 @@
 
     <!-- ==================== Tab 6：高级配置 ==================== -->
     <div v-if="tab === 'advanced'">
+      <!-- 客户端版本号自动检查：从官方公开来源取最新版本，一键对照与更新 -->
+      <div class="card wb-card">
+        <div class="section-title">客户端版本号检查</div>
+        <div class="wb-note">
+          出站 UA 携带的版本号过时可能被上游判为可疑（国际版平台段送错会触发 403）。
+          这里从官方公开来源取最新版本号：桌面端走官方更新接口（<strong>国内版与国际版不同</strong>）、
+          CLI 走 npm registry、IDE 走官方更新日志。
+        </div>
+
+        <div class="wb-toolbar">
+          <button class="btn-primary btn-sm" :disabled="verLoading" @click="checkVersions(true)">
+            {{ verLoading ? '检查中…' : '检查最新版本' }}
+          </button>
+          <button
+            class="btn-ghost btn-sm"
+            :disabled="verApplying || !verHasUpdate"
+            @click="applyVersions"
+          >{{ verApplying ? '应用中…' : '应用全部更新' }}</button>
+          <span v-if="verFetchedAt" class="wb-count">
+            上次检查 {{ formatTime(verFetchedAt) }}{{ verFromCache ? '（缓存）' : '' }}
+          </span>
+        </div>
+
+        <div v-if="!verFields.length" class="wb-empty">还没有检查过，点击「检查最新版本」获取。</div>
+        <div v-else class="table-wrap">
+          <table class="wb-table">
+            <thead>
+              <tr>
+                <th>版本项</th>
+                <th>当前</th>
+                <th>最新</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="f in verFields" :key="f.key">
+                <td class="nowrap">{{ f.label }}</td>
+                <td class="nowrap mono">{{ f.current || '-' }}</td>
+                <td class="nowrap mono">{{ f.latest || '-' }}</td>
+                <td class="nowrap">
+                  <span v-if="!f.latest" class="wb-bad">未取到</span>
+                  <span v-else-if="f.hasUpdate" class="wb-warn">可更新</span>
+                  <span v-else class="wb-ok">已是最新</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="verDesktopByRegion.cn || verDesktopByRegion.global" class="wb-note">
+          桌面端官方版本按区域不同：国内版 <strong>{{ verDesktopByRegion.cn || '-' }}</strong>、
+          国际版 <strong>{{ verDesktopByRegion.global || '-' }}</strong>
+          （UA 用较新的国内版值，国际版略低不影响判定）。
+        </div>
+        <div v-if="verErrors.length" class="wb-note wb-bad">
+          部分来源取数失败：{{ verErrors.join('；') }}
+        </div>
+      </div>
+
       <div class="card wb-card">
         <div class="section-title">账号池概览（只读）</div>
         <div class="wb-kv">
@@ -1025,7 +1179,9 @@ import {
   wbLogs,
   wbStatus,
   wbConfig,
-  wbUpdateConfig
+  wbUpdateConfig,
+  wbVersions,
+  wbApplyVersions
 } from '../api.js'
 
 // ==================== 常量 ====================
@@ -1081,6 +1237,10 @@ const busyUid = ref('')
 const oauth = ref(null)
 // OAuth 轮询定时器句柄
 let pollTimer = null
+// 添加账号前的区域选择面板是否展开
+const addPanel = ref(false)
+// 待添加账号的区域：cn（国内版，默认）/ global（国际版）
+const addRealm = ref('cn')
 // ==================== 积分构成状态 ====================
 
 // 积分页当前选中的账号 uid
@@ -1132,14 +1292,36 @@ const usageModelRows = computed(() => {
 
 // ==================== 模型和档位状态 ====================
 
-// 上游模型列表
+// 当前正在管理的区域：cn（国内版）/ global（国际版）
+// 两地模型清单完全不同，必须分开拉取与保存，否则会把一地的清单写进另一地的槽位
+const modelRegion = ref('cn')
+// 上游模型列表（当前区域）
 const upstreamModels = ref([])
-// 已勾选的模型 id 列表
+// 已勾选的模型 id 列表（当前区域）
 const enabledModelIds = ref([])
 // 模型拉取中标记
 const modelsLoading = ref(false)
 // 模型保存中标记
 const modelsSaving = ref(false)
+
+// 区域选项 + 各区域账号数（无账号的区域给出提示，避免用户对着空列表困惑）
+const modelRegions = computed(() => [
+  { value: 'cn', label: '国内版', host: 'copilot.tencent.com', count: accounts.value.filter(a => a.realm !== 'global').length },
+  { value: 'global', label: '国际版', host: 'www.workbuddy.ai', count: accounts.value.filter(a => a.realm === 'global').length }
+])
+
+// 国际版账号数（成长任务 / 签到等能力只对国内版有效，界面据此过滤与提示）
+const globalAccountCount = computed(() => accounts.value.filter(a => a.realm === 'global').length)
+// 国内版账号数
+const cnAccountCount = computed(() => accounts.value.filter(a => a.realm !== 'global').length)
+// 可执行成长任务的账号（仅国内版；上游不为国际版提供成长体系）
+const taskAccounts = computed(() => accounts.value.filter(a => a.realm !== 'global'))
+
+// 当前区域的账号数（为 0 时不能拉取上游模型）
+const modelRegionAccountCount = computed(() => {
+  const hit = modelRegions.value.find(r => r.value === modelRegion.value)
+  return hit ? hit.count : 0
+})
 
 // ==================== 成长任务状态 ====================
 
@@ -1200,6 +1382,17 @@ const schedSaving = ref(false)
 const runningTask = ref('')
 
 // ==================== 高级配置状态 ====================
+
+// 客户端版本号检查结果
+const verFields = ref([]) // [{ key, label, current, latest, hasUpdate }]
+const verDesktopByRegion = ref({}) // { cn, global } 桌面端官方版本（按区域不同）
+const verErrors = ref([]) // 部分来源的失败原因
+const verFetchedAt = ref(0) // 上次成功取数时刻
+const verFromCache = ref(false) // 是否来自缓存
+const verLoading = ref(false) // 检查中
+const verApplying = ref(false) // 应用中
+// 是否存在可更新项
+const verHasUpdate = computed(() => verFields.value.some(f => f.hasUpdate))
 
 // 运行时配置快照（池参数只读展示）
 const cfg = ref({ pool: {} })
@@ -1287,6 +1480,10 @@ let logTimer = null
 
 onMounted(async () => {
   await reload()
+  // 首屏默认区域：优先选「有账号」的那个区域，避免用户打开就对着空列表
+  const cnCount = accounts.value.filter(a => a.realm !== 'global').length
+  const glCount = accounts.value.filter(a => a.realm === 'global').length
+  if (!cnCount && glCount) modelRegion.value = 'global'
   // 首屏默认预取定时任务状态，供「高级配置」只读汇总使用
   await loadScheduler()
 })
@@ -1308,7 +1505,11 @@ watch(tab, key => {
     refreshQueue()
   } else if (key === 'scheduler') loadScheduler()
   else if (key === 'logs') loadLogs()
-  else if (key === 'advanced') loadAdvanced()
+  else if (key === 'advanced') {
+    loadAdvanced()
+    // 版本对照走缓存（6 小时 TTL），进页即显示上次结果，不额外发网络请求
+    if (!verFetchedAt.value) checkVersions(false, true)
+  }
 })
 
 // ==================== 账号池 ====================
@@ -1322,7 +1523,9 @@ async function reload() {
     counts.value = data.counts || { total: 0, healthy: 0, cooling: 0, disabled: 0, inFlightFull: 0 }
     // 选中的账号被移除后回落为该列表第一个
     if (!accounts.value.some(a => a.uid === creditUid.value)) creditUid.value = accounts.value[0] ? accounts.value[0].uid : ''
-    if (!accounts.value.some(a => a.uid === taskUid.value)) taskUid.value = accounts.value[0] ? accounts.value[0].uid : ''
+    // 成长任务的账号候选只含国内版（国际版无成长体系），默认选中也必须在候选内
+    const taskPool = accounts.value.filter(a => a.realm !== 'global')
+    if (!taskPool.some(a => a.uid === taskUid.value)) taskUid.value = taskPool[0] ? taskPool[0].uid : ''
   } catch (err) {
     showToast('账号列表加载失败: ' + errText(err), 'error')
   } finally {
@@ -1342,11 +1545,19 @@ async function refreshPage() {
   else if (tab.value === 'advanced') await loadAdvanced()
 }
 
-// 发起 OAuth 设备授权并开始轮询
-async function startAddAccount() {
+// 点击「+ 添加账号」：先展开区域选择（国际版与国内版的域名与 OAuth 入口不同）
+function startAddAccount() {
+  addRealm.value = 'cn'
+  addPanel.value = true
+}
+
+// 选定区域后真正发起 OAuth 设备授权并开始轮询
+async function confirmStartAddAccount() {
+  const realm = addRealm.value === 'global' ? 'global' : 'cn'
+  addPanel.value = false
   try {
-    const data = await wbOauthStart()
-    oauth.value = { state: data.state, url: data.url, message: '' }
+    const data = await wbOauthStart(realm)
+    oauth.value = { state: data.state, url: data.url, message: '', realm: data.realm || realm }
     try {
       await navigator.clipboard.writeText(data.url)
       oauth.value.message = '授权链接已复制，请粘贴到浏览器打开'
@@ -1368,8 +1579,10 @@ function startOauthPolling() {
       const data = await wbOauthPoll(oauth.value.state)
       if (data.done) {
         stopOauthPolling()
+        const realmLabel = data.realm === 'global' ? '国际版' : '国内版'
+        const extra = data.realm === 'global' ? '（国际版无签到与成长任务）' : ''
         oauth.value = null
-        showToast(`账号 ${data.nickname || data.uid} 添加成功，积分 ${data.credits >= 0 ? data.credits : '未知'}`)
+        showToast(`账号 ${data.nickname || data.uid} 添加成功（${realmLabel}），积分 ${data.credits >= 0 ? data.credits : '未知'}${extra}`)
         await reload()
       } else if (data.message) {
         oauth.value.message = data.message
@@ -1392,6 +1605,7 @@ function stopOauthPolling() {
 function cancelOauth() {
   stopOauthPolling()
   oauth.value = null
+  addPanel.value = false
 }
 
 // 在系统默认浏览器打开授权链接
@@ -1644,25 +1858,34 @@ async function saveUsage() {
 }
 
 // 账号显示名：优先昵称，否则 uid 前 12 位
+// 带区域后缀：国内/国际账号可能昵称相同（或都是 uid 前缀），
+// 用量与积分历史把两区域数据聚在一起，不标注就无法判断消耗来自哪个区域
 function accountLabel(uid) {
   const hit = accounts.value.find(a => a.uid === uid)
-  if (hit && hit.nickname) return hit.nickname
-  return uid ? uid.slice(0, 12) : '-'
+  const base = hit && hit.nickname ? hit.nickname : uid ? uid.slice(0, 12) : '-'
+  if (hit && hit.realm === 'global') return `${base}（国际版）`
+  return base
 }
 
 // ==================== 模型和档位 ====================
 
 // 拉取上游模型列表与启用清单；force 为 true 时强制刷新上游缓存
+// 一律带当前区域：两地清单不同，不带区域会取到另一区域的清单并写错槽位
 async function loadModels(force) {
+  const region = modelRegion.value
+  if (!modelRegionAccountCount.value) return
   modelsLoading.value = true
   try {
-    const data = await wbModels(!!force)
+    const data = await wbModels(!!force, region)
+    // 期间用户可能切了区域：丢弃过期响应，避免把 A 区域清单渲染到 B 区域页签
+    if (region !== modelRegion.value) return
     upstreamModels.value = data.models || []
     if (!upstreamModels.value.length) {
-      showToast('上游未返回可用模型', 'error')
+      showToast(`${region === 'global' ? '国际版' : '国内版'}上游未返回可用模型`, 'error')
+      enabledModelIds.value = []
       return
     }
-    const enabled = await wbEnabledModels()
+    const enabled = await wbEnabledModels(region)
     const ids = (enabled.models || []).map(m => m.id)
     // 未配置启用清单时默认全选
     enabledModelIds.value = ids.length ? ids : upstreamModels.value.map(m => m.id)
@@ -1671,6 +1894,15 @@ async function loadModels(force) {
   } finally {
     modelsLoading.value = false
   }
+}
+
+// 切换管理区域：清空上一区域的视图状态后按新区域重新加载
+async function switchModelRegion(region) {
+  if (modelRegion.value === region) return
+  modelRegion.value = region
+  upstreamModels.value = []
+  enabledModelIds.value = []
+  if (modelRegionAccountCount.value) await loadModels(false)
 }
 
 // 切换单个模型的勾选状态
@@ -1682,8 +1914,9 @@ function toggleModel(id) {
   enabledModelIds.value = next
 }
 
-// 保存启用模型清单（后端自动同步到所有 WorkBuddy Provider）
+// 保存启用模型清单（后端按区域写入，并只同步同区域的 WorkBuddy Provider）
 async function saveEnabledModels() {
+  const region = modelRegion.value
   const picked = upstreamModels.value.filter(m => enabledModelIds.value.includes(m.id))
   if (!picked.length) {
     showToast('请至少勾选一个模型', 'error')
@@ -1697,9 +1930,14 @@ async function saveEnabledModels() {
       maxContext: m.maxContext,
       maxOutput: m.maxOutput
     }))
-    const res = await wbSaveEnabledModels(payload)
+    const res = await wbSaveEnabledModels(payload, region)
     enabledModelIds.value = (res.models || []).map(m => m.id)
-    showToast(`已保存 ${enabledModelIds.value.length} 个启用模型，已同步写入 ${res.synced || 0} 个 Provider`)
+    const label = region === 'global' ? '国际版' : '国内版'
+    showToast(
+      res.synced
+        ? `已保存 ${enabledModelIds.value.length} 个${label}启用模型，已同步写入 ${res.synced} 个 Provider`
+        : `已保存 ${enabledModelIds.value.length} 个${label}启用模型（该区域还没有 Provider，请到「Provider 管理」新建）`
+    )
   } catch (err) {
     showToast('保存失败: ' + errText(err), 'error')
   } finally {
@@ -1935,6 +2173,50 @@ async function loadAdvanced() {
   }
   await loadScheduler()
   await loadConfig()
+}
+
+// ==================== 客户端版本号检查 ====================
+
+// 拉取版本对照；force=true 强制刷新（绕过 6 小时缓存）
+// silent=true：进页自动加载用——失败（如离线、上游不可达）不弹错误提示，
+// 仅在页面上展示错误列表，避免只是切到「高级配置」页签就被打断
+async function checkVersions(force, silent = false) {
+  verLoading.value = true
+  try {
+    const data = await wbVersions(!!force)
+    verFields.value = data.fields || []
+    verDesktopByRegion.value = data.desktopByRegion || {}
+    verErrors.value = data.errors || []
+    verFetchedAt.value = data.fetchedAt || 0
+    verFromCache.value = !!data.fromCache
+    const n = (data.fields || []).filter(f => f.hasUpdate).length
+    if (!silent) showToast(n ? `发现 ${n} 项可更新` : '所有版本号都是最新的')
+  } catch (err) {
+    if (!silent) showToast('检查版本号失败: ' + errText(err), 'error', 4000)
+  } finally {
+    verLoading.value = false
+  }
+}
+
+// 应用全部有更新的版本号（写入 identity 并热生效）
+async function applyVersions() {
+  verApplying.value = true
+  try {
+    const res = await wbApplyVersions()
+    const applied = res.applied || []
+    if (!applied.length) {
+      showToast(res.message || '没有需要更新的版本号')
+    } else {
+      showToast(`已更新 ${applied.length} 项版本号：${applied.map(a => `${a.key}=${a.value}`).join('、')}`, 'success')
+      // 重新加载表单，让输入框显示新值
+      await loadConfig()
+      await checkVersions(false)
+    }
+  } catch (err) {
+    showToast('应用失败: ' + errText(err), 'error', 4000)
+  } finally {
+    verApplying.value = false
+  }
 }
 
 // 加载运行时配置（提示词模式 / 指纹脱敏 / 设备令牌 / 池参数只读快照）
@@ -2379,6 +2661,141 @@ function errText(err) {
   background: var(--primary-bg);
 }
 
+/* ===== 区域（国际版 / 国内版）===== */
+.wb-add-realm {
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-2, var(--primary-bg));
+}
+
+.wb-add-realm-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 10px;
+}
+
+.wb-add-realm-opts {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wb-realm-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-1);
+}
+
+.wb-realm-opt.active {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+
+.wb-realm-name {
+  font-weight: 600;
+}
+
+.wb-realm-host {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wb-add-realm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.wb-add-realm-note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+/* 账号行 / OAuth 标题上的区域标签 */
+.wb-realm-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 18px;
+  vertical-align: middle;
+  border: 1px solid transparent;
+}
+
+.wb-realm-tag.cn {
+  color: var(--text-2);
+  border-color: var(--border-1);
+  background: var(--bg-2, transparent);
+}
+
+.wb-realm-tag.global {
+  color: #6b46c1;
+  border-color: #d6bcfa;
+  background: #faf5ff;
+}
+
+.wb-oauth-title .wb-realm-tag {
+  margin-left: 6px;
+}
+
+/* ===== 模型和档位：区域切换 ===== */
+.wb-realm-switch {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.wb-realm-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 16px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.wb-realm-btn:hover {
+  border-color: var(--primary);
+}
+
+.wb-realm-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+
+.wb-realm-btn-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.wb-realm-btn-host {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wb-realm-btn-count {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
 .wb-oauth-title {
   font-size: 13px;
   font-weight: 600;
@@ -2692,6 +3109,13 @@ function errText(err) {
 
 .wb-bad {
   color: var(--danger);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+/* 有更新可应用 */
+.wb-warn {
+  color: #D97706;
   font-size: 11px;
   margin-left: 4px;
 }

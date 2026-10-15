@@ -1819,6 +1819,22 @@ async function main() {
     assert.strictEqual(b.defaultEffort, 'high')
   })
 
+  test('contextWindowOf 实测安全上限钳制（压缩阈值贴近真实可用容量）', () => {
+    const M = 'deepseek-v4.1-flash'
+    const cap = catalogMod.CONTEXT_SAFE_CAP[M]
+    assert.strictEqual(cap, 640000, '实测安全上限应为 640000')
+    // 上游声明 1M → 钳到实测安全值（否则预防性压缩阈值 800k 永不触发，超限只能撞上游错误）
+    assert.strictEqual(catalogMod.contextWindowOf(M, 1000000, {}), cap)
+    // 上游未声明 → 种子表同样被钳制
+    assert.strictEqual(catalogMod.contextWindowOf(M, null, {}), cap)
+    // 上游声明低于上限 → 不抬高（尊重上游更保守的值）
+    assert.strictEqual(catalogMod.contextWindowOf(M, 500000, {}), 500000)
+    // 未列入钳制表的模型 → 保持上游声明值
+    assert.strictEqual(catalogMod.contextWindowOf('glm-5.3-flash', 1000000, {}), 1000000)
+    // 钳制后压缩阈值必须真的落到实测区间内（回归：曾为 800000）
+    assert.strictEqual(Math.floor(catalogMod.contextWindowOf(M, 1000000, {}) * 0.8), 512000)
+  })
+
   await testAsync('modelsdev：成功索引缓存（TTL 内不重拉）', async () => {
     let calls = 0
     modelsdevMod.resetForTest()
@@ -2384,7 +2400,35 @@ async function main() {
     assert.deepStrictEqual(msg.content[1].input, { command: 'ls' })
     assert.deepStrictEqual(msg.content[2].input, {}, '坏 JSON 参数回退为空对象')
     assert.strictEqual(msg.stop_reason, 'tool_use')
-    assert.deepStrictEqual(msg.usage, { input_tokens: 12, output_tokens: 34 })
+    // usage 四项齐备：缓存两项恒存在（OpenAI 协议无缓存写入 → 0，不是"未知"），
+    // 客户端据此可算缓存命中率；上游已归一的别名也要能读到
+    assert.deepStrictEqual(msg.usage, {
+      input_tokens: 12,
+      output_tokens: 34,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    })
+  })
+
+  test('toMessage：usage 缓存读多种别名都能取到', () => {
+    const mk = usage => anthropicMod.toMessage({ choices: [{ message: { content: 'x' } }], usage }, 'm').usage
+    // prompt_tokens_details.cached_tokens（sse.js 归一后的标准形态）
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 40 } }).cache_read_input_tokens, 40)
+    // 平铺别名
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5, cache_read_input_tokens: 30 }).cache_read_input_tokens, 30)
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5, prompt_cache_hit_tokens: 20 }).cache_read_input_tokens, 20)
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5, cached_tokens: 10 }).cache_read_input_tokens, 10)
+    // 无缓存字段 / 非数字 / 负数 → 0（不产生 NaN）
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5 }).cache_read_input_tokens, 0)
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5, cache_read_input_tokens: 'x' }).cache_read_input_tokens, 0)
+    assert.strictEqual(mk({ prompt_tokens: 100, completion_tokens: 5, cache_read_input_tokens: -5 }).cache_read_input_tokens, 0)
+    // 完全无 usage 时不抛错
+    assert.deepStrictEqual(anthropicMod.toMessage({ choices: [{ message: { content: 'x' } }] }, 'm').usage, {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    })
   })
 
   test('流式生成器：文本事件序列 + [DONE] 收尾', () => {
@@ -2442,6 +2486,947 @@ async function main() {
     assert.strictEqual(em.push('data: [DONE]\n\n'), '')
     assert.strictEqual(em.end(), '', '错误后不再补收尾事件')
     assert.strictEqual(anthropicMod.errorBody('boom', 'hint').error.message, 'boom（hint）')
+  })
+
+  test('流式生成器：message_delta 补齐缓存用量', () => {
+    const em = anthropicMod.createStreamEmitter({ model: 'x' })
+    const out = []
+    const feed = t => {
+      const s = em.push(t)
+      if (s) out.push(s)
+    }
+    const frame = o => `data: ${JSON.stringify(o)}\n\n`
+    feed(frame({ choices: [{ delta: { content: 'hi' }, index: 0 }] }))
+    // 末帧 usage 带缓存读（上游归一后的形态）
+    feed(
+      frame({
+        choices: [{ delta: {}, finish_reason: 'stop', index: 0 }],
+        usage: { prompt_tokens: 1000, completion_tokens: 42, prompt_tokens_details: { cached_tokens: 800 } }
+      })
+    )
+    const text = out.join('') + (em.end() || '')
+    const delta = /event: message_delta\ndata: (.+)\n/.exec(text)
+    assert.ok(delta, '应有 message_delta 事件')
+    const u = JSON.parse(delta[1]).usage
+    assert.strictEqual(u.output_tokens, 42)
+    assert.strictEqual(u.input_tokens, 1000, '输入用量也应带上')
+    assert.strictEqual(u.cache_read_input_tokens, 800, '缓存读必须透传（此前完全丢失）')
+    assert.strictEqual(u.cache_creation_input_tokens, 0)
+    // 上游未给 usage 时字段仍在（恒 0），不产生 NaN / undefined
+    const em2 = anthropicMod.createStreamEmitter({ model: 'x' })
+    em2.push(frame({ choices: [{ delta: { content: 'y' }, index: 0 }] }))
+    const t2 = (em2.end() || '')
+    const d2 = /event: message_delta\ndata: (.+)\n/.exec(t2)
+    const u2 = JSON.parse(d2[1]).usage
+    assert.strictEqual(u2.cache_read_input_tokens, 0)
+    assert.strictEqual(u2.input_tokens, 0)
+  })
+
+  test('raiseOutputBudget：预算上调、下限保护、上限封顶、坏输入原样返回', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const R = runtimeMod.raiseOutputBudget
+    assert.strictEqual(typeof R, 'function', 'raiseOutputBudget 应导出')
+    const mt = s => JSON.parse(s).max_tokens
+    // 小幅预算 → 取下限 32768（实测：复杂任务需 32K 才稳定拿到正文）
+    assert.strictEqual(mt(R(JSON.stringify({ model: 'm', max_tokens: 100 }), 0)), 32768)
+    assert.strictEqual(mt(R(JSON.stringify({ model: 'm', max_tokens: 4000 }), 0)), 32768)
+    // 大额预算 → 翻倍
+    assert.strictEqual(mt(R(JSON.stringify({ model: 'm', max_tokens: 20000 }), 0)), 40000)
+    // 模型输出上限封顶
+    assert.strictEqual(mt(R(JSON.stringify({ model: 'm', max_tokens: 100000 }), 131072)), 131072)
+    assert.strictEqual(mt(R(JSON.stringify({ model: 'm', max_tokens: 120000 }), 131072)), 131072, '超上限则回调到上限')
+    // 已达上限且无法提高 → 原样返回（调用方据此改走换号）
+    const capped = JSON.stringify({ model: 'm', max_tokens: 32768 })
+    assert.strictEqual(R(capped, 32768), capped, '已封顶时不改动')
+    // 未设 max_tokens → 补下限
+    assert.strictEqual(mt(R(JSON.stringify({ model: 'm' }), 0)), 32768)
+    // 坏 JSON / 非对象 → 原样返回，绝不抛错
+    assert.strictEqual(R('{bad', 0), '{bad')
+    assert.strictEqual(R('[1,2]', 0), '[1,2]')
+    assert.strictEqual(R('', 0), '')
+    // 其他字段保持不变
+    const keep = JSON.parse(R(JSON.stringify({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'x' }] }), 0))
+    assert.strictEqual(keep.model, 'm')
+    assert.strictEqual(keep.messages[0].content, 'x')
+  })
+
+  // ==================== 16. 国际版（Global / workbuddy.ai）====================
+  group('16. 国际版区域支持')
+
+  test('区域判定：显式 realm 优先 > domain 后缀 > 默认 cn', () => {
+    const A = authMod
+    // 解析已存在凭证：domain 权威（可能被手工改过 / 早期版本写错 realm）
+    assert.strictEqual(A.resolveRealm('global', 'www.codebuddy.cn'), 'cn', 'realm 与 domain 矛盾时信 domain')
+    assert.strictEqual(A.resolveRealm('cn', 'www.workbuddy.ai'), 'global', 'domain 是国际就判国际')
+    assert.strictEqual(A.resolveRealm('', 'www.workbuddy.ai'), 'global', '按域推断')
+    assert.strictEqual(A.resolveRealm(undefined, 'workbuddy.ai'), 'global', '裸域也算')
+    assert.strictEqual(A.resolveRealm(undefined, 'https://WWW.WorkBuddy.AI/'), 'global', '带 scheme + 大小写')
+    assert.strictEqual(A.resolveRealm(undefined, 'www.codebuddy.cn'), 'cn')
+    // 旧凭证：没有 realm、也没有 domain → 必须判国内版（不能误判成国际版）
+    assert.strictEqual(A.resolveRealm(undefined, ''), 'cn', '旧凭证默认国内版')
+    assert.strictEqual(A.resolveRealm(undefined, undefined), 'cn')
+    // 无 domain 时才采信显式 realm（手工构造的凭证）
+    assert.strictEqual(A.resolveRealm('global', ''), 'global')
+    assert.strictEqual(A.isGlobalDomain('evil-workbuddy.ai.attacker.com'), false, '后缀必须精确匹配域边界')
+
+    // 登录落盘：用户显式选择优先于 domain（否则国际版永远添加不上）
+    assert.strictEqual(A.resolveRealmForLogin('global', 'www.codebuddy.cn'), 'global', '登录时用户选择优先')
+    assert.strictEqual(A.resolveRealmForLogin('cn', 'www.workbuddy.ai'), 'cn', '登录时用户选择优先')
+    assert.strictEqual(A.resolveRealmForLogin('', 'www.workbuddy.ai'), 'global', '未选时按 domain 推断')
+    assert.strictEqual(A.resolveRealmForLogin('', ''), 'cn')
+  })
+
+  test('凭证解析：旧凭证无 realm 字段 → 国内版；落盘回写 realm', () => {
+    const oldDoc = JSON.stringify({
+      auth: { accessToken: 'tok', refreshToken: 'r', expiresAt: 1, domain: 'www.codebuddy.cn' },
+      account: { uid: 'u-old', enterpriseId: '', nickname: 'old' }
+    })
+    const a1 = authMod.parseAuth(oldDoc)
+    assert.strictEqual(a1.realm, 'cn', '旧凭证必须判为国内版')
+
+    const newDoc = JSON.stringify({
+      auth: { accessToken: 'tok', refreshToken: 'r', expiresAt: 1, domain: 'www.workbuddy.ai', realm: 'global' },
+      account: { uid: 'u-new', enterpriseId: '', nickname: 'new' }
+    })
+    assert.strictEqual(authMod.parseAuth(newDoc).realm, 'global')
+
+    // 落盘必须带 realm（刷新 token 回写时不丢）
+    const tmp = path.join(os.tmpdir(), `wb-realm-${Date.now()}.json`)
+    authMod.saveAtomic({
+      uid: 'u1',
+      accessToken: 'tok',
+      refreshToken: 'r',
+      expiresAt: 1,
+      domain: 'www.workbuddy.ai',
+      realm: 'global',
+      filePath: tmp
+    })
+    const back = JSON.parse(fs.readFileSync(tmp, 'utf8'))
+    assert.strictEqual(back.auth.realm, 'global', 'realm 必须落盘')
+    fs.unlinkSync(tmp)
+  })
+
+  test('国际版域名：chat/billing/web 同域 workbuddy.ai（不像国内版三域）', () => {
+    const cn = { uid: 'c', realm: 'cn', domain: 'www.codebuddy.cn' }
+    const gl = { uid: 'g', realm: 'global', domain: 'www.workbuddy.ai' }
+    assert.strictEqual(headersMod.chatBaseOf(gl, {}), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.billingBaseOf(gl, {}), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.webBaseOf(gl, {}), 'https://www.workbuddy.ai')
+    // 国内版三域保持原样（回归）
+    assert.strictEqual(headersMod.chatBaseOf(cn, {}), 'https://copilot.tencent.com')
+    assert.strictEqual(headersMod.billingBaseOf(cn, {}), 'https://www.codebuddy.cn')
+    assert.strictEqual(headersMod.webBaseOf(cn, {}), 'https://www.workbuddy.cn')
+    // 旧账号（无 realm）走国内版域
+    assert.strictEqual(headersMod.chatBaseOf({ uid: 'x' }, {}), 'https://copilot.tencent.com')
+  })
+
+  test('国际版 UA 平台段为 WorkBuddy AI（送错会触发 403/11140）', () => {
+    const gl = { uid: 'g', realm: 'global' }
+    const cn = { uid: 'c', realm: 'cn' }
+    const uaG = headersMod.userAgent(gl, {})
+    assert.ok(uaG.includes('WorkBuddy AI/'), `国际版 UA 应含 WorkBuddy AI 平台段，实际 ${uaG}`)
+    assert.ok(!/WorkBuddy\/[\d.]+ WorkBuddy\//.test(uaG), '不应出现国内版的双 WorkBuddy 段')
+    const uaC = headersMod.userAgent(cn, {})
+    assert.ok(uaC.includes('WorkBuddy/5.5.4 WorkBuddy/'), '国内版保持三段式')
+    // billing 域 UA 同样按区域切
+    assert.ok(headersMod.billingUA({}, gl).includes('WorkBuddy AI'))
+    assert.strictEqual(headersMod.billingUA({}, cn), 'WorkBuddy/5.5.4')
+  })
+
+  test('国际版 Accept-Language / Origin 按区域切', () => {
+    const gl = { uid: 'g', realm: 'global' }
+    const cn = { uid: 'c', realm: 'cn' }
+    assert.strictEqual(headersMod.acceptLanguage({}, gl), 'en-US')
+    assert.strictEqual(headersMod.acceptLanguage({}, cn), 'zh-CN')
+    assert.strictEqual(headersMod.originRefererOf(gl, {}), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.originRefererOf(cn, {}), 'https://www.codebuddy.cn')
+  })
+
+  test('国际版 chat 头：X-Domain 写死 workbuddy.ai + X-No-Enterprise-Id', () => {
+    const gl = { uid: 'g', realm: 'global', domain: 'some-other-domain.example', accessToken: 't' }
+    const h = headersMod.chatHeaders(gl, {}, {})
+    assert.strictEqual(h['X-Domain'], 'www.workbuddy.ai', '必须写死，不透传登录返回的 domain')
+    assert.strictEqual(h['X-No-Enterprise-Id'], '1')
+    assert.strictEqual(h['X-Enterprise-Id'], undefined, '国际版不应带企业头')
+    assert.strictEqual(h['Accept-Language'], 'en-US')
+    // 国内版：domain 原样透传（回归）
+    const cn = { uid: 'c', realm: 'cn', domain: 'www.codebuddy.cn', accessToken: 't' }
+    const hc = headersMod.chatHeaders(cn, {}, {})
+    assert.strictEqual(hc['X-Domain'], 'www.codebuddy.cn')
+    assert.strictEqual(hc['X-No-Enterprise-Id'], '1')
+  })
+
+  test('计费路径：国际版无 /v2 优先、404 回落；国内版只有 /v2', () => {
+    const gl = { uid: 'g', realm: 'global' }
+    const cn = { uid: 'c', realm: 'cn' }
+    assert.deepStrictEqual(headersMod.billingMeterPathsOf(gl), [
+      '/billing/meter/get-user-resource',
+      '/v2/billing/meter/get-user-resource'
+    ])
+    assert.deepStrictEqual(headersMod.billingMeterPathsOf(cn), ['/v2/billing/meter/get-user-resource'])
+    assert.deepStrictEqual(headersMod.checkinPathsOf(gl), [
+      '/billing/meter/daily-checkin',
+      '/v2/billing/meter/daily-checkin'
+    ])
+    assert.deepStrictEqual(headersMod.checkinPathsOf(cn), ['/v2/billing/meter/daily-checkin'])
+  })
+
+  test('账号池：按区域隔离选号（不跨区派发）', () => {
+    const pool = poolMod.createPool({})
+    pool.add({ ...makeAuth('cn1'), realm: 'cn' })
+    pool.add({ ...makeAuth('gl1'), realm: 'global' })
+    assert.strictEqual(pool.pick({ realm: 'cn' }).uid, 'cn1', '国内池只应选中 cn 账号')
+    assert.strictEqual(pool.pick({ realm: 'global' }).uid, 'gl1', '国际池只应选中 global 账号')
+    assert.deepStrictEqual(pool.availableUIDs('', null, 'cn'), ['cn1'])
+    assert.deepStrictEqual(pool.availableUIDs('', null, 'global'), ['gl1'])
+    // 不传区域 = 不限（兼容旧调用）
+    assert.strictEqual(pool.availableUIDs('', null, '').length, 2)
+    // 诊断也按区域
+    assert.strictEqual(pool.diagnoseNoCandidate('', 'cn').total, 1)
+    assert.strictEqual(pool.diagnoseNoCandidate('', 'global').total, 1)
+  })
+
+  test('账号池：国际版并发上限取 maxInFlightGlobal', () => {
+    const p = poolMod.createPool({ maxInFlight: 3, maxInFlightGlobal: 2 })
+    p.add({ ...makeAuth('cn1'), realm: 'cn' })
+    p.add({ ...makeAuth('gl1'), realm: 'global' })
+    // 国内账号可占到 3
+    assert.strictEqual(p.acquire('cn1'), true)
+    assert.strictEqual(p.acquire('cn1'), true)
+    assert.strictEqual(p.acquire('cn1'), true)
+    assert.strictEqual(p.acquire('cn1'), false, '国内账号第 4 个在途应被拒')
+    // 国际账号只能到 2
+    assert.strictEqual(p.acquire('gl1'), true)
+    assert.strictEqual(p.acquire('gl1'), true)
+    assert.strictEqual(p.acquire('gl1'), false, '国际账号第 3 个在途应被拒（上限 2）')
+  })
+
+  test('区域门控：国际版跳过签到/成长任务', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const gl = { uid: 'g', realm: 'global', nickname: 'intl' }
+    const cn = { uid: 'c', realm: 'cn' }
+    assert.strictEqual(runtimeMod.skipCheckinFor(gl), true, '国际版跳过签到')
+    assert.strictEqual(runtimeMod.skipCheckinFor(cn), false)
+    assert.strictEqual(runtimeMod.skipGrowthFor(gl), true, '国际版跳过成长任务')
+    assert.strictEqual(runtimeMod.skipGrowthFor(cn), false)
+    // 旧账号（无 realm）不跳过
+    assert.strictEqual(runtimeMod.skipGrowthFor({ uid: 'x' }), false)
+    const err = runtimeMod.growthUnsupportedError(gl)
+    assert.strictEqual(err.code, 'growth_unsupported_realm')
+    assert.ok(err.message.includes('国际版'))
+  })
+
+  test('模型目录：按区域分槽查找（先本区域后兜底）', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const r = {
+      models: {
+        byRealm: {
+          cn: { list: [{ id: 'glm-cn-only' }, { id: 'shared', rate: 'cn-rate' }] },
+          global: { list: [{ id: 'gpt-global-only' }, { id: 'shared', rate: 'global-rate' }] }
+        }
+      }
+    }
+    assert.strictEqual(runtimeMod.findModelEntry(r, 'shared', 'cn').rate, 'cn-rate', '同模型应按区域取各自条目')
+    assert.strictEqual(runtimeMod.findModelEntry(r, 'shared', 'global').rate, 'global-rate')
+    assert.strictEqual(runtimeMod.findModelEntry(r, 'gpt-global-only', 'global').id, 'gpt-global-only')
+    assert.strictEqual(runtimeMod.findModelEntry(r, 'gpt-global-only', 'cn').id, 'gpt-global-only', '本区域没有时兜底找')
+    assert.strictEqual(runtimeMod.findModelEntry(r, '不存在', 'cn'), null)
+    // 失效缓存会清空所有区域
+    runtimeMod.invalidateModelCache(r)
+    assert.deepStrictEqual(r.models.byRealm, {})
+  })
+
+  test('Provider 区域：归一化与每区域唯一', () => {
+    const modelsMod = require(path.join(__dirname, '..', 'server', 'models.js'))
+    assert.strictEqual(modelsMod.normalizeRegion('global'), 'global')
+    assert.strictEqual(modelsMod.normalizeRegion('CN'), 'cn', '大小写归一')
+    assert.strictEqual(modelsMod.normalizeRegion(''), 'cn', '缺失回落国内版')
+    assert.strictEqual(modelsMod.normalizeRegion('bogus'), 'cn', '非法值回落国内版')
+
+    const cfg = {
+      workbuddy: { type: 'workbuddy', models: [{ id: 'm' }] },
+      'workbuddy-global': { type: 'workbuddy', region: 'global', models: [{ id: 'm' }] },
+      generic: { baseURL: 'https://x', models: [{ id: 'm' }] }
+    }
+    const byRegion = modelsMod.listWorkbuddyProvidersByRegion(cfg)
+    assert.deepStrictEqual(byRegion.cn, ['workbuddy'])
+    assert.deepStrictEqual(byRegion.global, ['workbuddy-global'])
+    assert.strictEqual(modelsMod.workbuddyProviderNameForRegion(cfg, 'global'), 'workbuddy-global')
+    assert.strictEqual(modelsMod.workbuddyProviderNameForRegion(cfg, 'cn'), 'workbuddy')
+    // 旧配置无色 region 字段 → 国内版
+    assert.strictEqual(modelsMod.providerRegion({ type: 'workbuddy' }), 'cn')
+    // 引用区域推导
+    assert.strictEqual(modelsMod.regionOfRef(cfg, 'workbuddy-global/model-x'), 'global')
+    assert.strictEqual(modelsMod.regionOfRef(cfg, 'workbuddy/model-x'), 'cn')
+    assert.strictEqual(modelsMod.regionOfRef(cfg, 'generic/model-x'), 'cn')
+    assert.strictEqual(modelsMod.regionOfRef(cfg, 'nonexistent/m'), 'cn')
+  })
+
+  test('Provider 输入过滤：region 落入白名单', () => {
+    const modelsMod = require(path.join(__dirname, '..', 'server', 'models.js'))
+    const out = modelsMod.sanitizeProviderInput({ type: 'workbuddy', region: 'global', models: [{ id: 'm' }] })
+    assert.strictEqual(out.region, 'global')
+    const bad = modelsMod.sanitizeProviderInput({ type: 'workbuddy', region: 'hacker', models: [{ id: 'm' }] })
+    assert.strictEqual(bad.region, 'cn', '非法区域应回落 cn 而非落盘')
+    const none = modelsMod.sanitizeProviderInput({ type: 'workbuddy', models: [{ id: 'm' }] })
+    assert.strictEqual('region' in none, false, '未提供时不写入该字段')
+  })
+
+  test('OAuth 阶段按 opts.realm 走对应域名（account 为 null）', () => {
+    // 回归：曾只认 account.realm，导致「选国际版添加账号」时 OAuth 仍发往国内域名，
+    // 授权链接指向国内站 → 国际版账号根本添加不上
+    const glOpts = { realm: 'global' }
+    const cnOpts = { realm: 'cn' }
+    assert.strictEqual(headersMod.chatBaseOf(null, glOpts), 'https://www.workbuddy.ai', '国际版 OAuth 必须走 workbuddy.ai')
+    assert.strictEqual(headersMod.billingBaseOf(null, glOpts), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.webBaseOf(null, glOpts), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.originRefererOf(null, glOpts), 'https://www.workbuddy.ai', 'Origin 必须是国际域')
+    assert.ok(headersMod.userAgent(null, glOpts).includes('WorkBuddy AI/'), 'UA 平台段必须是 WorkBuddy AI')
+    assert.strictEqual(headersMod.acceptLanguage(glOpts, null), 'en-US')
+    assert.ok(headersMod.billingUA(glOpts, null).includes('WorkBuddy AI'))
+    // 国际版计费路径顺序（OAuth 后立刻查余额时会用到）
+    assert.deepStrictEqual(headersMod.billingMeterPathsOf(null, glOpts), [
+      '/billing/meter/get-user-resource',
+      '/v2/billing/meter/get-user-resource'
+    ])
+    assert.deepStrictEqual(headersMod.checkinPathsOf(null, glOpts), [
+      '/billing/meter/daily-checkin',
+      '/v2/billing/meter/daily-checkin'
+    ])
+    // 国内版 OAuth 不受影响
+    assert.strictEqual(headersMod.chatBaseOf(null, cnOpts), 'https://copilot.tencent.com')
+    assert.strictEqual(headersMod.originRefererOf(null, cnOpts), 'https://www.codebuddy.cn')
+    assert.ok(headersMod.userAgent(null, cnOpts).includes('WorkBuddy/5.5.4 WorkBuddy/'))
+    // 无区域信息（旧调用）回落国内版，且不抛错
+    assert.strictEqual(headersMod.chatBaseOf(null, {}), 'https://copilot.tencent.com')
+    assert.strictEqual(headersMod.chatBaseOf(undefined, undefined), 'https://copilot.tencent.com')
+    assert.strictEqual(headersMod.billingMeterPathsOf(undefined, undefined).length, 1)
+    // 有账号对象时以账号为准
+    assert.strictEqual(headersMod.chatBaseOf({ realm: 'global' }, {}), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.chatBaseOf({ realm: 'cn' }, {}), 'https://copilot.tencent.com')
+  })
+
+  test('rtOpts 必须下发 realm（否则 OAuth 无法按区域选域名）', () => {
+    // 回归：曾漏传 realm，导致「选国际版」时 OAuth 仍请求 copilot.tencent.com，
+    // 上游据此返回国内站的授权链接 —— 国际版账号根本添加不上
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const os = require('os')
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-rtopts-'))
+    runtimeMod.init({ dataDir: tmp, enabledModels: [] })
+    const r = runtimeMod.getRuntime()
+
+    const cn = runtimeMod.rtOpts(r, 'cn')
+    assert.strictEqual(cn.realm, 'cn', 'rtOpts 必须带 realm=cn')
+    const gl = runtimeMod.rtOpts(r, 'global')
+    assert.strictEqual(gl.realm, 'global', 'rtOpts 必须带 realm=global')
+    // 国际版不下发 CN 域名覆盖（否则会把请求发回国内域名）
+    assert.strictEqual(gl.chatBaseCN, '', '国际版不得下发 chatBaseCN 覆盖')
+    assert.strictEqual(gl.billingBaseCN, '')
+    assert.strictEqual(gl.webBaseCN, '')
+    // 接受账号对象
+    assert.strictEqual(runtimeMod.rtOpts(r, { realm: 'global' }).realm, 'global')
+    assert.strictEqual(runtimeMod.rtOpts(r, { realm: 'cn' }).realm, 'cn')
+    assert.strictEqual(runtimeMod.rtOpts(r, undefined).realm, 'cn', '未指定按国内版')
+    // 端到端：拿 rtOpts 的产物直接问域名
+    assert.strictEqual(headersMod.chatBaseOf(null, gl), 'https://www.workbuddy.ai')
+    assert.strictEqual(headersMod.chatBaseOf(null, cn), 'https://copilot.tencent.com')
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+
+  test('identity 国内覆盖不得把国际版拉回国内域名（真实根因回归）', () => {
+    // 真实故障：server-config.json 的 identity 里存了国内版覆盖值
+    // （chatBase= copilot.tencent.com、originReferer= codebuddy.cn、acceptLanguage= zh-CN、
+    //   workbuddyUA= WorkBuddy/…、clientIdentity= codebuddy），
+    // 早先这些覆盖被无条件读取，导致「选国际版」时仍拿到国内站授权链接。
+    // 语义上它们只是「给国内链路换端点/改归因」的调节项，国际版必须一律不生效。
+    const realIdentity = {
+      chatBase: 'https://copilot.tencent.com',
+      billingBase: 'https://www.codebuddy.cn',
+      webBase: 'https://www.workbuddy.cn',
+      originReferer: 'https://www.codebuddy.cn',
+      acceptLanguage: 'zh-CN',
+      workbuddyUA: 'WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1',
+      workbuddyBillingUA: 'WorkBuddy/5.5.4'
+    }
+    const gl = { identity: realIdentity, realm: 'global', clientIdentity: 'codebuddy' }
+    const cn = { identity: realIdentity, realm: 'cn', clientIdentity: 'codebuddy' }
+
+    // 国际版：覆盖全部不得生效
+    assert.strictEqual(headersMod.chatBaseOf(null, gl), 'https://www.workbuddy.ai', 'chatBase 覆盖不得生效')
+    assert.strictEqual(headersMod.billingBaseOf(null, gl), 'https://www.workbuddy.ai', 'billingBase 覆盖不得生效')
+    assert.strictEqual(headersMod.webBaseOf(null, gl), 'https://www.workbuddy.ai', 'webBase 覆盖不得生效')
+    assert.strictEqual(headersMod.originRefererOf(null, gl), 'https://www.workbuddy.ai', 'originReferer 覆盖不得生效')
+    assert.strictEqual(headersMod.acceptLanguage(gl, null), 'en-US', 'acceptLanguage 覆盖不得生效')
+    const uaG = headersMod.userAgent(null, gl)
+    assert.ok(uaG.includes('WorkBuddy AI/'), `UA 平台段必须是 WorkBuddy AI，实际 ${uaG}`)
+    assert.ok(!uaG.includes('CodeBuddyIDE'), 'clientIdentity=codebuddy 不得带偏国际版 UA')
+    assert.ok(
+      headersMod.billingUA(gl, null).includes('WorkBuddy AI'),
+      `billing UA 必须是 WorkBuddy AI，实际 ${headersMod.billingUA(gl, null)}`
+    )
+
+    // 国内版：同一份覆盖必须继续生效（不能为了修国际版而破坏国内链路）
+    assert.strictEqual(headersMod.chatBaseOf(null, cn), 'https://copilot.tencent.com', '国内版覆盖仍生效')
+    assert.strictEqual(headersMod.originRefererOf(null, cn), 'https://www.codebuddy.cn', '国内版 Origin 覆盖仍生效')
+    assert.strictEqual(headersMod.acceptLanguage(cn, null), 'zh-CN', '国内版语言覆盖仍生效')
+    assert.ok(headersMod.userAgent(null, cn).includes('CodeBuddyIDE'), '国内版 clientIdentity 仍生效')
+  })
+
+  await testAsync('oauthPoll 全流程：国际版授权完成 → 落盘 → 进池（TDZ 回归）', async () => {
+    // 真实故障：oauthPoll 里先用 token.domain 再声明 token，抛 TDZ ReferenceError，
+    // 轮询恒失败 → 浏览器已授权但界面一直停在「等待登录」（客户端没反应）
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const clientMod = require(path.join(wbDir, 'client.js'))
+
+    const origToken = clientMod.oauthPollToken
+    const origAcct = clientMod.oauthFetchAccount
+    const origRes = clientMod.userResource
+    const origCheckin = clientMod.dailyCheckin
+    let checkinCalled = false
+
+    clientMod.oauthPollToken = async () => ({
+      accessToken: 'tok-intl',
+      refreshToken: 'ref-intl',
+      expiresIn: 3600,
+      domain: 'www.workbuddy.ai'
+    })
+    clientMod.oauthFetchAccount = async () => ({ uid: 'intl-uid-9001', enterpriseId: '', nickname: 'intl' })
+    clientMod.userResource = async () => ({ ok: true, credits: 5, total: 9, expiring: 0, earliestExpiry: 0, earliestRemaining: 0 })
+    clientMod.dailyCheckin = async () => {
+      checkinCalled = true
+      return { ok: true, message: 'x' }
+    }
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-polltest-'))
+    // 清空单例，让本次 init 真正以 tmp 为 dataDir（否则会沿用前面用例的实例，
+    // 凭证写到别的目录，断言找不到文件）
+    const prevAuthDir = runtimeMod.getRuntime() ? runtimeMod.getRuntime().authDir : ''
+    runtimeMod.__resetForTest()
+    try {
+      runtimeMod.init({ dataDir: tmp, authDir: path.join(tmp, 'auths'), stateFile: path.join(tmp, 'st.json'), enabledModels: [] })
+      const started = await runtimeMod.oauthStart('global')
+      assert.strictEqual(started.realm, 'global')
+      const res = await runtimeMod.oauthPoll(started.state)
+      assert.strictEqual(res.done, true, 'oauthPoll 不得抛 TDZ（这是「登录后没反应」的直接原因）')
+      assert.strictEqual(res.realm, 'global', '区域按用户选择落盘')
+      assert.strictEqual(res.uid, 'intl-uid-9001')
+      assert.strictEqual(checkinCalled, false, '国际版不得发起签到')
+
+      // 凭证落盘且 realm 正确（authDir 显式传的是 tmp/auths）
+      const f = path.join(tmp, 'auths', 'workbuddy-intl-uid-9001.json')
+      assert.ok(fs.existsSync(f), `凭证必须落盘（查找路径 ${f}）`)
+      const doc = JSON.parse(fs.readFileSync(f, 'utf8'))
+      assert.strictEqual(doc.auth.realm, 'global')
+      assert.strictEqual(doc.auth.accessToken, 'tok-intl')
+
+      // 已进池且区域隔离
+      const inPool = runtimeMod.listAccounts().find(a => a.uid === 'intl-uid-9001')
+      assert.ok(inPool, '账号必须热加载进池')
+      assert.strictEqual(inPool.realm, 'global')
+      const rt = runtimeMod.getRuntime()
+      assert.strictEqual(rt.pool.pick({ realm: 'global' }).uid, 'intl-uid-9001')
+      assert.strictEqual(rt.pool.pick({ realm: 'cn' }), null, '国内池不得选到国际账号')
+    } finally {
+      clientMod.oauthPollToken = origToken
+      clientMod.oauthFetchAccount = origAcct
+      clientMod.userResource = origRes
+      clientMod.dailyCheckin = origCheckin
+      // 还原单例：后续用例依赖前面用例建立的运行时，不能被本用例留下的临时实例顶替
+      runtimeMod.__resetForTest()
+      if (prevAuthDir) {
+        runtimeMod.init({ dataDir: path.dirname(prevAuthDir), authDir: prevAuthDir, enabledModels: [] })
+      }
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('跨区域模型防呆：拒绝把另一区域的模型写进本区域', () => {
+    // 真实事故：国际版账号加入后，「模型和档位」页签拉取/保存都没带区域，
+    // 导致国际版目录（default-model/fast-model/o4-mini…）被写进国内版槽位，
+    // 原有的国内模型（deepseek/glm/hy）全部消失，国内源的模型引用全失效
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const os = require('os')
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-guard-'))
+    runtimeMod.__resetForTest()
+    runtimeMod.init({ dataDir: tmp, enabledModels: [], enabledModelsGlobal: [] })
+    const r = runtimeMod.getRuntime()
+
+    // 模拟两地目录都已拉取（国内 2 个、国际 2 个，外加一个同名共有的）
+    r.models = {
+      byRealm: {
+        cn: { ts: Date.now(), list: [{ id: 'deepseek-v4.1-flash' }, { id: 'glm-5.3-flash' }, { id: 'shared' }], efforts: {}, defaultEfforts: {} },
+        global: { ts: Date.now(), list: [{ id: 'o4-mini' }, { id: 'fast-model' }, { id: 'shared' }], efforts: {}, defaultEfforts: {} }
+      }
+    }
+
+    // 国内区域混入国际模型 → 只拒绝那个国际模型，国内模型照常通过
+    let v = runtimeMod.validateModelsForRegion('cn', [{ id: 'deepseek-v4.1-flash' }, { id: 'o4-mini' }])
+    assert.strictEqual(v.ok, false)
+    assert.deepStrictEqual(v.rejected, ['o4-mini'])
+
+    // 国际区域混入国内模型 → 对称拒绝
+    v = runtimeMod.validateModelsForRegion('global', [{ id: 'glm-5.3-flash' }, { id: 'fast-model' }])
+    assert.strictEqual(v.ok, false)
+    assert.deepStrictEqual(v.rejected, ['glm-5.3-flash'])
+
+    // 正确区域 / 两区域共有 / 空输入 / 无目录缓存 → 全部放行（不误伤、不阻塞）
+    assert.strictEqual(runtimeMod.validateModelsForRegion('cn', [{ id: 'glm-5.3-flash' }]).ok, true)
+    assert.strictEqual(runtimeMod.validateModelsForRegion('global', [{ id: 'o4-mini' }]).ok, true)
+    assert.strictEqual(runtimeMod.validateModelsForRegion('cn', [{ id: 'shared' }]).ok, true, '两地共有不误伤')
+    assert.strictEqual(runtimeMod.validateModelsForRegion('cn', []).ok, true)
+    r.models = { byRealm: {} }
+    assert.strictEqual(runtimeMod.validateModelsForRegion('cn', [{ id: 'whatever' }]).ok, true, '无缓存时放行')
+
+    // 按区域读写的清单互相隔离
+    runtimeMod.setEnabledModels([{ id: 'cn-a' }], 'cn')
+    runtimeMod.setEnabledModels([{ id: 'gl-a' }], 'global')
+    assert.deepStrictEqual(runtimeMod.getEnabledModels('cn').map(m => m.id), ['cn-a'])
+    assert.deepStrictEqual(runtimeMod.getEnabledModels('global').map(m => m.id), ['gl-a'])
+    assert.deepStrictEqual(runtimeMod.getEnabledModels().map(m => m.id), ['cn-a'], '不传区域回落国内版')
+
+    runtimeMod.__resetForTest()
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+
+  test('版本号解析与比较（自动更新用）', () => {
+    const vc = require(path.join(wbDir, 'versioncheck.js'))
+    // 桌面端更新接口返回 "5.7.7.40774747" 这种四段形态，取前三段才是 UA 要的语义版本
+    assert.strictEqual(vc.parseVersion('5.7.7.40774747'), '5.7.7')
+    assert.strictEqual(vc.parseVersion('2.164.0'), '2.164.0')
+    assert.strictEqual(vc.parseVersion(' 4.12.1 '), '4.12.1', '两端空白应容忍')
+    // 非法输入一律返回空串（调用方据此跳过，不会把坏值写进 UA）
+    assert.strictEqual(vc.parseVersion(''), '')
+    assert.strictEqual(vc.parseVersion('bad'), '')
+    assert.strictEqual(vc.parseVersion('v1.2.3'), '', '带前缀字母不匹配')
+    assert.strictEqual(vc.parseVersion(null), '')
+    assert.strictEqual(vc.parseVersion(undefined), '')
+
+    // 比较必须按数值逐段（字符串比较会把 5.10.0 判成小于 5.9.0）
+    assert.strictEqual(vc.compareVersion('5.7.7', '5.5.4'), 1)
+    assert.strictEqual(vc.compareVersion('5.5.4', '5.7.7'), -1)
+    assert.strictEqual(vc.compareVersion('2.164.0', '2.164.0'), 0)
+    assert.strictEqual(vc.compareVersion('4.12.1', '4.12.0'), 1)
+    assert.strictEqual(vc.compareVersion('5.10.0', '5.9.0'), 1, '两位数段按数值比较')
+    assert.strictEqual(vc.compareVersion('6.0.0', '5.99.99'), 1)
+  })
+
+  test('版本号自动更新：防回滚校验与缓存读取（不联网）', () => {
+    const vc = require(path.join(wbDir, 'versioncheck.js'))
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-ver-'))
+    let calls = 0
+    // 用注入的假 fetch 无法直接替换模块内部函数，改为验证「无网络时的降级行为」：
+    // 缓存为空 + 网络不可用（用无效域名）时不应抛错，而是返回带 errors 的结果
+    const checker = vc.createVersionChecker({ dataDir: tmp })
+    assert.strictEqual(checker.peek(), null, '初始无缓存')
+    assert.deepStrictEqual(
+      checker.currentOf({}),
+      {
+        clientVersion: vc.parseVersion(require(path.join(wbDir, 'constants.js')).DEFAULT_CLIENT_VERSION),
+        desktopVersion: vc.parseVersion(require(path.join(wbDir, 'constants.js')).DEFAULT_CLIENT_VERSION),
+        cliVersion: '',
+        ideVersion: ''
+      },
+      'currentOf 缺省回落 constants 硬编码'
+    )
+    // 传入 identity 覆盖时按其取值
+    const cur = checker.currentOf({ clientVersion: '9.9.9', cliVersion: '1.1.1', ideVersion: '2.2.2' })
+    assert.strictEqual(cur.clientVersion, '9.9.9')
+    assert.strictEqual(cur.cliVersion, '1.1.1')
+    assert.strictEqual(cur.ideVersion, '2.2.2')
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+
+  test('版本更新时同步派生 UA 串（不同步则 UA 不会变）', () => {
+    const identityMod = require(path.join(wbDir, 'identity.js'))
+    // 关键背景：identity 同时存「版本号字段」与「成品 UA 串」，而 headers.userAgent
+    // 优先用成品 UA 串。只更新版本号而不同步 UA 串，出站请求仍带旧版本号 → 功能形同虚设
+    const prev = { clientVersion: '5.5.4', desktopVersion: '5.5.6', cliVersion: '2.137.1', ideVersion: '4.12.0' }
+    const next = { clientVersion: '5.7.7', desktopVersion: '5.7.7', cliVersion: '2.164.0', ideVersion: '4.12.1' }
+
+    // 1) UA 串与旧版本一致（= 系统默认，用户没改过）→ 应重算为新版本
+    const before = identityMod.derivedUA(prev)
+    const r1 = identityMod.syncDerivedUA({ ...before, oauthUA: 'CLI/2.63.2 CodeBuddy/2.63.2' }, prev, next)
+    assert.strictEqual(r1.identity.workbuddyUA, 'WorkBuddy/5.7.7 WorkBuddy/5.7.7 CLI/2.164.0')
+    assert.strictEqual(r1.identity.codebuddyUA, 'CodeBuddyIDE/4.12.1 CodeBuddy/4.12.1')
+    assert.strictEqual(r1.identity.workbuddyBillingUA, 'WorkBuddy/5.7.7')
+    assert.strictEqual(r1.identity.desktopUA, 'WorkBuddy/5.7.7 WorkBuddy/5.7.7 CLI/2.164.0')
+    assert.deepStrictEqual(
+      Object.keys(r1.changed).sort(),
+      ['codebuddyBillingUA', 'codebuddyUA', 'desktopUA', 'v3ConfigUA', 'workbuddyBillingUA', 'workbuddyUA']
+    )
+    // oauthUA 不受版本驱动，必须原样保留
+    assert.strictEqual(r1.identity.oauthUA, 'CLI/2.63.2 CodeBuddy/2.63.2')
+
+    // 2) 用户手工定制过的 UA 串 → 不得被覆盖
+    const custom = { ...before, workbuddyUA: 'MyCustom/9.9.9 Agent' }
+    const r2 = identityMod.syncDerivedUA(custom, prev, next)
+    assert.strictEqual(r2.identity.workbuddyUA, 'MyCustom/9.9.9 Agent', '用户定制值必须保留')
+    assert.ok(!Object.keys(r2.changed).includes('workbuddyUA'))
+
+    // 3) UA 串为空 → 视为未配置，补上按新版本拼的值
+    const r3 = identityMod.syncDerivedUA({}, prev, next)
+    assert.strictEqual(r3.identity.workbuddyUA, 'WorkBuddy/5.7.7 WorkBuddy/5.7.7 CLI/2.164.0')
+
+    // 4) 无版本变化时不应产生任何改动
+    const r4 = identityMod.syncDerivedUA({ ...before }, prev, prev)
+    assert.deepStrictEqual(r4.changed, {})
+
+    // 5) derivedUA 缺省回落 constants 官方默认
+    const d = identityMod.derivedUA({})
+    assert.ok(d.workbuddyUA.startsWith('WorkBuddy/'), '缺省也能拼出 UA')
+  })
+
+  // ==================== 17. 区域隔离与档位快照（回归）====================
+  group('17. 区域隔离与档位快照（回归）')
+
+  test('pool.pickByUID 区域不符 → 拒绝（防跨区派发）', () => {
+    const pool = poolMod.createPool({})
+    pool.add({ ...makeAuth('cn-pick'), realm: 'cn' })
+    pool.add({ ...makeAuth('gl-pick'), realm: 'global' })
+
+    assert.ok(pool.pickByUID('cn-pick', '', null, 'cn'), '同区应可用')
+    assert.strictEqual(pool.pickByUID('cn-pick', '', null, 'global'), null, '国内号不得被国际请求选中')
+    assert.ok(pool.pickByUID('gl-pick', '', null, 'global'), '国际号对国际请求可用')
+    assert.strictEqual(pool.pickByUID('gl-pick', '', null, 'cn'), null, '国际号不得被国内请求选中')
+    // 不传区域 = 不限（兼容旧调用）
+    assert.ok(pool.pickByUID('cn-pick', '', null), '未指定区域时不受限')
+  })
+
+  test('runtime.realmOfAuth：未知账号回落 cn', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-realm-'))
+    runtimeMod.__resetForTest()
+    try {
+      runtimeMod.init({ dataDir: tmp })
+      const r = runtimeMod.getRuntime()
+      r.pool.add({ ...makeAuth('rc'), realm: 'cn' })
+      r.pool.add({ ...makeAuth('rg'), realm: 'global' })
+      assert.strictEqual(runtimeMod.realmOfAuth(r, 'rc'), 'cn')
+      assert.strictEqual(runtimeMod.realmOfAuth(r, 'rg'), 'global')
+      assert.strictEqual(runtimeMod.realmOfAuth(r, 'not-exist'), 'cn', '未知账号回落 cn')
+    } finally {
+      runtimeMod.__resetForTest()
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('runtime.effortsSnapshot：合并各区域档位槽（不再读空的 byRealm.all）', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-eff-'))
+    runtimeMod.__resetForTest()
+    try {
+      runtimeMod.init({ dataDir: tmp })
+      const r = runtimeMod.getRuntime()
+      // 模拟目录按区域分槽写入（listUpstreamModels 只写 cn / global，从不写 all）
+      r.models.byRealm = {
+        cn: { ts: Date.now(), list: [], efforts: { 'm-cn': ['low', 'high'] }, defaultEfforts: { 'm-cn': 'low' } },
+        global: { ts: Date.now(), list: [], efforts: { 'm-gl': ['high', 'max'] }, defaultEfforts: { 'm-gl': 'high' } }
+      }
+      const snap = runtimeMod.effortsSnapshot()
+      assert.deepStrictEqual(snap.efforts['m-cn'], ['low', 'high'], '国内槽位档位应被读到')
+      assert.deepStrictEqual(snap.efforts['m-gl'], ['high', 'max'], '国际槽位档位应被读到')
+      assert.strictEqual(snap.defaultEfforts['m-cn'], 'low')
+      assert.strictEqual(snap.defaultEfforts['m-gl'], 'high')
+    } finally {
+      runtimeMod.__resetForTest()
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('runtime.effortsSnapshot：空目录返回空表（不抛错）', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-eff2-'))
+    runtimeMod.__resetForTest()
+    try {
+      runtimeMod.init({ dataDir: tmp })
+      const snap = runtimeMod.effortsSnapshot()
+      assert.deepStrictEqual(snap, { efforts: {}, defaultEfforts: {} })
+    } finally {
+      runtimeMod.__resetForTest()
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  await testAsync('client 计费路径：国际版无 /v2 优先，404 回落 /v2（真实发起 HTTP）', async () => {
+    const http = require('http')
+    // 本机回环必须绕过代理，否则请求会走 http_proxy 而测不到真实路径
+    const savedNoProxy = process.env.NO_PROXY
+    process.env.NO_PROXY = '127.0.0.1,localhost'
+    process.env.no_proxy = '127.0.0.1,localhost'
+
+    const seen = []
+    const server = http.createServer((req, res) => {
+      req.on('data', () => {})
+      req.on('end', () => {
+        seen.push(req.url)
+        if (seen.length === 1) {
+          res.writeHead(404, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ code: 404, msg: 'not found' }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            code: 0,
+            data: {
+              Response: {
+                Data: {
+                  Accounts: [
+                    { PackageName: 'p1', CapacitySize: 100, CapacityRemain: 60, ExpiredTime: Date.now() + 86400000 }
+                  ]
+                }
+              }
+            }
+          })
+        )
+      })
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = server.address().port
+
+    try {
+      // billingBaseCN 显式覆盖域名（否则国际版会走 workbuddy.ai 真域名）；
+      // 区域仍由 auth.realm 决定，故路径候选走国际版序列
+      const glAuth = { ...makeAuth('gl-billing'), realm: 'global' }
+      const res = await clientMod.userResource(glAuth, { billingBaseCN: `http://127.0.0.1:${port}` })
+      assert.strictEqual(seen[0], '/billing/meter/get-user-resource', '国际版应优先无 /v2 路径')
+      assert.strictEqual(seen[1], '/v2/billing/meter/get-user-resource', '首个路径 404 应回落 /v2')
+      assert.strictEqual(res.ok, true, `余额查询应成功：${JSON.stringify(res)}`)
+      assert.strictEqual(res.credits, 60)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+      if (savedNoProxy === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = savedNoProxy
+      delete process.env.no_proxy
+    }
+  })
+
+  await testAsync('client 计费路径：国内版只走 /v2（不试无前缀路径）', async () => {
+    const http = require('http')
+    const savedNoProxy = process.env.NO_PROXY
+    process.env.NO_PROXY = '127.0.0.1,localhost'
+    process.env.no_proxy = '127.0.0.1,localhost'
+
+    const seen = []
+    const server = http.createServer((req, res) => {
+      req.on('data', () => {})
+      req.on('end', () => {
+        seen.push(req.url)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }))
+      })
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = server.address().port
+
+    try {
+      const cnAuth = { ...makeAuth('cn-billing'), realm: 'cn' }
+      await clientMod.userResource(cnAuth, { billingBaseCN: `http://127.0.0.1:${port}` })
+      assert.deepStrictEqual(seen, ['/v2/billing/meter/get-user-resource'], '国内版只应请求 /v2 形态')
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+      if (savedNoProxy === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = savedNoProxy
+      delete process.env.no_proxy
+    }
+  })
+
+  // ==================== 18. 请求数统计口径（回归）====================
+  group('18. 请求数统计口径一致性（server/token-stats）')
+
+  test('请求次数 = count + failed：汇总 / 按天明细 / 按小时明细三者一致', () => {
+    // token-stats 在 require 时按 AIROUTE_DATA_DIR 决定落盘位置，必须先改环境再加载
+    const prevDir = process.env.AIROUTE_DATA_DIR
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-stats-'))
+    process.env.AIROUTE_DATA_DIR = tmp
+    let ts = null
+    try {
+      const tsPath = path.join(__dirname, '..', 'server', 'token-stats.js')
+      delete require.cache[require.resolve(tsPath)]
+      ts = require(tsPath)
+
+      ts.recordTokens('p/m', { input: 10, output: 5, cacheRead: 2, cacheWrite: 1 })
+      ts.recordFailure('p/m')
+
+      const summary = ts.getRequestSummary()
+      assert.strictEqual(summary.todayRequests, 2, '汇总：今日请求数应为 成功 1 + 失败 1')
+      assert.strictEqual(summary.todayFailed, 1)
+
+      const byDays = ts.getStatsByDays(1)
+      assert.strictEqual(byDays.count, 1)
+      assert.strictEqual(byDays.failed, 1, '按天汇总必须带上 failed（否则与 /api/stats 口径不一致）')
+      assert.strictEqual(byDays.count + byDays.failed, summary.todayRequests, '按天口径应与汇总一致')
+
+      const dayDetail = ts.getRecentDaysDetail(1)[0]
+      assert.strictEqual(dayDetail.count, 1)
+      assert.strictEqual(dayDetail.failed, 1, '按天明细必须带上 failed')
+
+      const today = ts.getDayKey(Date.now())
+      const hourDetail = ts.getHourlyDetailForDay(today)
+      const hourFailed = hourDetail.reduce((sum, h) => sum + (h.failed || 0), 0)
+      const hourCount = hourDetail.reduce((sum, h) => sum + (h.count || 0), 0)
+      assert.strictEqual(hourFailed, 1, '按小时明细必须带上 failed')
+      assert.strictEqual(hourCount + hourFailed, summary.todayRequests, '按小时口径应与汇总一致')
+
+      // 失败请求不产生 token：总计只反映成功那次
+      assert.strictEqual(byDays.total, 18, 'total = 10+5+2+1，失败请求不累加 token')
+    } finally {
+      // 先落盘再删目录：模块注册了 process.on('exit', flush)，否则进程退出时会对已删除路径报错
+      try {
+        if (ts) {
+          ts.saveStats()
+          ts.flush()
+        }
+      } catch {
+        /* 忽略 */
+      }
+      if (prevDir === undefined) delete process.env.AIROUTE_DATA_DIR
+      else process.env.AIROUTE_DATA_DIR = prevDir
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  // ==================== 19. 客户端 IP 解析与 CIDR（iputil）====================
+  group('19. 客户端 IP 解析与 CIDR（iputil）')
+
+  test('normalizeIP：去 IPv6 映射前缀 / 去端口', () => {
+    const iputil = require(path.join(__dirname, '..', 'server', 'iputil.js'))
+    assert.strictEqual(iputil.normalizeIP('::ffff:1.2.3.4'), '1.2.3.4')
+    assert.strictEqual(iputil.normalizeIP('1.2.3.4:5678'), '1.2.3.4')
+    assert.strictEqual(iputil.normalizeIP('[::1]:3000'), '::1')
+    assert.strictEqual(iputil.normalizeIP(' 10.0.0.1 '), '10.0.0.1')
+    assert.strictEqual(iputil.normalizeIP(''), '')
+  })
+
+  test('inCidr：IPv4 / IPv6 按位匹配，非法输入不匹配', () => {
+    const { inCidr } = require(path.join(__dirname, '..', 'server', 'iputil.js'))
+    assert.strictEqual(inCidr('10.1.2.3', '10.0.0.0/8'), true)
+    assert.strictEqual(inCidr('11.0.0.1', '10.0.0.0/8'), false)
+    assert.strictEqual(inCidr('192.168.1.5', '192.168.0.0/16'), true)
+    assert.strictEqual(inCidr('192.169.1.5', '192.168.0.0/16'), false)
+    assert.strictEqual(inCidr('127.0.0.1', '127.0.0.0/8'), true)
+    // /0 匹配一切合法地址
+    assert.strictEqual(inCidr('8.8.8.8', '0.0.0.0/0'), true)
+    // IPv6
+    assert.strictEqual(inCidr('::1', '::1/128'), true)
+    assert.strictEqual(inCidr('::2', '::1/128'), false)
+    assert.strictEqual(inCidr('fe80::1', 'fe80::/10'), true)
+    assert.strictEqual(inCidr('2001:db8::1', 'fe80::/10'), false)
+    assert.strictEqual(inCidr('::ffff:10.0.0.1', '10.0.0.0/8'), true, '映射地址应归一到 IPv4 后匹配')
+    // 非法输入
+    assert.strictEqual(inCidr('not-an-ip', '10.0.0.0/8'), false)
+    assert.strictEqual(inCidr('10.0.0.1', '10.0.0.0'), false, '缺少前缀长度不算 CIDR')
+  })
+
+  test('extractClientIP：对端不可信时忽略转发头（防伪造）', () => {
+    const { extractClientIP } = require(path.join(__dirname, '..', 'server', 'iputil.js'))
+    // 公网直连：XFF 完全不可信
+    const evil = { socket: { remoteAddress: '8.8.8.8' }, headers: { 'x-forwarded-for': '1.2.3.4', 'x-real-ip': '5.6.7.8' } }
+    assert.strictEqual(extractClientIP(evil), '8.8.8.8', '不可信对端一律用对端地址')
+    // 可信代理（本机）：优先 X-Real-IP
+    const local = { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-real-ip': '1.2.3.4', 'x-forwarded-for': '9.9.9.9' } }
+    assert.strictEqual(extractClientIP(local), '1.2.3.4')
+    // 可信代理：无 X-Real-IP 时取 XFF 最右一跳
+    const chain = { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': '1.2.3.4, 10.0.0.9' } }
+    assert.strictEqual(extractClientIP(chain), '10.0.0.9')
+    // 都没有 → 对端地址
+    const bare = { socket: { remoteAddress: '192.168.1.7' }, headers: {} }
+    assert.strictEqual(extractClientIP(bare), '192.168.1.7')
+  })
+
+  // ==================== 20. 智能路由引擎（router-engine）====================
+  group('20. 智能路由引擎（router-engine）')
+
+  test('detectCondition：自定义规则最高优先，且只匹配最后一条用户消息', () => {
+    const prevDir = process.env.AIROUTE_DATA_DIR
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eng-'))
+    process.env.AIROUTE_DATA_DIR = tmp
+    try {
+      const engPath = path.join(__dirname, '..', 'server', 'router-engine.js')
+      delete require.cache[require.resolve(engPath)]
+      const eng = require(engPath)
+      eng.saveRules({
+        rules: [{ condition: 'default', target: 'p/def' }],
+        customRules: [{ keyword: '123', target: 'p/num' }]
+      })
+
+      // 最后一条用户消息命中关键词 → custom
+      const body = JSON.stringify({
+        messages: [
+          { role: 'user', content: '历史里的 123' },
+          { role: 'assistant', content: 'ok' },
+          { role: 'user', content: '这次的 123 工单' }
+        ]
+      })
+      assert.strictEqual(eng.detectCondition(JSON.parse(body)), 'custom:123')
+      assert.strictEqual(eng.resolveModel(JSON.parse(body)), 'p/num')
+
+      // 关键词不在最后一条用户消息里 → 不命中（不受历史影响）
+      const body2 = JSON.stringify({
+        messages: [
+          { role: 'user', content: '123' },
+          { role: 'assistant', content: 'ok' },
+          { role: 'user', content: '无关提问' }
+        ]
+      })
+      assert.notStrictEqual(eng.detectCondition(JSON.parse(body2)), 'custom:123')
+    } finally {
+      if (prevDir === undefined) delete process.env.AIROUTE_DATA_DIR
+      else process.env.AIROUTE_DATA_DIR = prevDir
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('detectCondition：代码 / 长上下文 / 语种兜底 / default 的判定顺序', () => {
+    const prevDir = process.env.AIROUTE_DATA_DIR
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eng2-'))
+    process.env.AIROUTE_DATA_DIR = tmp
+    try {
+      const engPath = path.join(__dirname, '..', 'server', 'router-engine.js')
+      delete require.cache[require.resolve(engPath)]
+      const eng = require(engPath)
+      eng.saveRules({ rules: [], customRules: [] })
+
+      const cond = content => eng.detectCondition({ messages: [{ role: 'user', content }] })
+
+      assert.strictEqual(cond('```js\nconst a = 1\n```'), 'contains_code')
+      assert.strictEqual(cond('请解释一下 async 函数的用法'), 'contains_code', '含代码关键字即命中代码')
+      assert.strictEqual(cond('翻译成英文'), 'translate', '翻译优先于中文兜底')
+      assert.strictEqual(cond('帮我写单元测试'), 'write_test')
+      assert.strictEqual(cond('总结一下这段内容'), 'summarize')
+      assert.strictEqual(cond('用英语回答'), 'lang_en_request', '语种意图优先于 lang_zh')
+      assert.strictEqual(cond('今天天气不错'), 'lang_zh')
+      assert.strictEqual(cond('hello there'), 'default')
+      // 长上下文：中文长文应命中 long_context 而非 lang_zh
+      assert.strictEqual(cond('啊'.repeat(13000)), 'long_context')
+    } finally {
+      if (prevDir === undefined) delete process.env.AIROUTE_DATA_DIR
+      else process.env.AIROUTE_DATA_DIR = prevDir
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('resolveModel：未命中规则时回落 default 规则目标，无 default 返回 null', () => {
+    const prevDir = process.env.AIROUTE_DATA_DIR
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eng3-'))
+    process.env.AIROUTE_DATA_DIR = tmp
+    try {
+      const engPath = path.join(__dirname, '..', 'server', 'router-engine.js')
+      delete require.cache[require.resolve(engPath)]
+      const eng = require(engPath)
+
+      const body = { messages: [{ role: 'user', content: 'hello there' }] }
+      eng.saveRules({ rules: [{ condition: 'default', target: 'p/fallback' }], customRules: [] })
+      assert.strictEqual(eng.resolveModel(body), 'p/fallback')
+
+      eng.saveRules({ rules: [{ condition: 'contains_code', target: 'p/code' }], customRules: [] })
+      assert.strictEqual(eng.resolveModel(body), null, '无 default 规则时应返回 null（由调用方兜底到首个可用模型）')
+      assert.strictEqual(eng.resolveModel({ messages: [{ role: 'user', content: '```x\nlet y=1\n```' }] }), 'p/code')
+    } finally {
+      if (prevDir === undefined) delete process.env.AIROUTE_DATA_DIR
+      else process.env.AIROUTE_DATA_DIR = prevDir
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
   })
 
   // ==================== 汇总 ====================

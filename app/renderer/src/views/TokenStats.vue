@@ -86,7 +86,7 @@
     <div class="section">
       <h2 class="section-title">
         {{ chartTitle }}
-        <span class="title-meta">共 {{ formatNumber(currentStats.count) }} 次请求</span>
+        <span class="title-meta">共 {{ formatNumber(reqCount(currentStats)) }} 次请求</span>
       </h2>
       <div class="card chart-container" @mouseleave="hideTooltip">
         <div v-if="chartData.length > 0" class="line-chart">
@@ -182,9 +182,9 @@
             
             <!-- X轴标签 -->
             <text
-              v-for="(point, index) in filteredLabels"
-              :key="'label-' + index"
-              :x="getX(index)"
+              v-for="point in filteredLabels"
+              :key="'label-' + point.index"
+              :x="getX(point.index)"
               :y="svgHeight - 10"
               text-anchor="middle"
               font-size="11"
@@ -218,7 +218,7 @@
           <tbody>
             <tr v-for="(stats, model) in modelStats" :key="model">
               <td>{{ model }}</td>
-              <td>{{ formatNumber(stats.count) }}</td>
+              <td>{{ formatNumber(reqCount(stats)) }}</td>
               <td class="text-purple font-bold">{{ formatNumber(stats.total) }}</td>
               <td class="text-purple">{{ formatNumber(stats.cacheRead) }}</td>
               <td class="text-orange">{{ formatNumber(stats.cacheWrite) }}</td>
@@ -278,6 +278,7 @@ const tooltip = ref({
 const currentStats = computed(() => periodData.value.summary || {})
 
 // 图表数据
+// 请求次数口径 = count（有 token 的请求）+ failed（失败请求），与状态面板 /api/stats 一致
 const chartData = computed(() => {
   if (selectedPeriod.value === 'today') {
     // 今天：按小时显示
@@ -288,7 +289,8 @@ const chartData = computed(() => {
       cacheRead: d.cacheRead,
       cacheWrite: d.cacheWrite,
       output: d.output,
-      count: d.count || 0
+      count: d.count || 0,
+      failed: d.failed || 0
     })) || []
   } else {
     // 多天：按天显示
@@ -299,10 +301,16 @@ const chartData = computed(() => {
       cacheRead: d.cacheRead,
       cacheWrite: d.cacheWrite,
       output: d.output,
-      count: d.count || 0
+      count: d.count || 0,
+      failed: d.failed || 0
     })) || []
   }
 })
+
+// 请求次数（含失败）：与状态面板「今日请求」同口径
+function reqCount(stats) {
+  return (Number(stats && stats.count) || 0) + (Number(stats && stats.failed) || 0)
+}
 
 // 模型统计数据
 const modelStats = computed(() => modelStatsData.value.byModel || {})
@@ -333,14 +341,15 @@ const maxValue = computed(() => {
   return Math.max(...chartData.value.map(d => d.total), 1)
 })
 
-// 过滤标签（避免太密集）
+// 过滤标签（避免太密集）：保留原始下标——坐标必须按原始下标算，
+// 否则标签会被按「过滤后的序号」定位，全部挤到横轴左侧（与数据点错位）
 const filteredLabels = computed(() => {
-  const data = chartData.value
-  if (data.length <= 10) return data
-  
+  const points = chartData.value.map((point, index) => ({ label: point.label, index }))
+  if (points.length <= 10) return points
+
   // 如果数据点太多，每隔几个显示一个
-  const step = Math.ceil(data.length / 10)
-  return data.filter((_, index) => index % step === 0)
+  const step = Math.ceil(points.length / 10)
+  return points.filter(p => p.index % step === 0)
 })
 
 // 计算折线路径
@@ -461,7 +470,7 @@ function updateTooltipPosition(event, lineChartEl, dataIndex) {
     cacheRead: point.cacheRead || 0,
     cacheWrite: point.cacheWrite || 0,
     output: point.output || 0,
-    count: point.count || 0,
+    count: (point.count || 0) + (point.failed || 0),
     index: dataIndex
   }
 }

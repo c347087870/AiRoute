@@ -7,10 +7,20 @@ const CONFIG_PATH = paths.getConfigPath()
 const REF_SEP = '/'
 
 // Provider 允许写入的字段白名单，防止任意字段落盘
-const PROVIDER_TEXT_FIELDS = ['displayName', 'baseURL', 'openaiURL', 'type']
+const PROVIDER_TEXT_FIELDS = ['displayName', 'baseURL', 'openaiURL', 'type', 'region']
 
 // Provider 类型白名单：workbuddy 走账号池转发，其余为空（通用端点）
 const PROVIDER_TYPES = ['workbuddy']
+
+// 区域白名单：cn（国内版，默认）/ global（国际版）
+// workbuddy 源按区域区分：每个区域最多一个源，各自只调度本区域的账号
+const PROVIDER_REGIONS = ['cn', 'global']
+
+// 归一化区域：非法/缺失一律回落 cn（旧配置无该字段 → 国内版）
+function normalizeRegion(v) {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return PROVIDER_REGIONS.includes(s) ? s : 'cn'
+}
 
 // 自动重建 WorkBuddy 源时使用的默认 Provider ID（用户手动创建时 ID 可自定义）
 const WORKBUDDY_PROVIDER_ID = 'workbuddy'
@@ -66,7 +76,23 @@ function toProviderView(raw) {
     : (typeof raw.model === 'string' && raw.model.trim() ? [{ id: raw.model }] : [])
 
   view.models = rawModels.map(toModelView).filter(Boolean)
+  // 区域：workbuddy 源缺失时回落 cn（旧配置 = 国内版）
+  view.region = normalizeRegion(raw.region)
   return view
+}
+
+// 取 workbuddy Provider 的区域（非 workbuddy 或缺失 → cn）
+function providerRegion(provider) {
+  return normalizeRegion(provider && provider.region)
+}
+
+// 解析引用所属 Provider 的区域（路由时据此把请求限定到该区域的账号池）
+function regionOfRef(config, ref) {
+  const parsed = parseRef(ref)
+  if (!parsed) return 'cn'
+  const raw = config[parsed.providerName]
+  if (!raw) return 'cn'
+  return providerRegion(raw)
 }
 
 // 解析引用字符串："glm/glm-4.6" → { providerName: 'glm', modelId: 'glm-4.6' }
@@ -176,6 +202,8 @@ function sanitizeProviderInput(input) {
   }
   // type 只接受白名单值，非法值丢弃（不写入落盘）
   if (out.type && !PROVIDER_TYPES.includes(out.type)) delete out.type
+  // region 归一化：仅接受 cn / global，其余回落 cn
+  if (typeof source.region === 'string') out.region = normalizeRegion(source.region)
   // apiKey 为空表示保留原值，交由调用方处理
   if (typeof source.apiKey === 'string' && source.apiKey.trim()) {
     out.apiKey = source.apiKey.trim()
@@ -191,13 +219,32 @@ function isWorkbuddyProvider(provider) {
   return !!provider && provider.type === 'workbuddy'
 }
 
-// 返回配置中 WorkBuddy 源的名称列表（设计上只允许一个）
+// 返回配置中 WorkBuddy 源的名称列表
 function listWorkbuddyProviders(config) {
   const names = []
   for (const [name, raw] of Object.entries(config || {})) {
     if (isWorkbuddyProvider(raw)) names.push(name)
   }
   return names
+}
+
+// 按区域列出 WorkBuddy 源名称（每个区域最多一个）
+function listWorkbuddyProvidersByRegion(config) {
+  const out = { cn: [], global: [] }
+  for (const [name, raw] of Object.entries(config || {})) {
+    if (!isWorkbuddyProvider(raw)) continue
+    out[providerRegion(raw)].push(name)
+  }
+  return out
+}
+
+// 取指定区域的 WorkBuddy 源名称（不存在返回 ''）
+function workbuddyProviderNameForRegion(config, region) {
+  const want = normalizeRegion(region)
+  for (const [name, raw] of Object.entries(config || {})) {
+    if (isWorkbuddyProvider(raw) && providerRegion(raw) === want) return name
+  }
+  return ''
 }
 
 // 模型列表整体替换，maxContext / maxOutput 未填写时不写入字段
@@ -244,6 +291,12 @@ module.exports = {
   sanitizeModels,
   isWorkbuddyProvider,
   listWorkbuddyProviders,
+  listWorkbuddyProvidersByRegion,
+  workbuddyProviderNameForRegion,
+  providerRegion,
+  regionOfRef,
+  normalizeRegion,
+  PROVIDER_REGIONS,
   WORKBUDDY_PROVIDER_ID,
   toSafeConfig,
   toPositiveIntOrNull

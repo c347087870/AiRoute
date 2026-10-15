@@ -3,6 +3,7 @@
 const axios = require('axios')
 const http = require('http')
 const https = require('https')
+const { StringDecoder } = require('string_decoder')
 const C = require('./constants')
 const headersMod = require('./headers')
 const errMod = require('./errors')
@@ -268,14 +269,18 @@ function readAll(stream, limit) {
   return new Promise(resolve => {
     let buf = ''
     let done = false
+    // UTF-8 增量解码器：TCP 分块边界可能落在多字节字符中间，逐块 toString()
+    // 会在字符中部产生 U+FFFD（响应正文出现乱码）
+    const decoder = new StringDecoder('utf8')
     const finish = () => {
       if (done) return
       done = true
+      buf += decoder.end() // 冲刷未完成的最后一个多字节字符
       resolve(buf)
     }
     stream.on('data', chunk => {
       if (buf.length >= limit) return
-      buf += chunk.toString()
+      buf += decoder.write(chunk)
     })
     stream.on('end', finish)
     stream.on('error', finish)
@@ -285,18 +290,31 @@ function readAll(stream, limit) {
 
 // ===== 计费域（签到 / 余额）=====
 
-// 每日签到：返回 { ok, message, kind }
-async function dailyCheckin(auth, opts = {}) {
+// 计费域 POST（按区域候选路径依次尝试；仅 404 回落下一候选，其余状态原样返回）。
+// 国内版候选只有 /v2 形态；国际版反过来——无 /v2 优先、404 时回落 /v2。
+// 路径候选由 headers.js 的 checkinPathsOf / billingMeterPathsOf 给出（按账号区域判定）
+async function sendBillingPaths(auth, opts, paths, data) {
   const billingBase = headersMod.billingBaseOf(auth, opts)
-  let res
-  try {
-    res = await send({
+  const candidates = Array.isArray(paths) && paths.length ? paths : [C.BILLING_METER_PATH_V2]
+  let last = null
+  for (const p of candidates) {
+    last = await send({
       method: 'POST',
-      url: `${billingBase}${C.DAILY_CHECKIN_PATH_V2}`,
+      url: `${billingBase}${p}`,
       headers: headersMod.billingHeaders(auth, opts),
-      data: {},
+      data,
       timeoutMs: C.TIMEOUT_DEFAULTS.timeoutMs
     })
+    if (last.status !== 404) return last
+  }
+  return last
+}
+
+// 每日签到：返回 { ok, message, kind }
+async function dailyCheckin(auth, opts = {}) {
+  let res
+  try {
+    res = await sendBillingPaths(auth, opts, headersMod.checkinPathsOf(auth, opts), {})
   } catch (err) {
     return { ok: false, message: `请求失败: ${err.message}`, kind: errMod.ERR_KIND.CLIENT }
   }
@@ -348,16 +366,9 @@ function notifyCredits(uid, credits) {
 
 // 余额查询：返回 { ok, credits, total, expiring, earliestExpiry, earliestRemaining, message }
 async function userResource(auth, opts = {}) {
-  const billingBase = headersMod.billingBaseOf(auth, opts)
   let res
   try {
-    res = await send({
-      method: 'POST',
-      url: `${billingBase}${C.BILLING_METER_PATH_V2}`,
-      headers: headersMod.billingHeaders(auth, opts),
-      data: buildResourceQuery(),
-      timeoutMs: C.TIMEOUT_DEFAULTS.timeoutMs
-    })
+    res = await sendBillingPaths(auth, opts, headersMod.billingMeterPathsOf(auth, opts), buildResourceQuery())
   } catch (err) {
     return { ok: false, message: `请求失败: ${err.message}` }
   }
@@ -381,16 +392,9 @@ async function userResource(auth, opts = {}) {
 
 // 积分批次明细查询：返回规范化后的批次列表（用于「积分构成」视图）
 async function resourcePackages(auth, opts = {}) {
-  const billingBase = headersMod.billingBaseOf(auth, opts)
   let res
   try {
-    res = await send({
-      method: 'POST',
-      url: `${billingBase}${C.BILLING_METER_PATH_V2}`,
-      headers: headersMod.billingHeaders(auth, opts),
-      data: buildResourceQuery(),
-      timeoutMs: C.TIMEOUT_DEFAULTS.timeoutMs
-    })
+    res = await sendBillingPaths(auth, opts, headersMod.billingMeterPathsOf(auth, opts), buildResourceQuery())
   } catch (err) {
     return { ok: false, message: `请求失败: ${err.message}` }
   }
@@ -788,8 +792,28 @@ function mergeModelList(primary, secondary) {
 }
 
 // 拉取模型目录：/v3/config 与企业端点两路并发，v3 优先、企业端点补缺
+// 国际版（realm=global）特殊处理：
+//   1. 企业端点走 /v2 优先（/console 兜底）——实测 /v2/enterprises/personal/models 200 且模型更全
+//   2. /v3/config 需要**并发三种 UA**：桌面端 / IDE / CLI 在不同 UA 下下发不同的模型集
+//      （2026-10 实测：桌面端 29 条含 gpt-6-sol/luna、grok-4.7；IDE 13 条独有 o4-mini、
+//       enhance-1.0、auto-chat；CLI 22 条独有 deepseek 系、gpt-6-astra——只发一种 UA 会漏模型，
+//       客户端里能看到但目录里没有）
+//   3. 合并口径：桌面端 UA 为主路（字段最全），IDE/CLI 只补主路缺失的模型 id
 async function fetchModels(auth, opts = {}) {
+  const global = headersMod.isGlobalAccount(auth, opts)
   const chatBase = headersMod.chatBaseOf(auth, opts)
+
+  if (global) {
+    const [v3, ent] = await Promise.all([
+      fetchV3ConfigModelsMultiUA(chatBase, auth, opts).catch(() => []),
+      fetchEnterpriseModels(chatBase, auth, C.MODELS_ENTERPRISE_PATH_GLOBAL, opts)
+        .catch(() => fetchEnterpriseModels(chatBase, auth, C.MODELS_ENTERPRISE_PATH, opts).catch(() => []))
+    ])
+    // v3（三 UA 并集）为主，企业端点补缺
+    const merged = mergeModelList(v3, ent)
+    if (!merged.length) throw new Error('模型目录拉取失败（国际版）')
+    return merged
+  }
 
   const [v3, ent] = await Promise.all([
     fetchV3ConfigModels(chatBase, auth, opts).catch(() => []),
@@ -797,6 +821,54 @@ async function fetchModels(auth, opts = {}) {
   ])
   const merged = mergeModelList(v3, ent)
   if (!merged.length) throw new Error('模型目录拉取失败')
+  return merged
+}
+
+// 国际版 /v3/config 三路 UA 并发探测并集。
+// 三路 UA（与参考实现口径一致）：
+//   桌面端 UA = 本账号按区域生成的 chat UA（主路，字段最全）
+//   IDE UA    = CodeBuddyIDE/<ideVersion> CodeBuddy/<ideVersion>（独有 o4-mini / enhance-1.0 / auto-chat）
+//   CLI UA    = CLI/<cliVersion> CodeBuddy/<cliVersion>（独有 deepseek 系 / gpt-6-astra）
+// 合并：主路（桌面端）条目字段权威，其余两路只补主路缺失的 id；
+// 单路失败降级为其余路 + warn 日志（由调用方记），全路失败才抛错。
+async function fetchV3ConfigModelsMultiUA(chatBase, auth, opts = {}) {
+  const identity = opts.identity || {}
+  const clientVersion = identity.clientVersion || C.DEFAULT_CLIENT_VERSION
+  const ideVersion = identity.ideVersion || C.DEFAULT_IDE_VERSION
+  const cliVersion = identity.cliVersion || C.DEFAULT_CLI_VERSION
+
+  const desktopUA = headersMod.userAgent(auth, { ...opts, realm: 'global' })
+  const ideUA = `CodeBuddyIDE/${ideVersion} CodeBuddy/${ideVersion}`
+  const cliUA = `CLI/${cliVersion} CodeBuddy/${cliVersion}`
+
+  const routes = [
+    { label: 'desktop', ua: desktopUA },
+    { label: 'ide', ua: ideUA },
+    { label: 'cli', ua: cliUA }
+  ]
+
+  const results = await Promise.all(
+    routes.map(r =>
+      fetchV3ConfigModels(chatBase, auth, { ...opts, __uaOverride: r.ua })
+        .then(list => ({ label: r.label, list, err: null }))
+        .catch(err => ({ label: r.label, list: [], err }))
+    )
+  )
+
+  const failed = results.filter(x => x.err)
+  const okLists = results.filter(x => !x.err && x.list.length)
+  if (!okLists.length) {
+    // 全路失败：抛首路错误（调用方记日志）
+    const first = results.find(x => x.err)
+    throw first ? first.err : new Error('v3/config 三路 UA 探测全部失败')
+  }
+
+  // 主路 = 桌面端 UA（成功时）；否则取第一个成功的路
+  const primary = results.find(x => x.label === 'desktop' && !x.err && x.list.length) || okLists[0]
+  // 次路只补主路缺失的 id
+  const others = okLists.filter(x => x !== primary)
+  let merged = primary.list
+  for (const o of others) merged = mergeModelList(merged, o.list)
   return merged
 }
 
@@ -840,11 +912,13 @@ async function fetchEnterpriseModels(chatBase, auth, pathName, opts = {}) {
 }
 
 // /v3/config 模型目录解析（含试用模型继承与促销信息）
+// opts.__uaOverride：国际版三路 UA 探测时由调用方注入，覆盖默认 UA
 async function fetchV3ConfigModels(chatBase, auth, opts = {}) {
+  const ua = opts.__uaOverride || ''
   const res = await send({
     method: 'GET',
     url: `${chatBase}${C.V3_CONFIG_PATH}`,
-    headers: headersMod.v3ConfigHeaders(auth, opts),
+    headers: headersMod.v3ConfigHeaders(auth, opts, ua),
     timeoutMs: C.TIMEOUT_DEFAULTS.timeoutMs
   })
   if (res.status >= 400) throw new Error(`v3 config http ${res.status}`)
@@ -967,6 +1041,8 @@ module.exports = {
   desktopReport,
   webReport,
   fetchModels,
+  fetchV3ConfigModels,
+  fetchEnterpriseModels,
   mergeModelList,
   mapModelEntry,
   normalizeModelRate,

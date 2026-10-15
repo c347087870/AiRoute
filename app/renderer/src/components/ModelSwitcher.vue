@@ -1,7 +1,7 @@
 <template>
   <div class="switcher">
     <div class="current-label">当前模型</div>
-    <select v-model="currentModel" @change="handleSwitch($event.target.value)" class="model-select">
+    <select :value="currentModel" @change="handleSwitch($event)" class="model-select">
       <option :value="AUTO_MODEL">Auto (智能路由)</option>
       <optgroup v-for="group in modelGroups" :key="group.label" :label="group.label">
         <option v-for="option in group.options" :key="option.value" :value="option.value">
@@ -31,12 +31,17 @@ const hasCurrentOption = computed(() => {
   return modelGroups.value.some(group => group.options.some(option => option.value === currentModel.value))
 })
 
-// 切换模型：失败时回滚下拉选中项并提示
-async function handleSwitch(nextRef) {
+// 切换模型：失败时把下拉框回滚到旧值并提示
+// 刻意不用 v-model：v-model 的赋值监听先于 @change 执行，会导致这里读到的
+// currentModel 已经是新值，「回滚」变成空操作（下拉显示与服务端状态不一致）
+async function handleSwitch(event) {
+  const el = event.target
+  const nextRef = el.value
   const previous = currentModel.value
+  if (nextRef === previous) return
   const ok = await switchModel(nextRef)
   if (!ok) {
-    currentModel.value = previous
+    el.value = previous // 回滚下拉显示（currentModel 在失败路径未被改动）
     showToast('切换模型失败，请检查服务状态后重试', 'error')
   }
 }

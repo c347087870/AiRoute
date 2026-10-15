@@ -38,11 +38,31 @@ export function resolveRefLabel(providers, ref) {
   if (!parsed) return ref
   if (!provider) return ref
 
-  const providerLabel = provider.displayName || parsed.providerName
+  const providerLabel = providerLabelOf(providers, parsed.providerName)
   const model = findModel(providers, ref)
   if (!model) return parsed.modelId ? `${providerLabel} / ${parsed.modelId}` : providerLabel
 
   return `${providerLabel} / ${model.displayName || model.id}`
+}
+
+// Provider 的展示名（附带区域后缀）。
+// WorkBuddy 国内版与国际版是两个独立源，用户可能给它们起同样的显示名
+// （甚至都用默认的「WorkBuddy 账号池」），此时下拉/托盘会出现两个无法区分的分组。
+// 这里给国际版补一个区域后缀；国内版是默认区域不加（避免噪音）。
+// 显示名里已含区域字样时不重复追加。
+export function providerRegionSuffix(provider) {
+  if (!provider || provider.type !== 'workbuddy') return ''
+  if (provider.region !== 'global') return ''
+  const name = String(provider.displayName || '')
+  if (name.includes('国际版') || /global/i.test(name)) return ''
+  return '（国际版）'
+}
+
+// Provider 展示名 = displayName（或 name）+ 区域后缀
+export function providerLabelOf(providers, name) {
+  const provider = providers?.[name]
+  const base = (provider && provider.displayName) || name
+  return `${base}${providerRegionSuffix(provider)}`
 }
 
 // 按 Provider 分组的模型选项，供 select 的 optgroup 使用
@@ -53,7 +73,7 @@ export function buildModelGroups(providers) {
     const models = provider.models || []
     if (!models.length) continue
     groups.push({
-      label: provider.displayName || name,
+      label: providerLabelOf(providers, name),
       options: models.map(model => ({
         value: `${name}/${model.id}`,
         label: model.displayName || model.id,
@@ -75,7 +95,7 @@ export function listModels(providers) {
       list.push({
         ref: `${name}/${model.id}`,
         providerName: name,
-        providerLabel: provider.displayName || name,
+        providerLabel: providerLabelOf(providers, name),
         model
       })
     }

@@ -6,11 +6,11 @@
         <button class="btn-ghost" @click="openAddModal('')">+ 通用 Provider</button>
         <button
           class="btn-primary"
-          :disabled="hasWorkbuddyProvider"
-          :title="hasWorkbuddyProvider ? 'WorkBuddy 源只能有一个（账号池中的全部账号自动轮转）' : ''"
+          :disabled="!workbuddyAddRegion"
+          :title="workbuddyAddHint"
           @click="openAddModal('workbuddy')"
         >
-          {{ hasWorkbuddyProvider ? '已有 WorkBuddy 源' : '+ 添加 WorkBuddy 账号池' }}
+          {{ workbuddyAddLabel }}
         </button>
       </div>
     </div>
@@ -31,6 +31,11 @@
             <span class="row-name">{{ provider.displayName || name }}</span>
             <span class="row-id">{{ name }}</span>
             <span v-if="provider.type === 'workbuddy'" class="badge-type">账号池</span>
+            <span
+              v-if="provider.type === 'workbuddy'"
+              class="wb-realm-tag"
+              :class="provider.region === 'global' ? 'global' : 'cn'"
+            >{{ provider.region === 'global' ? '国际版' : '国内版' }}</span>
             <span v-if="isCurrentProvider(name)" class="badge-current">当前</span>
             <span class="row-count">{{ provider.models?.length || 0 }} 个模型</span>
           </div>
@@ -39,7 +44,9 @@
             <template v-if="provider.type === 'workbuddy'">
               <span class="meta-item">
                 <span class="meta-label">类型</span>
-                <span class="meta-value">WorkBuddy 账号池（OAuth 登录 / 自动轮转）</span>
+                <span class="meta-value">
+                  WorkBuddy 账号池（{{ provider.region === 'global' ? '国际版 workbuddy.ai' : '国内版 codebuddy.cn' }}）
+                </span>
               </span>
             </template>
             <template v-else>
@@ -127,23 +134,53 @@
           <!-- 类型由新增入口决定，编辑时只读展示 -->
           <div v-if="editingName" class="form-type-line">
             类型：{{ form.type === 'workbuddy' ? 'WorkBuddy 账号池' : '通用端点（OpenAI / Anthropic）' }}
+            <span v-if="form.type === 'workbuddy'" class="wb-realm-tag" :class="form.region === 'global' ? 'global' : 'cn'">
+              {{ form.region === 'global' ? '国际版' : '国内版' }}
+            </span>
+          </div>
+
+          <!-- WorkBuddy 类型：先选区域（国际版与国内版是两个独立的源与账号池） -->
+          <div v-if="form.type === 'workbuddy' && !editingName" class="wb-realm-pick">
+            <div class="wb-realm-pick-title">选择区域</div>
+            <div class="wb-add-realm-opts">
+              <label class="wb-realm-opt" :class="{ active: form.region !== 'global' }">
+                <input type="radio" value="cn" v-model="form.region" />
+                <span class="wb-realm-name">国内版</span>
+                <span class="wb-realm-host">copilot.tencent.com</span>
+              </label>
+              <label class="wb-realm-opt" :class="{ active: form.region === 'global' }">
+                <input type="radio" value="global" v-model="form.region" />
+                <span class="wb-realm-name">国际版</span>
+                <span class="wb-realm-host">www.workbuddy.ai</span>
+              </label>
+            </div>
+            <div class="wb-realm-pick-note">
+              国内版与国际版是两个独立的源，各自只调度本区域的账号，互不混用。
+              国际版无签到与成长任务能力。
+            </div>
           </div>
 
           <!-- WorkBuddy 类型：账号池中的全部账号自动轮转，这里只读展示 -->
           <div v-if="form.type === 'workbuddy'" class="wb-entry">
             <div class="wb-entry-header">
-              <span class="wb-entry-title">账号（{{ wbAccounts.length }} 个，自动轮转）</span>
+              <span class="wb-entry-title">
+                {{ form.region === 'global' ? '国际版' : '国内版' }}账号（{{ wbAccountsForForm.length }} 个，自动轮转）
+              </span>
               <router-link to="/workbuddy" class="wb-entry-link">前往账号池页面管理 →</router-link>
             </div>
             <div class="wb-entry-hint">
-              账号池中的全部账号都参与本源的请求轮转（自动换号、限流冷却、会话粘性），无需在此选择。
+              该区域的账号都参与本源的请求轮转（自动换号、限流冷却、会话粘性），无需在此选择。
+              {{ form.region === 'global' ? '' : '其他区域的账号不会被派发到本源的请求。' }}
             </div>
-            <div v-if="!wbAccounts.length" class="wb-entry-empty">
-              账号池还没有账号，请先到「账号池」页面通过 OAuth 添加账号。
+            <div v-if="!wbAccountsForForm.length" class="wb-entry-empty">
+              账号池还没有{{ form.region === 'global' ? '国际版' : '国内版' }}账号，请先到「账号池」页面通过 OAuth 添加。
             </div>
             <div v-else class="wb-account-list">
-              <div v-for="acct in wbAccounts" :key="acct.uid" class="wb-account-item">
+              <div v-for="acct in wbAccountsForForm" :key="acct.uid" class="wb-account-item">
                 <span class="wb-account-name">{{ acct.nickname || acct.uid.slice(0, 12) }}</span>
+                <span class="wb-realm-tag" :class="acct.realm === 'global' ? 'global' : 'cn'">
+                  {{ acct.realm === 'global' ? '国际版' : '国内版' }}
+                </span>
                 <span class="wb-account-state" :class="accountStateClass(acct)">{{ accountStateLabel(acct) }}</span>
               </div>
             </div>
@@ -265,7 +302,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useModel } from '../composables/useModel.js'
 import { showToast } from '../composables/useToast.js'
 import {
@@ -296,13 +333,49 @@ const wbModelList = ref([]) // WorkBuddy 表单的模型清单（由启用清单
 
 const providerCount = computed(() => Object.keys(providers.value).length)
 
-// 是否已存在 WorkBuddy 源（全局唯一，已存在时禁用新增入口）
-const hasWorkbuddyProvider = computed(() => Object.values(providers.value).some(p => p.type === 'workbuddy'))
+// WorkBuddy 源按区域唯一：每个区域最多一个源，两个区域可共存
+const wbProvidersByRegion = computed(() => {
+  const out = { cn: [], global: [] }
+  for (const [name, p] of Object.entries(providers.value)) {
+    if (p.type !== 'workbuddy') continue
+    out[p.region === 'global' ? 'global' : 'cn'].push(name)
+  }
+  return out
+})
+// 下一个可添加的 WorkBuddy 区域：优先补尚未建源的那个（两个区域都已建源返回 ''）
+// 新增入口的禁用态与文案都以它为准——按区域唯一，而非旧的「全局唯一」
+const workbuddyAddRegion = computed(() => {
+  const taken = wbProvidersByRegion.value
+  if (!taken.cn.length) return 'cn'
+  if (!taken.global.length) return 'global'
+  return ''
+})
+
+// 新增入口文案（带目标区域，避免用户以为还能再加一个同区域源）
+const workbuddyAddLabel = computed(() => {
+  if (workbuddyAddRegion.value === 'global') return '+ 添加 WorkBuddy 账号池（国际版）'
+  if (workbuddyAddRegion.value === 'cn') return '+ 添加 WorkBuddy 账号池（国内版）'
+  return '两个区域均已有源'
+})
+
+// 新增入口提示
+const workbuddyAddHint = computed(() => {
+  if (workbuddyAddRegion.value) {
+    return `WorkBuddy 源按区域唯一：国内版与国际版各可添加一个（将添加${workbuddyAddRegion.value === 'global' ? '国际版' : '国内版'}）`
+  }
+  return '国内版与国际版的 WorkBuddy 源都已存在，删除对应区域的源后才能重新添加'
+})
+
+// 表单区域对应的账号（只展示本区域账号，避免误以为跨区共用）
+const wbAccountsForForm = computed(() =>
+  wbAccounts.value.filter(a => (a.realm === 'global' ? 'global' : 'cn') === (form.value.region === 'global' ? 'global' : 'cn'))
+)
 
 // 弹窗标题：编辑态显示「编辑 Provider」，新增态按入口类型区分
 const modalTitle = computed(() => {
   if (editingName.value) return '编辑 Provider'
-  return form.value.type === 'workbuddy' ? '添加 WorkBuddy 账号池' : '新增通用 Provider'
+  if (form.value.type !== 'workbuddy') return '新增通用 Provider'
+  return form.value.region === 'global' ? '添加 WorkBuddy 账号池（国际版）' : '添加 WorkBuddy 账号池（国内版）'
 })
 
 // 生成一份空白表单
@@ -311,6 +384,7 @@ function emptyForm() {
     name: '', // Provider ID
     displayName: '', // 显示名称
     type: '', // Provider 类型（空=通用端点，workbuddy=账号池）
+    region: 'cn', // 区域（仅 workbuddy 有意义）：cn 国内版 / global 国际版
     baseURL: '', // Anthropic 端点 URL
     openaiURL: '', // OpenAI 端点 URL
     apiKey: '', // API Key
@@ -318,18 +392,27 @@ function emptyForm() {
   }
 }
 
-// 加载账号池数据（账号列表 + 启用模型清单），供 WorkBuddy 类型表单使用
+// 加载账号池数据（账号列表 + 该区域启用模型清单），供 WorkBuddy 类型表单使用
 // existingModels：编辑态传入当前 Provider 的模型列表，用于回填各模型已配置的推理档位
-async function loadWorkbuddyData(existingModels) {
+// region：按区域取模型清单（两地可用模型不同）
+async function loadWorkbuddyData(existingModels, region) {
+  const want = region === 'global' ? 'global' : 'cn'
+  let acctRes = null
+  let modelRes = null
   try {
-    const [acctRes, modelRes] = await Promise.all([fetchWbAccounts(), wbEnabledModels()])
-    wbAccounts.value = acctRes.accounts || []
-    enabledModels.value = modelRes.models || []
+    ;[acctRes, modelRes] = await Promise.all([fetchWbAccounts(), wbEnabledModels(want)])
   } catch {
     // 账号池接口不可用时静默降级（表单仍可保存通用配置）
-    wbAccounts.value = []
-    enabledModels.value = []
+    acctRes = null
+    modelRes = null
   }
+  // 过期响应守卫：期间用户可能切了区域或换了弹窗。
+  // 没有这道守卫时，先打开的国内弹窗的后返回响应会覆盖国际弹窗（共享 ref），
+  // 导致国际源表单里显示国内模型清单，保存时被后端跨区校验拒绝
+  const now = form.value.region === 'global' ? 'global' : 'cn'
+  if (form.value.type !== 'workbuddy' || now !== want) return
+  wbAccounts.value = (acctRes && acctRes.accounts) || []
+  enabledModels.value = (modelRes && modelRes.models) || []
   wbModelList.value = buildWbModelList(existingModels)
 }
 
@@ -451,6 +534,7 @@ async function editProvider(name, provider) {
     name,
     displayName: provider.displayName || '',
     type: provider.type || '',
+    region: provider.region === 'global' ? 'global' : 'cn',
     baseURL: provider.baseURL || '',
     openaiURL: provider.openaiURL || '',
     apiKey: '', // 先置空，下面异步回填
@@ -464,7 +548,7 @@ async function editProvider(name, provider) {
       : [emptyModel()]
   }
   showKey.value = false
-  if (form.value.type === 'workbuddy') loadWorkbuddyData(provider.models)
+  if (form.value.type === 'workbuddy') loadWorkbuddyData(provider.models, form.value.region)
   try {
     const full = await getProviderFull(name)
     form.value.apiKey = full.apiKey || ''
@@ -472,12 +556,27 @@ async function editProvider(name, provider) {
 }
 
 // 打开新增弹窗：type 为空 = 通用 Provider，'workbuddy' = WorkBuddy 账号池（由入口按钮决定类型）
+// WorkBuddy 默认区域取「尚未建源」的那个（两个区域都已建源时回落国内版）
 function openAddModal(type = '') {
   resetForm()
   form.value.type = type
-  if (type === 'workbuddy') loadWorkbuddyData()
+  if (type === 'workbuddy') {
+    form.value.region = workbuddyAddRegion.value || 'cn'
+    loadWorkbuddyData(null, form.value.region)
+  }
   showAdd.value = true
 }
+
+// 切换区域时重新拉取该区域的启用模型清单（两地可用模型不同）
+watch(
+  () => form.value.region,
+  (next, prev) => {
+    if (form.value.type !== 'workbuddy') return
+    if (!showAdd.value && !editingName.value) return
+    if (next === prev) return
+    loadWorkbuddyData(null, next)
+  }
+)
 
 // 复制 apiKey 到剪贴板
 async function copyKey() {
@@ -542,6 +641,8 @@ async function saveProvider() {
   const data = {
     displayName: form.value.displayName.trim(),
     type: form.value.type,
+    // 区域：仅 workbuddy 源有意义；后端按区域隔离账号池与域名
+    region: isWorkbuddy ? (form.value.region === 'global' ? 'global' : 'cn') : form.value.region,
     baseURL: form.value.baseURL.trim(),
     openaiURL: form.value.openaiURL.trim(),
     apiKey: form.value.apiKey,
@@ -551,10 +652,13 @@ async function saveProvider() {
   try {
     if (editingName.value) {
       await updateProvider(editingName.value, data)
-      showToast(`已保存 Provider「${editingName.value}」`)
+      // 编辑提示也带区域：两个 WorkBuddy 源可能同名，不带区域无法确认改的是哪个
+      const editLabel = isWorkbuddy ? `（${data.region === 'global' ? '国际版' : '国内版'}）` : ''
+      showToast(`已保存 Provider「${editingName.value}」${editLabel}`)
     } else {
       await addProvider(form.value.name.trim(), data)
-      showToast(`已新增 Provider「${form.value.name.trim()}」`)
+      const label = isWorkbuddy ? `（${data.region === 'global' ? '国际版' : '国内版'}）` : ''
+      showToast(`已新增 Provider「${form.value.name.trim()}」${label}`)
     }
     closeModal()
     await loadModelData()
@@ -566,7 +670,10 @@ async function saveProvider() {
 
 // 删除 provider，服务端会同步清理相关引用
 async function removeProvider(name) {
-  const label = providers.value[name]?.displayName || name
+  const p = providers.value[name]
+  const base = (p && p.displayName) || name
+  const region = p && p.type === 'workbuddy' ? `（${p.region === 'global' ? '国际版' : '国内版'}）` : ''
+  const label = `${base}${region}`
   if (!window.confirm(`确定删除 Provider「${label}」吗？\n指向它的路由规则、兜底配置和当前模型引用会一并清理。`)) {
     return
   }
@@ -728,6 +835,82 @@ onMounted(() => {
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 500;
+}
+
+/* ===== 区域（国内版 / 国际版）===== */
+.wb-realm-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 18px;
+  vertical-align: middle;
+  border: 1px solid transparent;
+}
+
+.wb-realm-tag.cn {
+  color: #4a5568;
+  border-color: var(--border-1);
+  background: rgba(113, 128, 150, 0.08);
+}
+
+.wb-realm-tag.global {
+  color: #6b46c1;
+  border-color: #d6bcfa;
+  background: #faf5ff;
+}
+
+/* 新增 WorkBuddy 源时的区域选择 */
+.wb-realm-pick {
+  border: 1px solid var(--border-1);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.wb-realm-pick-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 10px;
+}
+
+.wb-add-realm-opts {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wb-realm-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-1);
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-1);
+}
+
+.wb-realm-opt.active {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+
+.wb-realm-name {
+  font-weight: 600;
+}
+
+.wb-realm-host {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wb-realm-pick-note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
 }
 
 /* WorkBuddy 类型在表单中的账号管理入口 */

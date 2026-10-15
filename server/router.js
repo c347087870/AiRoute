@@ -3,6 +3,7 @@ const cors = require('cors')
 const axios = require('axios')
 const fs = require('fs-extra')
 const os = require('os')
+const { StringDecoder } = require('string_decoder')
 const logger = require('./logger')
 const engine = require('./router-engine')
 const tokenStats = require('./token-stats')
@@ -13,6 +14,7 @@ const iputil = require('./iputil')
 const benchmark = require('./benchmark')
 const update = require('./update')
 const workbuddy = require('./workbuddy/runtime')
+const wbVersionCheck = require('./workbuddy/versioncheck')
 const wbIdentity = require('./workbuddy/identity')
 const wbSession = require('./workbuddy/session')
 const wbAnthropic = require('./workbuddy/anthropic')
@@ -29,6 +31,16 @@ const {
   isRefOfProvider,
   firstAvailableRef
 } = models
+
+// 客户端是否已断开：只看「响应已收尾」与「连接套接字已销毁」。
+// 不能用 req.destroyed——express.json() 消费完请求体后它恒为 true（实测），
+// 会把「客户端仍在等待」误判为「已断开」，导致换号/截断重试被直接跳过并抛 500
+function clientGone(req, res) {
+  if (res.writableEnded || res.finished) return true
+  const sock = req.socket || res.socket
+  if (sock && sock.destroyed) return true
+  return false
+}
 
 const app = express()
 
@@ -106,7 +118,7 @@ app.get('/api/fallback', (req, res) => {
 })
 
 app.put('/api/fallback', (req, res) => {
-  const { model } = req.body
+  const { model } = req.body || {}
   saveFallback({ model: model || '' })
   res.json({ ok: true, model })
 })
@@ -178,6 +190,11 @@ async function handleRequest(req, res) {
           model: entry.ref,
           status: err.status || 500,
           error: err.message,
+          // 上游原始错误体与分类（排障用）：仅消息不足以定位上游业务码
+          detail: err.body || undefined,
+          kind: err.kind || undefined,
+          code: err.code || undefined,
+          gatewayHint: err.gatewayHint || undefined,
           responseTime: Date.now() - startTime,
           fallback: isFallback,
           fallbackFrom: isFallback ? primaryRef : undefined,
@@ -261,9 +278,15 @@ async function handleRequest(req, res) {
         // Responses 客户端：上游 Chat SSE 逐行转换后写出；其余原样透传
         const rsEmitter = clientIsResponses ? wbResponses.createStreamEmitter({ model: entry.ref }) : null
         let rsBuffer = ''
+        // UTF-8 增量解码器：TCP 分块边界可能落在多字节字符中间，
+        // chunk.toString() 逐块独立解码会在字符中部产生 U+FFFD（乱码）
+        const rsDecoder = new StringDecoder('utf8')
         let closed = false // 收尾标记（幂等）：正常 EOF、上游错误、空闲超时、下游断开都汇到这里
         let sawDone = false // 已向下游写过 [DONE]（上游自带时不重复补）
         let sawAnyData = false // 上游是否产出过任何字节（用于识别"200 空流"）
+        // [DONE] 跨 chunk 的检测窗口：TCP 可能把它切到两个 chunk，只按单 chunk 匹配
+        // 会漏判，进而在收尾时补发第二个 [DONE]（下游读到重复收尾标记）
+        let doneProbe = ''
         let idleTimer = null
         const idleMs = 300000 // 流中空闲上限（与 WorkBuddy 链路一致）：超时即判上游卡死并主动收尾
 
@@ -333,13 +356,17 @@ async function handleRequest(req, res) {
           armIdle()
           sawAnyData = true
           upstream.mergeStreamUsage(streamUsage, usageExtractor.push(chunk))
+          if (!sawDone) {
+            // 滑窗检测上游自带的收尾标记：窗口只保留末尾若干字节，不随流增长。
+            // 用 latin1 做纯字节映射（此处只匹配 ASCII 子串，不涉及多字节解码）
+            doneProbe = (doneProbe + chunk.toString('latin1')).slice(-16)
+            if (doneProbe.includes('[DONE]')) sawDone = true
+          }
           if (!rsEmitter) {
-            // 记录上游自带收尾标记：自带则不重复补发 [DONE]
-            if (!sawDone && chunk.indexOf('[DONE]') >= 0) sawDone = true
             res.write(chunk)
             return
           }
-          rsBuffer += chunk.toString()
+          rsBuffer += rsDecoder.write(chunk)
           let idx
           while ((idx = rsBuffer.indexOf('\n')) >= 0) {
             const line = rsBuffer.slice(0, idx)
@@ -473,6 +500,9 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
   const clientIP = iputil.extractClientIP(req)
   // WorkBuddy 源的推理档位走每个模型独立配置（不回落全局档位；未配置则不干预）
   const modelEffort = entry.model.reasoningEffort || ''
+  // 区域：该 Provider 是国际版还是国内版。据此刻隔离选号与出站域名，
+  // 保证「workbuddy（国内）」的请求绝不会落到国际版账号上，反之亦然
+  const realm = models.providerRegion(entry.provider)
 
   // Anthropic 客户端（/v1/messages）与 Responses 客户端（/v1/responses）：
   // 请求体先转 OpenAI Chat 形态，再进改写/上游管线
@@ -520,8 +550,10 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
         clientIP,
         model: entry.model.id,
         reasoningEffort: modelEffort,
+        // 区域：限定只从该区域的账号里选号（国内源不碰国际账号，反之亦然）
+        realm,
         // 客户端断开时立即停止换号轮转/退避等待
-        isAborted: () => req.destroyed || res.writableEnded,
+        isAborted: () => clientGone(req, res),
         // Anthropic / Responses 通道的发射器丢弃 reasoning_content：思考帧对该客户端不可见，
         // 传输层据此判定「空回答重试」是否安全（不能让客户端收到两份输出）
         reasoningHidden: clientIsAnthropic || clientIsResponses,
@@ -595,7 +627,9 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
     clientIP,
     model: entry.model.id,
     reasoningEffort: modelEffort,
-    isAborted: () => req.destroyed || res.writableEnded,
+    // 区域：限定只从该区域的账号里选号
+    realm,
+    isAborted: () => clientGone(req, res),
     inbound: {
       conversationRequestId: req.headers['x-conversation-request-id'],
       traceId: req.headers['x-trace-id']
@@ -665,7 +699,7 @@ app.get('/v1/models', (req, res) => {
 
 // ==================== Anthropic token 计数（Claude Code 预估用）====================
 
-// POST /v1/messages/count_tokens：WorkBuddy 通道发 max_tokens=1 的请求取上游真实 usage；
+// POST /v1/messages/count_tokens：WorkBuddy 通道发极小 max_tokens 的请求取上游真实 usage；
 // 通用 Provider 配了 Anthropic 端点则原样转发 count_tokens；都不可用时本地粗估，保证 Claude Code 不 404
 app.post('/v1/messages/count_tokens', async (req, res) => {
   const body = req.body || {}
@@ -680,7 +714,10 @@ app.post('/v1/messages/count_tokens', async (req, res) => {
         ...wbAnthropic.toOpenAI(body),
         stream: true,
         stream_options: { include_usage: true },
-        max_tokens: 1
+        // 输出预算取 8 而非 1：实测上游对 max_tokens=1 会先让思考帧占满预算、
+        // 最终无正文（finish_reason=length），网关据空回答判失败并换号重试至耗尽，
+        // 客户端拿到 500。8 是实测可用下限，仍远小于任何真实回答，不影响计数语义
+        max_tokens: 8
       }
       let aggregated = null
       await workbuddy.forwardChat({
@@ -688,8 +725,10 @@ app.post('/v1/messages/count_tokens', async (req, res) => {
         isStream: false,
         model: entry.model.id,
         reasoningEffort: entry.model.reasoningEffort || '',
+        // 区域：与该源账号池一致
+        realm: models.providerRegion(entry.provider),
         noEmptyRetry: true,
-        isAborted: () => req.destroyed || res.writableEnded,
+        isAborted: () => clientGone(req, res),
         onDone: payload => {
           aggregated = payload
         }
@@ -747,7 +786,7 @@ app.get('/api/state', (req, res) => {
 })
 
 app.post('/api/state', (req, res) => {
-  const { current } = req.body
+  const { current } = req.body || {}
   // 非法引用落盘后所有请求都会 500，保存前先校验可解析
   if (typeof current !== 'string' || !current.trim()) {
     return res.status(400).json({ error: '模型引用不能为空' })
@@ -816,11 +855,13 @@ app.put('/api/providers/:name', (req, res) => {
     return res.status(404).json({ error: `Provider ${name} not found` })
   }
   const update = sanitizeProviderInput(req.body)
-  // 不允许把通用 Provider 改成 WorkBuddy（若已存在 WorkBuddy 源），防止绕过唯一性限制
+  // 不允许把通用 Provider 改成 WorkBuddy（若该区域已有 WorkBuddy 源），防止绕过唯一性限制
   if (update.type === 'workbuddy' && !models.isWorkbuddyProvider(config[name])) {
-    const existing = models.listWorkbuddyProviders(config)
+    const region = models.normalizeRegion(update.region)
+    const existing = models.listWorkbuddyProvidersByRegion(config)[region] || []
     if (existing.length) {
-      return res.status(409).json({ error: `WorkBuddy 源只能有一个（已存在：${existing[0]}）` })
+      const label = region === 'global' ? '国际版' : '国内版'
+      return res.status(409).json({ error: `${label} WorkBuddy 源只能有一个（已存在：${existing[0]}）` })
     }
   }
   applyPoolModelsForWorkbuddy(update)
@@ -830,11 +871,12 @@ app.put('/api/providers/:name', (req, res) => {
 })
 
 // workbuddy 类型 Provider 的模型清单由账号池统一维护：未显式提供时用账号池启用清单填充
+// region：该源的区域，决定用哪一份启用清单（两地模型清单不同）
 function applyPoolModelsForWorkbuddy(input) {
   if (!models.isWorkbuddyProvider(input)) return
   if (Array.isArray(input.models) && input.models.length > 0) return
   if (!workbuddy.getRuntime()) return
-  const enabled = workbuddy.getEnabledModels()
+  const enabled = workbuddy.getEnabledModels(input.region)
   if (enabled.length) input.models = enabled
 }
 
@@ -890,11 +932,13 @@ app.post('/api/providers/:name', (req, res) => {
     return res.status(409).json({ error: `Provider ${name} already exists` })
   }
   const input = sanitizeProviderInput(req.body)
-  // WorkBuddy 源全局唯一：已存在时拒绝新建（前端按钮也会同步禁用）
+  // WorkBuddy 源全局每个区域唯一：同区域已存在时拒绝新建（前端按钮也会同步禁用）
   if (models.isWorkbuddyProvider(input)) {
-    const existing = models.listWorkbuddyProviders(config)
+    const region = models.normalizeRegion(input.region)
+    const existing = models.listWorkbuddyProvidersByRegion(config)[region] || []
     if (existing.length) {
-      return res.status(409).json({ error: `WorkBuddy 源只能有一个（已存在：${existing[0]}）` })
+      const label = region === 'global' ? '国际版' : '国内版'
+      return res.status(409).json({ error: `${label} WorkBuddy 源只能有一个（已存在：${existing[0]}）` })
     }
   }
   applyPoolModelsForWorkbuddy(input)
@@ -932,6 +976,8 @@ app.post('/api/providers/:name/test', async (req, res) => {
         body: JSON.stringify({ model: model.id, messages: [{ role: 'user', content: 'hi' }], stream: false, max_tokens: 32 }),
         isStream: false,
         model: model.id,
+        // 按该源区域测试：国内源不能用国际账号验证（反之亦然）
+        realm: models.providerRegion(provider),
         onDone: payload => {
           aggregated = payload
         }
@@ -1007,12 +1053,12 @@ function requireWorkbuddy(res) {
   return rt
 }
 
-// 发起 OAuth 设备授权
+// 发起 OAuth 设备授权（body.realm：cn（默认）/ global —— 决定用哪套域名与头族登录）
 app.post('/api/workbuddy/oauth/start', async (req, res) => {
   if (!requireWorkbuddy(res)) return
   try {
-    const result = await workbuddy.oauthStart()
-    res.json({ ok: true, state: result.state, url: result.url })
+    const result = await workbuddy.oauthStart(models.normalizeRegion(req.body?.realm))
+    res.json({ ok: true, state: result.state, url: result.url, realm: result.realm })
   } catch (err) {
     res.status(502).json({ error: err.message })
   }
@@ -1206,13 +1252,26 @@ app.post('/api/workbuddy/tasks/run_queue', async (req, res) => {
   try {
     let result
     if (taskCodes.length) {
-      // 指定任务码：按 uids（为空则全部非禁用账号）入队
+      // 指定任务码：按 uids（为空则全部非禁用账号）入队。
+      // 走 workbuddy.enqueue：它内部对国际版账号直接拒绝（无成长体系），
+      // 批量路径同样受控（与 enqueue 的单账号行为一致）
       const targets = uids.length ? uids : workbuddy.listAccounts().filter(a => !a.disabled).map(a => a.uid)
       let enqueued = 0
-      for (const uid of targets) enqueued += workbuddy.enqueue(uid, taskCodes).enqueued
+      let skipped = 0
+      for (const uid of targets) {
+        const r = workbuddy.enqueue(uid, taskCodes)
+        if (r && r.ok === false) skipped++
+        else enqueued += (r && r.enqueued) || 0
+      }
       result = enqueued
-        ? { ok: true, started: true, total: enqueued, enqueued }
-        : { ok: true, started: false, total: 0, message: '没有可入队的任务' }
+        ? { ok: true, started: true, total: enqueued, enqueued, skipped }
+        : {
+            ok: true,
+            started: false,
+            total: 0,
+            skipped,
+            message: skipped > 0 ? `没有可入队的任务（已跳过 ${skipped} 个不适用账号）` : '没有可入队的任务'
+          }
     } else {
       result = await workbuddy.queueOnce(uids, { concurrency: req.body?.concurrency })
     }
@@ -1263,28 +1322,51 @@ app.post('/api/workbuddy/usage/save', (req, res) => {
 
 // 账号池统一维护的启用模型清单（附后台拉取到的思考档位，供 Provider 弹窗渲染下拉）
 // 上游模型缓存为空时先拉一次（1h 缓存；无可用账号/拉取失败静默降级到静态兜底档位）
+// region 查询参数：cn（默认）/ global，两地模型清单不同，按区域返回
 app.get('/api/workbuddy/models/enabled', async (req, res) => {
   if (!requireWorkbuddy(res)) return
+  const region = models.normalizeRegion(req.query.region)
   try {
-    await workbuddy.listUpstreamModels(false)
+    await workbuddy.listUpstreamModels(false, region)
   } catch {
     /* 拉取失败：档位回落静态兜底表 */
   }
-  res.json({ ok: true, models: workbuddy.getEnabledModelsWithEfforts() })
+  res.json({ ok: true, region, models: workbuddy.getEnabledModelsWithEfforts(region) })
 })
 
-// 保存启用模型清单，并同步写入所有 workbuddy 类型 Provider 的 models 字段
+// 保存启用模型清单，并同步写入同区域 workbuddy 类型 Provider 的 models 字段
 app.post('/api/workbuddy/models/enabled', (req, res) => {
   if (!requireWorkbuddy(res)) return
-  const list = workbuddy.setEnabledModels(req.body?.models)
+  const region = models.normalizeRegion(req.body?.region)
+  const incoming = Array.isArray(req.body?.models) ? req.body.models : []
 
-  // 持久化到 server-config.json
+  // 跨区域防呆：拒绝「明确只属于另一区域」的模型 id。
+  // 国内版与国际版清单完全不同，误写会让整个源的模型引用失效（曾真实发生）
+  const check = workbuddy.validateModelsForRegion(region, incoming)
+  if (!check.ok) {
+    const label = region === 'global' ? '国际版' : '国内版'
+    return res.status(400).json({
+      error:
+        `以下模型不属于${label}目录，拒绝写入：${check.rejected.join('、')}。` +
+        `请在「模型和档位」页签切换到正确区域后再保存。`,
+      rejected: check.rejected
+    })
+  }
+
+  const list = workbuddy.setEnabledModels(incoming, region)
+
+  // 持久化到 server-config.json（按区域分键；旧键 enabledModels 保留为国内版，兼容历史）
   const serverConfig = engine.getServerConfig()
   serverConfig.workbuddy = serverConfig.workbuddy || {}
-  serverConfig.workbuddy.enabledModels = list
+  if (region === 'global') {
+    serverConfig.workbuddy.enabledModelsGlobal = list
+  } else {
+    serverConfig.workbuddy.enabledModels = list
+  }
   engine.saveServerConfig(serverConfig)
 
-  // 同步到所有 workbuddy Provider（引用体系 provider/modelId 依赖此字段）
+  // 同步到**同区域**的 workbuddy Provider（引用体系 provider/modelId 依赖此字段）。
+  // 只同步本区域：把国内清单写进国际源会让引用指向不存在的模型
   // 保留 Provider 侧已配置的模型级推理档位与上下文/输出上限（按模型 id 匹配，
   // 不被账号池清单覆盖——这两项在 Provider 弹窗里可逐模型调整）
   const config = getConfig()
@@ -1292,6 +1374,7 @@ app.post('/api/workbuddy/models/enabled', (req, res) => {
   for (const [name, raw] of Object.entries(config)) {
     const provider = toProviderView(raw)
     if (!models.isWorkbuddyProvider(provider)) continue
+    if (models.providerRegion(provider) !== region) continue
     const savedByID = new Map((provider.models || []).map(m => [m.id, m]))
     config[name] = {
       ...raw,
@@ -1310,7 +1393,7 @@ app.post('/api/workbuddy/models/enabled', (req, res) => {
   }
   if (synced > 0) saveConfig(config)
 
-  res.json({ ok: true, models: list, synced })
+  res.json({ ok: true, region, models: list, synced })
 })
 
 // WorkBuddy 运行日志（环形缓冲，支持频道过滤：chat / task / system）
@@ -1327,12 +1410,15 @@ app.get('/api/workbuddy/logs', (req, res) => {
   })
 })
 
-// 上游模型列表（refresh=1 强制刷新缓存）
+// 上游模型列表（refresh=1 强制刷新缓存；region=cn/global 按区域拉取）
+// 必须带 region：国内版与国际版的模型清单完全不同，不带区域会按「任意可用账号」取，
+// 拿到哪个区域的清单取决于账号顺序——曾因此把国际版模型写进国内版槽位
 app.get('/api/workbuddy/models', async (req, res) => {
   if (!requireWorkbuddy(res)) return
+  const region = models.normalizeRegion(req.query.region)
   try {
-    const list = await workbuddy.listUpstreamModels(req.query.refresh === '1')
-    res.json({ ok: true, models: list })
+    const list = await workbuddy.listUpstreamModels(req.query.refresh === '1', region)
+    res.json({ ok: true, region, models: list })
   } catch (err) {
     res.status(502).json({ error: err.message })
   }
@@ -1376,6 +1462,130 @@ app.put('/api/workbuddy/scheduler', (req, res) => {
     res.json({ ok: true, ...next })
   } catch (err) {
     res.status(400).json({ error: err.message })
+  }
+})
+
+// ==================== 客户端版本号自动检查 ====================
+//
+// 出站 UA 里的版本号过时会被上游判为可疑（实测：国际版平台段送错触发 403 code 11140）。
+// 这里从官方公开来源取最新版本号，供界面一键对照与更新。
+// 来源已实测：/v2/update（桌面端，按区域不同）+ npm registry（CLI）+ 官方 changelog（IDE）。
+
+// 版本检查器单例：缓存落盘在数据目录（6 小时 TTL）
+let versionChecker = null
+function getVersionChecker() {
+  if (!versionChecker) {
+    versionChecker = wbVersionCheck.createVersionChecker({ dataDir: paths.getDataDir() })
+  }
+  return versionChecker
+}
+
+// 当前生效的版本号（identity 覆盖 > 官方默认）
+function currentVersions() {
+  const wb = engine.getServerConfig().workbuddy || {}
+  return getVersionChecker().currentOf(wb.identity || {})
+}
+
+// 组装「当前 vs 最新」对照结果
+function versionReport(doc) {
+  const current = currentVersions()
+  const latest = (doc && doc.latest) || {}
+  const fields = []
+  for (const [key, label] of [
+    ['clientVersion', 'WorkBuddy 主链路版本'],
+    ['desktopVersion', '桌面事件链版本'],
+    ['cliVersion', 'CLI 版本段'],
+    ['ideVersion', 'CodeBuddy IDE 版本']
+  ]) {
+    const cur = current[key] || ''
+    const lat = latest[key] || ''
+    fields.push({
+      key,
+      label,
+      current: cur,
+      latest: lat,
+      hasUpdate: !!lat && wbVersionCheck.compareVersion(lat, cur) > 0
+    })
+  }
+  return {
+    ok: true,
+    fetchedAt: (doc && doc.fetchedAt) || 0,
+    fromCache: !!(doc && doc.fromCache),
+    fields,
+    desktopByRegion: (doc && doc.desktopByRegion) || {},
+    sources: (doc && doc.sources) || {},
+    errors: (doc && doc.errors) || []
+  }
+}
+
+// 读取版本对照（默认走缓存，超过 6 小时自动刷新）
+app.get('/api/workbuddy/versions', async (req, res) => {
+  try {
+    const doc = await getVersionChecker().check(currentVersions(), req.query.refresh === '1')
+    res.json(versionReport(doc))
+  } catch (err) {
+    res.status(502).json({ error: '检查版本号失败: ' + (err.message || '网络不可用') })
+  }
+})
+
+// 强制刷新版本号（界面上「重新检查」按钮）
+app.post('/api/workbuddy/versions/refresh', async (req, res) => {
+  try {
+    const doc = await getVersionChecker().check(currentVersions(), true)
+    res.json(versionReport(doc))
+  } catch (err) {
+    res.status(502).json({ error: '检查版本号失败: ' + (err.message || '网络不可用') })
+  }
+})
+
+// 应用最新版本号：写入 server-config.json 的 workbuddy.identity（热生效）
+// body.fields 可选：只应用指定字段（缺省应用全部有更新的字段）
+app.post('/api/workbuddy/versions/apply', async (req, res) => {
+  try {
+    const doc = await getVersionChecker().check(currentVersions(), false)
+    const latest = doc.latest || {}
+    const only = Array.isArray(req.body?.fields) && req.body.fields.length ? new Set(req.body.fields) : null
+
+    const serverConfig = engine.getServerConfig()
+    serverConfig.workbuddy = serverConfig.workbuddy || {}
+    const identity = { ...(serverConfig.workbuddy.identity || {}) }
+    const prevVersions = {}
+    for (const key of ['clientVersion', 'desktopVersion', 'cliVersion', 'ideVersion']) {
+      prevVersions[key] = identity[key] || currentVersions()[key] || ''
+    }
+
+    const applied = []
+    for (const key of ['clientVersion', 'desktopVersion', 'cliVersion', 'ideVersion']) {
+      if (only && !only.has(key)) continue
+      const val = latest[key]
+      if (!val) continue
+      if (wbVersionCheck.compareVersion(val, identity[key] || currentVersions()[key] || '0') <= 0) continue
+      identity[key] = val
+      applied.push({ key, value: val })
+    }
+    if (!applied.length) {
+      return res.json({ ok: true, applied: [], message: '没有需要更新的版本号' })
+    }
+
+    // 同步派生的 UA 串：identity 同时存版本号与成品 UA，而消费端优先用成品 UA 串
+    //（headers.js 的 userAgent）。只改版本号而不同步 UA 串的话，出站请求仍是旧版本号。
+    const nextVersions = { ...prevVersions }
+    for (const a of applied) nextVersions[a.key] = a.value
+    const synced = wbIdentity.syncDerivedUA(identity, prevVersions, nextVersions)
+    serverConfig.workbuddy.identity = synced.identity
+    engine.saveServerConfig(serverConfig)
+
+    // 热更新运行时 identity（UA 立即按新版本号拼接）
+    workbuddy.updateConfig({ identity: synced.identity })
+
+    res.json({
+      ok: true,
+      applied,
+      syncedUA: Object.keys(synced.changed),
+      identity: synced.identity
+    })
+  } catch (err) {
+    res.status(500).json({ error: '应用版本号失败: ' + (err.message || '未知错误') })
   }
 })
 
@@ -1700,6 +1910,7 @@ function initWorkbuddy() {
       poolConfig: wb.pool || {},
       scheduleConfig: wb.schedule || {},
       enabledModels: wb.enabledModels || [],
+      enabledModelsGlobal: wb.enabledModelsGlobal || [],
       promptMode: wb.promptMode || 'custom',
       promptFile: wb.promptFile || '',
       sanitizeFingerprints: wb.sanitizeFingerprints !== false,
@@ -1716,33 +1927,60 @@ function initWorkbuddy() {
 
 initWorkbuddy()
 
-// WorkBuddy 源归一化：设计上只允许一个源，多于一个时清空重建（账号池数据不受影响）
+// WorkBuddy 源归一化：每个区域只允许一个源，同区域多于一个时清空重建
+// （账号池数据不受影响）。跨区域的多源是正常状态，不动。
 function normalizeWorkbuddyProviders() {
   try {
     const config = getConfig()
-    const names = models.listWorkbuddyProviders(config)
-    if (names.length <= 1) return
+    const byRegion = models.listWorkbuddyProvidersByRegion(config)
 
-    console.log(`[aiRoute] 检测到 ${names.length} 个 WorkBuddy 源（${names.join('、')}），清空重建为单一源`)
-    for (const name of names) {
-      delete config[name]
-      cleanupProviderRefs(name, config)
+    for (const region of ['cn', 'global']) {
+      const names = byRegion[region] || []
+      if (names.length <= 1) continue
+
+      const label = region === 'global' ? '国际版' : '国内版'
+      console.log(`[aiRoute] 检测到 ${names.length} 个${label} WorkBuddy 源（${names.join('、')}），清空重建为单一源`)
+      for (const name of names) {
+        delete config[name]
+        cleanupProviderRefs(name, config)
+      }
+
+      // 重建一个干净的源：模型清单用该区域的账号池启用清单
+      // 基名固定，避免 while 里用「上一轮结果」做基名而级联拼出 xxx-2-3 这类名字
+      const base = region === 'global' ? `${models.WORKBUDDY_PROVIDER_ID}-global` : models.WORKBUDDY_PROVIDER_ID
+      let id = base
+      let suffix = 2
+      while (config[id]) id = `${base}-${suffix++}`
+      const enabled = workbuddy.getRuntime() ? workbuddy.getEnabledModels(region) : []
+      config[id] = {
+        displayName: region === 'global' ? 'WorkBuddy 账号池（国际版）' : 'WorkBuddy 账号池',
+        type: 'workbuddy',
+        region,
+        models: enabled
+      }
+      saveConfig(config)
+      console.log(`[aiRoute] 已重建${label} WorkBuddy 源：${id}（${enabled.length} 个模型）`)
     }
-
-    // 重建一个干净的源：模型清单用账号池启用清单
-    let id = models.WORKBUDDY_PROVIDER_ID
-    let suffix = 2
-    while (config[id]) id = `${models.WORKBUDDY_PROVIDER_ID}-${suffix++}`
-    const enabled = workbuddy.getRuntime() ? workbuddy.getEnabledModels() : []
-    config[id] = { displayName: 'WorkBuddy 账号池', type: 'workbuddy', models: enabled }
-    saveConfig(config)
-    console.log(`[aiRoute] 已重建 WorkBuddy 源：${id}（${enabled.length} 个模型）`)
   } catch (err) {
     console.error('[aiRoute] WorkBuddy 源归一化失败:', err.message)
   }
 }
 
 normalizeWorkbuddyProviders()
+
+
+// 兜底错误处理中间件（必须放在所有路由之后）：
+//  1. 未捕获异常不再走 Express 默认处理器——它会回吐完整堆栈与绝对路径
+//  2. body 解析失败（畸形 JSON、超出 100mb 上限）也汇到这里，统一回 400
+// 注意必须保持 4 个参数：Express 依此识别错误中间件，少一个会被当普通中间件注册
+app.use((err, req, res, next) => {
+  const status = err && (err.status || err.statusCode)
+  const code = Number.isInteger(status) && status >= 400 && status < 600 ? status : 500
+  // 详情只留在服务端日志，响应体只给通用文案（绝不回堆栈）
+  console.error(`[aiRoute] 请求处理异常 ${req.method} ${req.originalUrl}:`, err && err.message)
+  if (res.headersSent) return next(err)
+  res.status(code).json({ error: code === 400 ? '请求体不是合法 JSON 或超出大小上限' : '服务器内部错误' })
+})
 
 const PORT = process.env.PORT || engine.getServerConfig().port || 3000
 listen(PORT)

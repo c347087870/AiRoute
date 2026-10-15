@@ -172,8 +172,27 @@ function staticEffortCap(modelId) {
 
 // ===== 对外 API（四级查找链）=====
 
-// context_length 决策：上游值 → 种子表 → model.json → models.dev（异步）→ 1M 兜底
+// 实测安全上下文上限（按模型）：上游目录声明的窗口往往大于实测可稳定接受的规模，
+// 直接采信会让「预防性压缩」阈值定得过高、永不触发，超限时只能撞上游错误再重试
+// （一次浪费十几秒 + 一份完整上下文计费）。此处按实测把声明值钳到可用值。
+// 仅列已实测的模型；未列出的模型不钳制（保持上游声明值）。
+// 实测方法：逐步加码请求，取仍能稳定返回 200 的最大输入规模再留约 20% 余量。
+const CONTEXT_SAFE_CAP = {
+  // 实测：约 64 万 token 输入可稳定接受；约 70 万起出现 400/500
+  'deepseek-v4.1-flash': 640000
+}
+
+// context_length 决策：上游值 → 种子表 → model.json → models.dev（异步）→ 1M 兜底；
+// 命中实测安全上限的模型按上限钳制（见 CONTEXT_SAFE_CAP）
 function contextWindowOf(modelId, upstreamValue, opts) {
+  const raw = resolveContextWindow(modelId, upstreamValue, opts)
+  const cap = CONTEXT_SAFE_CAP[String(modelId || '')]
+  if (cap > 0 && raw > cap) return cap
+  return raw
+}
+
+// 未钳制的原始解析链（供上面包装与测试使用）
+function resolveContextWindow(modelId, upstreamValue, opts) {
   const remote = num(upstreamValue)
   if (remote > 0) return remote
   const id = String(modelId || '')
@@ -230,6 +249,7 @@ function defaultEffortOf(modelId, upstreamEfforts, upstreamDefault) {
 module.exports = {
   DEFAULT_CONTEXT_WINDOW,
   CONTEXT_SEED,
+  CONTEXT_SAFE_CAP,
   configure,
   resetForTest,
   contextWindowOf,

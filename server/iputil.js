@@ -76,20 +76,23 @@ function matchBits(a, b, bits) {
 }
 
 // 判断 IP 是否落在 CIDR 内（IPv4/IPv6 均按位比较；非法输入一律不匹配）
+// 入口先归一化：IPv4-mapped IPv6（::ffff:1.2.3.4）与带端口写法都能正确参与匹配，
+// 否则「映射地址 + IPv4 网段」会因两族字节长度不同而恒不匹配（本机回环代理即常见此形态）
 function inCidr(ip, cidr) {
+  const addr = normalizeIP(ip)
   const slash = String(cidr).indexOf('/')
   const base = slash >= 0 ? String(cidr).slice(0, slash) : String(cidr)
   const bits = slash >= 0 ? Number(String(cidr).slice(slash + 1)) : null
   if (bits === null || !Number.isInteger(bits) || bits < 0) return false
 
-  if (String(ip).includes(':')) {
-    const ipBytes = ipv6ToBytes(ip)
+  if (String(addr).includes(':')) {
+    const ipBytes = ipv6ToBytes(addr)
     const baseBytes = ipv6ToBytes(base)
     if (!ipBytes || !baseBytes || bits > 128) return false
     if (bits === 0) return true
     return matchBits(ipBytes, baseBytes, bits)
   }
-  const ipInt = ipv4ToInt(ip)
+  const ipInt = ipv4ToInt(addr)
   const baseInt = ipv4ToInt(base)
   if (ipInt === null || baseInt === null || bits > 32) return false
   if (bits === 0) return true

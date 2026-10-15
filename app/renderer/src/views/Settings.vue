@@ -195,6 +195,7 @@ async function doRestart() {
       setApiPort(targetPort)
       serverPort.value = Number(targetPort)
       portChanged.value = false
+      await loadSystemStatus() // 系统状态面板同步显示新端口
       showToast('服务已重启，端口 ' + targetPort)
     } else {
       showToast('重启后未能连接端口 ' + targetPort + '，请手动检查服务状态', 'error', 4000)
@@ -221,9 +222,11 @@ async function toggleAutoLaunch() {
 
 // 加载服务配置与开机自启状态
 async function loadData() {
+  let savedPort = null
   try {
     const config = await getServerConfig()
-    serverPort.value = config.port || 3000
+    savedPort = Number(config.port) || 3000
+    serverPort.value = savedPort
   } catch {}
 
   if (window.electronAPI) {
@@ -231,6 +234,12 @@ async function loadData() {
       autoLaunch.value = await window.electronAPI.getAutoLaunch()
     } catch {}
   }
+
+  // 「待重启」提示按实际状态推导：已保存端口 ≠ 实际监听端口 → 需重启生效。
+  // 只靠保存接口的返回值记一次状态的话，离开页面再回来提示就丢了，
+  // 而服务其实仍监听旧端口（用户会以为已经生效）
+  await loadSystemStatus()
+  portChanged.value = !!(savedPort && sysStatus.value && Number(sysStatus.value.port) !== savedPort)
 }
 
 // 加载系统状态：服务端版本/端口、应用内存、日志缓存占用；三项独立降级，互不阻塞
@@ -266,8 +275,8 @@ async function clearLogCache() {
 }
 
 onMounted(() => {
+  // loadData 内部已包含 loadSystemStatus（用于推导「待重启」提示），不再重复调用
   loadData()
-  loadSystemStatus()
 })
 </script>
 

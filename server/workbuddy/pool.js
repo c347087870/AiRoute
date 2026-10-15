@@ -29,6 +29,11 @@ function createPool(opts = {}) {
     degradeCooldownMs: opts.degradeCooldownMs > 0 ? opts.degradeCooldownMs : C.POOL_DEFAULTS.degradeCooldownMs,
     degradeCooldownMaxMs: opts.degradeCooldownMaxMs > 0 ? opts.degradeCooldownMaxMs : C.POOL_DEFAULTS.degradeCooldownMaxMs,
     maxInFlight: typeof opts.maxInFlight === 'number' && opts.maxInFlight >= 0 ? opts.maxInFlight : C.POOL_DEFAULTS.maxInFlight,
+    // 国际版单账号在途上限（风控更紧，默认更小；0 = 与 maxInFlight 同值）
+    maxInFlightGlobal:
+      typeof opts.maxInFlightGlobal === 'number' && opts.maxInFlightGlobal >= 0
+        ? opts.maxInFlightGlobal
+        : C.POOL_DEFAULTS.maxInFlightGlobal,
     minPickGapMs: opts.minPickGapMs > 0 ? opts.minPickGapMs : C.POOL_DEFAULTS.minPickGapMs,
     idleWeightPerHour: typeof opts.idleWeightPerHour === 'number' ? opts.idleWeightPerHour : C.POOL_DEFAULTS.idleWeightPerHour,
     idleWeightMax: typeof opts.idleWeightMax === 'number' ? opts.idleWeightMax : C.POOL_DEFAULTS.idleWeightMax,
@@ -158,9 +163,22 @@ function createPool(opts = {}) {
     return healthy(e, now)
   }
 
-  // 在途上限
+  // 在途上限：国际版风控更紧，用独立的（更小）上限
   function inFlightLimit(e) {
+    const isGlobal = e && e.auth && e.auth.realm === 'global'
+    if (isGlobal && cfg.maxInFlightGlobal > 0) return cfg.maxInFlightGlobal
     return cfg.maxInFlight
+  }
+
+  // ===== 区域（realm）过滤 =====
+  // 账号区域由 auth.js 解析归一（缺省 'cn'）。空值 = 不限区域。
+  const normalizeRealm = v => (v === 'global' || v === 'cn' ? v : '')
+
+  // 条目是否匹配目标区域（未指定区域时一律通过）
+  function realmOK(e, realm) {
+    if (!realm) return true
+    const r = e && e.auth && e.auth.realm === 'global' ? 'global' : 'cn'
+    return r === realm
   }
 
   function inFlightFull(e) {
@@ -184,14 +202,18 @@ function createPool(opts = {}) {
   // ===== 选号 =====
 
   // 选号：过滤 → 成本分层 → 权重预计算 → 洗牌 → 排序 → top5 → 最早到期优先 → 加权抽签
-  // opts: { tried: Set<uid>, model, allowUIDs: Set<uid>（账箱子集，null/空=全池） }
+  // opts: { tried: Set<uid>, model, allowUIDs: Set<uid>（账箱子集，null/空=全池）, realm }
+  // realm：按区域隔离选号（'cn' / 'global'）。国内版与国际版账号的域名、UA、
+  // 可用能力都不同，跨区派发会把请求发到错误的上游，因此必须严格隔离。
+  // 传空/未传 = 不限区域（仅用于账号池统计等不涉及派发的场景）
   function pick(pickOpts = {}) {
     const tried = pickOpts.tried || null
     const reqModel = pickOpts.model || ''
     const allowUIDs = pickOpts.allowUIDs || null
+    const realm = normalizeRealm(pickOpts.realm)
     const now = Date.now()
 
-    const allowOK = e => !allowUIDs || allowUIDs.has(e.uid)
+    const allowOK = e => (!allowUIDs || allowUIDs.has(e.uid)) && realmOK(e, realm)
     const healthyOf = reqModel ? e => allowOK(e) && healthyForModel(e, now, reqModel) : e => allowOK(e) && healthy(e, now)
 
     const cands = []
@@ -203,7 +225,7 @@ function createPool(opts = {}) {
       cands.push(e)
     }
 
-    if (cands.length === 0) return pickEarliestExpiry(tried, now, allowUIDs)
+    if (cands.length === 0) return pickEarliestExpiry(tried, now, allowUIDs, realm)
 
     // 成本分层：0=实测免费 > 1=无观测 > 2=实测收费
     let bestTier = 2
@@ -357,12 +379,13 @@ function createPool(opts = {}) {
     }
   }
 
-  // 全冷却兜底：取最早到期者（排除禁用与余额耗尽号，遵守账箱子集）
-  function pickEarliestExpiry(tried, now, allowUIDs) {
+  // 全冷却兜底：取最早到期者（排除禁用与余额耗尽号，遵守账箱子集与区域）
+  function pickEarliestExpiry(tried, now, allowUIDs, realm) {
     let best = null
     for (const e of byUID.values()) {
       if (tried && tried.has(e.uid)) continue
       if (allowUIDs && !allowUIDs.has(e.uid)) continue
+      if (!realmOK(e, realm)) continue
       if (e.disabled) continue
       if (e.coolKind === COOL_HARD && e.until && now < e.until) continue // 余额耗尽号不兜底
       if (inFlightFull(e)) continue
@@ -802,10 +825,13 @@ function createPool(opts = {}) {
   }
 
   // 诊断当前无候选账号的原因（供错误提示；不做任何状态变更）
-  function diagnoseNoCandidate(model) {
+  // realm：仅统计该区域（未指定则统计全池）
+  function diagnoseNoCandidate(model, realm) {
     const now = Date.now()
-    const diag = { total: 0, disabled: 0, cooling: 0, modelCooled: 0, inFlightFull: 0, healthy: 0 }
+    const scope = normalizeRealm(realm)
+    const diag = { total: 0, disabled: 0, cooling: 0, modelCooled: 0, inFlightFull: 0, healthy: 0, realm }
     for (const e of byUID.values()) {
+      if (!realmOK(e, scope)) continue
       diag.total++
       if (e.disabled) {
         diag.disabled++
@@ -829,12 +855,14 @@ function createPool(opts = {}) {
   }
 
   // 可用 uid 列表（健康且未占满在途，uid 升序）
-  // allowUIDs：账箱子集过滤（null/空 = 全池）
-  function availableUIDs(model, allowUIDs) {
+  // allowUIDs：账箱子集过滤（null/空 = 全池）；realm：区域过滤（空 = 不限）
+  function availableUIDs(model, allowUIDs, realm) {
     const now = Date.now()
+    const scope = normalizeRealm(realm)
     const out = []
     for (const e of byUID.values()) {
       if (allowUIDs && !allowUIDs.has(e.uid)) continue
+      if (!realmOK(e, scope)) continue
       pruneEntry(e, now)
       const ok = model ? healthyForModel(e, now, model) : healthy(e, now)
       if (!ok) continue
@@ -844,11 +872,14 @@ function createPool(opts = {}) {
     return out.sort()
   }
 
-  // 指定 uid 是否可用（模型维度 + 账箱子集）
-  function pickByUID(uid, model, allowUIDs) {
+  // 指定 uid 是否可用（模型维度 + 账箱子集 + 区域）
+  // realm：区域过滤（空 = 不限）。会话粘性复用同一账号时也必须校验区域，
+  // 否则同一条会话跨源切换会把请求派发到另一区域的账号
+  function pickByUID(uid, model, allowUIDs, realm) {
     const e = byUID.get(uid)
     if (!e) return null
     if (allowUIDs && !allowUIDs.has(uid)) return null
+    if (!realmOK(e, normalizeRealm(realm))) return null
     const now = Date.now()
     pruneEntry(e, now)
     const ok = model ? healthyForModel(e, now, model) : healthy(e, now)
@@ -921,6 +952,9 @@ function createPool(opts = {}) {
     return {
       uid: e.uid,
       nickname: e.auth?.nickname || '',
+      // 区域：cn（国内版）/ global（国际版）。界面据此显示区域标签，
+      // 也用于按区域分组展示与运维筛选
+      realm: e.auth?.realm === 'global' ? 'global' : 'cn',
       credits: e.credits,
       creditsTotal: e.creditsTotal,
       creditsExpiring: e.creditsExpiring,

@@ -281,6 +281,9 @@ function getStatsByDays(days) {
     result.cacheWrite += dayStats.cacheWrite
     result.total += dayStats.total
     result.count += dayStats.count
+    // failed 一并累计：请求次数口径 = count + failed（与 getRequestSummary 一致，
+    // 否则状态面板与 Token 统计页对「今天的请求数」会给出两个不同数字）
+    result.failed += dayStats.failed
   }
 
   return result
@@ -303,7 +306,8 @@ function getRecentDaysDetail(days) {
       cacheRead: stats.cacheRead,
       cacheWrite: stats.cacheWrite,
       total: stats.total,
-      count: stats.count
+      count: stats.count,
+      failed: stats.failed
     })
   }
 
@@ -324,7 +328,8 @@ function getHourlyDetailForDay(dateStr) {
       cacheRead: stats.cacheRead,
       cacheWrite: stats.cacheWrite,
       total: stats.total,
-      count: stats.count
+      count: stats.count,
+      failed: stats.failed
     })
   }
 

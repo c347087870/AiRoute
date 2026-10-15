@@ -111,4 +111,55 @@ function effective(saved) {
   return { ...DEFAULTS, ...(saved || {}) }
 }
 
-module.exports = { normalize, effective, DEFAULTS, STRING_FIELDS, NUMERIC_FIELDS, URL_FIELDS }
+// 由版本号推导出的 UA 串（拼接口径与 DEFAULTS 完全一致）。
+// 用途：identity 里同时存了「版本号字段」与「成品 UA 串」，而消费端优先用成品 UA 串
+// （headers.js 的 userAgent：`idv(opts,'workbuddyUA') || 拼接`）。
+// 因此只更新 clientVersion/cliVersion/ideVersion 而不同步这些 UA 串的话，
+// 实际出站 UA 不会变化——版本自动更新会形同虚设。
+// 版本号变更时，用本函数重算「与旧版本保持同步」的那些 UA 串（用户手工改过的不动）。
+// 注意 oauthUA（CLI/2.63.2 CodeBuddy/2.63.2）不受版本号驱动，刻意不在此列。
+function derivedUA(versions) {
+  const v = versions || {}
+  const clientVersion = v.clientVersion || C.DEFAULT_CLIENT_VERSION
+  const cliVersion = v.cliVersion || C.DEFAULT_CLI_VERSION
+  const ideVersion = v.ideVersion || C.DEFAULT_IDE_VERSION
+  const desktopVersion = v.desktopVersion || C.DEFAULT_DESKTOP_VERSION
+  return {
+    workbuddyUA: `WorkBuddy/${clientVersion} WorkBuddy/${clientVersion} CLI/${cliVersion}`,
+    codebuddyUA: `CodeBuddyIDE/${ideVersion} CodeBuddy/${ideVersion}`,
+    workbuddyBillingUA: `WorkBuddy/${clientVersion}`,
+    codebuddyBillingUA: `CodeBuddy/${ideVersion}`,
+    desktopUA: `WorkBuddy/${desktopVersion} WorkBuddy/${desktopVersion} CLI/${cliVersion}`,
+    v3ConfigUA: `CodeBuddyIDE/${ideVersion} CodeBuddy/${ideVersion}`
+  }
+}
+
+// 版本号变更后同步派生的 UA 串。
+// identity：当前保存的 identity；prevVersions：**变更前**的版本号；nextVersions：变更后。
+// 规则：某 UA 串为空、或恰好等于「旧版本号拼出来的默认值」（= 用户没手工定制过）→ 重算为新的；
+//       否则视为用户定制值，保持不动。
+function syncDerivedUA(identity, prevVersions, nextVersions) {
+  const id = { ...(identity || {}) }
+  const from = derivedUA(prevVersions)
+  const to = derivedUA(nextVersions)
+  const changed = {}
+  for (const key of Object.keys(to)) {
+    const cur = typeof id[key] === 'string' ? id[key].trim() : ''
+    if (cur && cur !== from[key]) continue // 用户手工定制过，不动
+    if (to[key] === cur) continue // 已一致，无需改
+    id[key] = to[key]
+    changed[key] = to[key]
+  }
+  return { identity: id, changed }
+}
+
+module.exports = {
+  normalize,
+  effective,
+  derivedUA,
+  syncDerivedUA,
+  DEFAULTS,
+  STRING_FIELDS,
+  NUMERIC_FIELDS,
+  URL_FIELDS
+}

@@ -97,10 +97,15 @@ function createFrameRebuilder(options = {}) {
       return { payloads: [payload], valid: true } // error 帧绕过白名单原样透传
     }
 
+    // 先登记本帧真实 tool_call 的 index，再算合成调用的 index。
+    // 否则 repairFrame 里的 maxToolIdx 还是上一帧的旧值，合成号会与本帧真实调用
+    // 撞号（同一 index 出现两次），并让真实调用的 function.name 被
+    // stripToolCallNames 当成重复帧误删。
+    trackToolIdx(obj)
+
     const frames = repair && repair.enabled() ? repairFrame(obj) : [obj]
     if (passthrough) {
       // native 档：本帧字段原样序列化回吐（帧保真，不收敛不剔除），仅标记修复展开出的合成帧才做规范重建
-      trackToolIdx(obj)
       return { payloads: frames.map(f => (f === obj ? JSON.stringify(obj) : rebuildOne(f))), valid: true }
     }
     return { payloads: frames.map(rebuildOne), valid: true }

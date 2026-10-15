@@ -25,9 +25,13 @@ server/usage.json
 # WorkBuddy 积分历史（运行时数据）
 server/credit-history.json
 
+# WorkBuddy 版本号缓存（运行时数据）
+server/version-cache.json
+
 # 工具本地数据
 .codebuddy/
 .claude/
+.workbuddy-ai/
 # lockfile
 pnpm-lock.yaml
 app/package-lock.json

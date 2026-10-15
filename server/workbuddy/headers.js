@@ -9,13 +9,30 @@ function idv(opts, key) {
   return typeof v === 'string' ? v : ''
 }
 
-// Accept-Language（默认 zh-CN，identity.acceptLanguage 可覆盖）
-function acceptLanguage(opts = {}) {
+// ===== 区域判定 =====
+// 区域有两个来源，二者都要认：
+//   1. account.realm —— 账号对象自身（请求转发 / 账号运维等已有账号的场景）
+//   2. opts.realm    —— 调用方显式指定（OAuth 登录阶段**还没有账号对象**，
+//                       此时 account 传的是 null，区域只能靠 opts 带进来）
+// 早先只认 account.realm，导致「选国际版添加账号」时 OAuth 仍走国内域名——
+// 授权链接指向国内站，登录自然拿不到国际版凭证。
+function isGlobalAccount(account, opts) {
+  if (account && account.realm === 'global') return true
+  if (opts && opts.realm === 'global') return true
+  return false
+}
+
+// Accept-Language：国际版 en-US，国内版 zh-CN
+// identity.acceptLanguage 覆盖只在国内版生效（与域名覆盖同理：它是给国内链路的调节项）
+function acceptLanguage(opts = {}, account = null) {
+  if (isGlobalAccount(account, opts)) return C.GLOBAL_ACCEPT_LANGUAGE
   return idv(opts, 'acceptLanguage') || 'zh-CN'
 }
 
-// Origin/Referer 基础域（默认 CN，identity.originReferer 可覆盖）
+// Origin/Referer 基础域：国际版 workbuddy.ai，国内版 codebuddy.cn
+// identity.originReferer 覆盖同样只在国内版生效
 function originRefererOf(account, opts = {}) {
+  if (isGlobalAccount(account, opts)) return C.ORIGIN_REFERER_GLOBAL
   return idv(opts, 'originReferer') || C.ORIGIN_REFERER_CN
 }
 
@@ -23,14 +40,30 @@ function originRefererOf(account, opts = {}) {
 // workbuddy（默认）= 官方 WorkBuddy 桌面端三段式；codebuddy = 官方 CodeBuddy IDE 两段式
 // （官网积分记录「使用端」列按出站 UA 服务端归因，故身份切换即改这里）
 // identity 可整串覆盖（workbuddyUA / codebuddyUA），也可只覆盖版本号段
+// 国际版账号：平台段必须换成官方国际版 productName（WorkBuddy AI），
+// 送成国内版的 WorkBuddy 可能触发上游 403 code 11140
 function userAgent(account, opts = {}) {
   if (opts.userAgent) return opts.userAgent // 显式覆盖一切
+  const clientVersion = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
+  const cliVersion = idv(opts, 'cliVersion') || C.DEFAULT_CLI_VERSION
+
+  // 国际版优先于 clientIdentity：平台段（WorkBuddy AI）是国际链路的硬要求，
+  // 送错可能触发上游 403 code 11140；而 clientIdentity 是国内站「使用端」归因的概念，
+  // 对国际站不适用。曾把 clientIdentity 判断放在前面，导致配置里选了 codebuddy 时
+  // 国际版账号拿到 CodeBuddyIDE/... 的 UA（既不是 WorkBuddy AI，也不是国际形态）。
+  if (isGlobalAccount(account, opts)) {
+    // workbuddyUA 是「整串 UA 覆盖」，其持久化值通常是从界面保存下来的国内版形态
+    // （WorkBuddy/<v> WorkBuddy/<v> CLI/<v>）——直接采信会把平台段降级。
+    // 仅当覆盖串本身就含国际版平台段时才采信；版本号覆盖照常生效。
+    const override = idv(opts, 'workbuddyUA')
+    if (override && override.includes(C.GLOBAL_UA_PLATFORM)) return override
+    return `WorkBuddy/${clientVersion} ${C.GLOBAL_UA_PLATFORM}/${clientVersion} CLI/${cliVersion}`
+  }
+
   if (opts.clientIdentity === 'codebuddy') {
     const ideVersion = idv(opts, 'ideVersion') || C.DEFAULT_IDE_VERSION
     return idv(opts, 'codebuddyUA') || `CodeBuddyIDE/${ideVersion} CodeBuddy/${ideVersion}`
   }
-  const clientVersion = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
-  const cliVersion = idv(opts, 'cliVersion') || C.DEFAULT_CLI_VERSION
   return idv(opts, 'workbuddyUA') || `WorkBuddy/${clientVersion} WorkBuddy/${clientVersion} CLI/${cliVersion}`
 }
 
@@ -53,14 +86,22 @@ function oauthUA(opts = {}) {
 }
 
 // billing 域 UA：单段无 CLI 段；SaaS 归属模式不设 UA；codebuddy 身份用 CodeBuddy 品牌单段
-function billingUA(opts = {}) {
+// 国际版：平台段同为官方国际版 productName（WorkBuddy AI）
+function billingUA(opts = {}, account = null) {
   const name = opts.clientName || 'WorkBuddy'
   if (name === 'SaaS') return ''
+  const clientVersion = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
+  // 国际版优先于 clientIdentity（同 userAgent：平台段是国际链路硬要求）
+  if (isGlobalAccount(account, opts)) {
+    // 持久化的 workbuddyBillingUA 通常是国内版形态（WorkBuddy/<v>），直接采信会降级平台段
+    const override = idv(opts, 'workbuddyBillingUA')
+    if (override && override.includes(C.GLOBAL_UA_PLATFORM)) return override
+    return `${C.GLOBAL_UA_PLATFORM}/${clientVersion}`
+  }
   if (opts.clientIdentity === 'codebuddy') {
     const ideVersion = idv(opts, 'ideVersion') || C.DEFAULT_IDE_VERSION
     return idv(opts, 'codebuddyBillingUA') || `CodeBuddy/${ideVersion}`
   }
-  const clientVersion = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
   return idv(opts, 'workbuddyBillingUA') || `WorkBuddy/${clientVersion}`
 }
 
@@ -128,7 +169,7 @@ function commonHeaders(account, opts = {}) {
     Referer: `${origin}/`,
     'User-Agent': userAgent(account, opts),
     'X-CodeBuddy-Request': '1', // 官方风控闸门头，所有 API 必带
-    'Accept-Language': acceptLanguage(opts)
+    'Accept-Language': acceptLanguage(opts, account)
   }
   const uid = account?.uid || ''
   if (uid) {
@@ -170,12 +211,22 @@ function chatHeaders(account, meta = {}, opts = {}) {
   else headers['X-No-User-Id'] = '1'
 
   // 企业与域头：EnterpriseID/Domain 原样透传，缺省 X-No-*
+  // 国际版例外（见下）：企业头与域头都写死为国际版形态，不回退登录返回的 domain
   const enterpriseId = account?.enterpriseId || ''
   if (enterpriseId) headers['X-Enterprise-Id'] = enterpriseId
   else headers['X-No-Enterprise-Id'] = '1'
-  const domain = account?.domain || ''
-  if (domain) headers['X-Domain'] = domain
-  else headers['X-No-Department-Info'] = '1'
+  const global = isGlobalAccount(account, opts)
+  if (global) {
+    // 国际版 chat 专属声明：显式声明「无企业」+ 域写死 workbuddy.ai。
+    // 登录返回的 domain 可能是别的取值，透传会被上游判为可疑请求
+    headers['X-No-Enterprise-Id'] = '1'
+    delete headers['X-Enterprise-Id']
+    headers['X-Domain'] = C.GLOBAL_DOMAIN_HEADER
+  } else {
+    const domain = account?.domain || ''
+    if (domain) headers['X-Domain'] = domain
+    else headers['X-No-Department-Info'] = '1'
+  }
 
   Object.assign(headers, attribHeaders(opts))
 
@@ -201,9 +252,9 @@ function billingHeaders(account, opts = {}) {
     Accept: 'application/json',
     'Content-Type': 'application/json',
     'X-CodeBuddy-Request': '1',
-    'Accept-Language': acceptLanguage(opts) // billing 域未走 commonHeaders，单独注入
+    'Accept-Language': acceptLanguage(opts, account) // billing 域未走 commonHeaders，单独注入
   }
-  const ua = opts.userAgent || billingUA(opts)
+  const ua = opts.userAgent || billingUA(opts, account)
   if (ua) headers['User-Agent'] = ua
 
   const uid = account?.uid || ''
@@ -213,8 +264,13 @@ function billingHeaders(account, opts = {}) {
     headers['X-Enterprise-Id'] = enterpriseId
     headers['X-Tenant-Id'] = enterpriseId // 与 Enterprise-Id 同值，同时发
   }
-  const domain = account?.domain || ''
-  if (domain) headers['X-Domain'] = domain
+  if (isGlobalAccount(account, opts)) {
+    // 国际版：域写死 workbuddy.ai，与 chat 通道口径一致
+    headers['X-Domain'] = C.GLOBAL_DOMAIN_HEADER
+  } else {
+    const domain = account?.domain || ''
+    if (domain) headers['X-Domain'] = domain
+  }
   const deviceToken = resolveDeviceToken(account, opts)
   if (deviceToken) headers['X-Device-Token'] = deviceToken
   return headers
@@ -263,13 +319,15 @@ function webHeaders(account, opts = {}) {
 }
 
 // /v3/config 专用请求头（UA 敏感：缺 CodeBuddy 版本号会 400 code=12403）
-function v3ConfigHeaders(account, opts = {}) {
+// uaOverride：国际版目录探测需要并发多种 UA（不同 UA 下发不同模型集），
+// 传了就用它，不再走 v3ConfigUA 的 identity 覆盖
+function v3ConfigHeaders(account, opts = {}, uaOverride = '') {
   const headers = {
     Accept: 'application/json, text/plain, */*',
     'X-Requested-With': 'XMLHttpRequest',
     Authorization: `Bearer ${account?.accessToken || ''}`,
     'X-Product': 'SaaS',
-    'User-Agent': opts.userAgent || v3ConfigUA(opts),
+    'User-Agent': uaOverride || opts.userAgent || v3ConfigUA(opts),
     'X-CodeBuddy-Request': '1'
   }
   const uid = account?.uid || ''
@@ -293,19 +351,47 @@ function v3ConfigDomain(account, opts = {}) {
   }
 }
 
-// chat 域（opts 可覆盖）
+// chat 域：按账号区域切（国际版 workbuddy.ai / 国内版 copilot.tencent.com）
+// 优先级：显式 chatBaseCN > 账号区域 > identity.chatBase 覆盖 > 内置默认
+//
+// 注意：identity 的域名覆盖（chatBase/billingBase/webBase）语义是「给国内版换自定义端点」，
+// 因此**只在国内版生效**。曾把它放在区域判断之后无条件读取，导致配置里一旦设过
+// identity.chatBase，国际版也会被拉回该域名（实测：选了国际版仍拿到国内站授权链接）。
 function chatBaseOf(account, opts = {}) {
-  return opts.chatBaseCN || C.CHAT_BASE_CN
+  if (opts.chatBaseCN) return opts.chatBaseCN
+  if (isGlobalAccount(account, opts)) return C.GLOBAL_CHAT_BASE
+  return idv(opts, 'chatBase') || C.CHAT_BASE_CN
 }
 
-// billing 域（opts 可覆盖）
+// billing 域：国际版与 chat 同域
 function billingBaseOf(account, opts = {}) {
-  return opts.billingBaseCN || C.BILLING_BASE_CN
+  if (opts.billingBaseCN) return opts.billingBaseCN
+  if (isGlobalAccount(account, opts)) return C.GLOBAL_BILLING_BASE
+  return idv(opts, 'billingBase') || C.BILLING_BASE_CN
 }
 
-// 官网域（opts 可覆盖）
+// 官网域：国际版与 chat 同域
 function webBaseOf(account, opts = {}) {
-  return opts.webBaseCN || C.WEB_BASE_CN
+  if (opts.webBaseCN) return opts.webBaseCN
+  if (isGlobalAccount(account, opts)) return C.GLOBAL_WEB_BASE
+  return idv(opts, 'webBase') || C.WEB_BASE_CN
+}
+
+// ===== 计费域路径（按区域）=====
+// 国内版只认带 /v2 前缀的形态；国际版反过来——无前缀优先，404 时回落 /v2。
+// 顺序写反会让国际版计费调用常态失败（每次多一次 404 往返，甚至直接判失败）。
+
+// 余额查询路径候选序列（按优先级）
+// opts：与其它头函数一致，用于 OAuth / 无账号对象场景下按 opts.realm 判定区域
+function billingMeterPathsOf(account, opts = {}) {
+  if (isGlobalAccount(account, opts)) return [C.BILLING_METER_PATH_GLOBAL, C.BILLING_METER_PATH_GLOBAL_V2]
+  return [C.BILLING_METER_PATH_V2]
+}
+
+// 签到路径候选序列（按优先级）
+function checkinPathsOf(account, opts = {}) {
+  if (isGlobalAccount(account, opts)) return [C.DAILY_CHECKIN_PATH_GLOBAL, C.DAILY_CHECKIN_PATH_GLOBAL_V2]
+  return [C.DAILY_CHECKIN_PATH_V2]
 }
 
 // 从入站请求提取客户端 IP（X-Forwarded-For 第一段，回落 X-Real-IP）
@@ -347,5 +433,10 @@ module.exports = {
   chatBaseOf,
   billingBaseOf,
   webBaseOf,
-  extractClientIP
+  extractClientIP,
+  // 区域
+  isGlobalAccount,
+  billingMeterPathsOf,
+  checkinPathsOf,
+  v3ConfigHeaders
 }

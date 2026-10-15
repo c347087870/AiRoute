@@ -2,6 +2,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const { StringDecoder } = require('string_decoder')
 const C = require('./constants')
 const errMod = require('./errors')
 const authMod = require('./auth')
@@ -125,8 +126,14 @@ function init(opts = {}) {
       callbackUrl: opts.callbackUrl || '',
       deviceTokenFile: opts.deviceTokenFile || '' // 设备令牌文件路径
     },
-    models: { ts: 0, list: [], efforts: {}, defaultEfforts: {} },
-    enabledModels: Array.isArray(opts.enabledModels) ? opts.enabledModels : [], // 账号池统一维护的启用模型清单
+    // 模型目录缓存：按区域分槽（byRealm.cn / byRealm.global / byRealm.all）。
+    // 两地模型清单、倍率、思考档位都可能不同，不能共用一个槽位
+    models: { byRealm: {} },
+    // 启用模型清单：按区域分开（国内/国际的可用模型不同）
+    enabledModelsByRealm: {
+      cn: Array.isArray(opts.enabledModels) ? opts.enabledModels : [],
+      global: Array.isArray(opts.enabledModelsGlobal) ? opts.enabledModelsGlobal : []
+    },
     logins: new Map(), // OAuth state → { created }
     loginTTL: 15 * 60 * 1000,
     wafIpGate: wafipMod.createWafIpGate(opts.poolConfig?.wafIp || {}) // WAF IP 级 fail-fast 门
@@ -140,11 +147,15 @@ function init(opts = {}) {
   })
 
   // 成长任务执行队列（账号内串行 / 账号间并发夹取 [1,4]，默认 2）
+  // skipAuth：国际版无成长体系 —— 在队列内统一门控，使「全账号」入口
+  // （runtime.queueOnce 与定时 growthHook 直调 runQueueOnce）都受控，
+  // 避免对必然被上游拒绝的端点空发请求并污染错误计数
   rt.taskQueue = queueMod.createQueue({
     pool,
     log: taskLog,
-    scanPending: auth => tasksMod.scanPendingCodes(auth, rtOpts(rt)),
-    runCode: (auth, code) => rt.taskRunner.runOne(auth, code, rtOpts(rt))
+    skipAuth: skipGrowthFor,
+    scanPending: auth => tasksMod.scanPendingCodes(auth, rtOpts(rt, auth)),
+    runCode: (auth, code) => rt.taskRunner.runOne(auth, code, rtOpts(rt, auth))
   })
 
   // 定时任务调度器（签到/活跃/旅行/保活/夜猫子/成长队列 + 余额后台刷新）
@@ -162,7 +173,11 @@ function init(opts = {}) {
     identityFor: () => rt.cfg.identity,
     // 到点触发成长任务队列（与「全账号入队执行」同管线）
     growthHook: () => {
-      void rt.taskQueue.runQueueOnce()
+      // 不用 void 直接丢弃：runQueueOnce 抛错会变成未捕获 rejection，
+      // Node 15+ 默认终止进程（Electron 主进程同样受影响）
+      rt.taskQueue.runQueueOnce().catch(err => {
+        rt.pushLog('task', `成长任务队列触发失败：${err.message}`, 'error')
+      })
     }
   })
   rt.scheduler.start()
@@ -180,7 +195,7 @@ async function chatOnce(auth, model, message) {
     defaultEfforts: snap.defaultEfforts
   })
   prepared = payloadMod.injectPromptCacheKey(prepared, auth.uid, '')
-  const res = await client.chatStream(auth, prepared, rtOpts(r))
+  const res = await client.chatStream(auth, prepared, rtOpts(r, auth))
   const text = await client.readAll(res.stream, 8 * 1024 * 1024)
   return sseMod.aggregateSSE(text)
 }
@@ -193,13 +208,21 @@ function getRuntime() {
 // ===== OAuth 账号登录 =====
 
 // 发起 OAuth：返回 { state, url }
-async function oauthStart() {
+// realm：'cn'（默认）或 'global'。国际版与国内版的 OAuth 路径完全相同，
+// 只有域名/Origin/UA 不同，故这里把区域贯穿到出站 opts，并在 login 会话里记住，
+// 供 poll 阶段用同一区域落盘（避免用错域名取账号信息）
+async function oauthStart(realm) {
   const r = ensure()
   cleanupLogins(r)
-  const { state, authUrl } = await client.oauthStart(rtOpts(r))
-  r.logins.set(state, { created: Date.now() })
-  r.log(`workbuddy: 发起 OAuth 添加账号（state=${state.slice(0, 8)}...）`)
-  return { state, url: authUrl }
+  const want = authMod.resolveRealmForLogin(realm, '')
+  const { state, authUrl } = await client.oauthStart(rtOpts(r, want))
+  r.logins.set(state, { created: Date.now(), realm: want })
+  r.log(
+    'workbuddy: 发起 OAuth 添加账号（' +
+      (want === authMod.REALM_GLOBAL ? '国际版' : '国内版') +
+      ` state=${state.slice(0, 8)}...）`
+  )
+  return { state, url: authUrl, realm: want }
 }
 
 // 轮询 OAuth 结果：完成则落盘 + 热加载进池
@@ -209,8 +232,16 @@ async function oauthPoll(state) {
   const sess = r.logins.get(state)
   if (!sess) throw new Error('unknown or expired state（请重新发起添加账号）')
 
-  const token = await client.oauthPollToken(state, rtOpts(r))
-  const account = await client.oauthFetchAccount(state, token.accessToken, rtOpts(r))
+  // 先用「用户选择的区域」取 token —— 必须早于任何 token.domain 的使用：
+  // token 尚未取回时引用它会抛 TDZ ReferenceError，导致轮询恒失败、账号永远不落盘
+  // （现象：浏览器已完成授权，界面一直停在「等待登录」）
+  const wantRealm = authMod.resolveRealmForLogin(sess.realm, '')
+  const opts = rtOpts(r, wantRealm)
+
+  const token = await client.oauthPollToken(state, opts)
+  // 落盘区域：用户选择优先；用户没选时用上游返回的 domain 兜底推断
+  const realm = wantRealm || authMod.resolveRealmForLogin('', token.domain)
+  const account = await client.oauthFetchAccount(state, token.accessToken, opts)
   const uid = account?.uid || ''
   if (!authMod.validUID(uid)) {
     throw new Error('上游返回的 uid 含非法字符，拒绝落盘（防路径穿越）')
@@ -221,6 +252,8 @@ async function oauthPoll(state) {
     enterpriseId: account?.enterpriseId || '',
     nickname: account?.nickname || '',
     domain: token.domain || '',
+    // 区域以用户选择为准（显式 realm 优先于 domain 推断）
+    realm,
     accessToken: token.accessToken,
     refreshToken: token.refreshToken,
     expiresAt: token.expiresIn > 0 ? Math.floor(Date.now() / 1000) + token.expiresIn : 0,
@@ -230,20 +263,25 @@ async function oauthPoll(state) {
   authMod.saveAtomic(auth)
   r.pool.add(auth)
   r.pool.revive(uid) // 全新登录 = 人工恢复口径
-  r.models.ts = 0 // 失效模型缓存
+  invalidateModelCache(r) // 失效模型缓存（所有区域）
 
   // 顺带签到 + 余额刷新（失败不影响登录结果）
+  // 国际版不提供签到能力，跳过并如实标注（见 shouldSkipCheckin）
   let checkinMessage = ''
   let credits = -1
   let creditsTotal = 0
-  try {
-    const ck = await client.dailyCheckin(auth, rtOpts(r))
-    checkinMessage = ck.message || ''
-  } catch (err) {
-    checkinMessage = `签到失败: ${err.message}`
+  if (skipCheckinFor(auth)) {
+    checkinMessage = '国际版账号无签到能力，已跳过'
+  } else {
+    try {
+      const ck = await client.dailyCheckin(auth, opts)
+      checkinMessage = ck.message || ''
+    } catch (err) {
+      checkinMessage = `签到失败: ${err.message}`
+    }
   }
   try {
-    const res = await client.userResource(auth, { ...rtOpts(r), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
+    const res = await client.userResource(auth, { ...opts, expiringSoonMs: r.pool.getConfig().expiringSoonMs })
     if (res.ok) {
       credits = res.credits
       creditsTotal = res.total
@@ -255,11 +293,15 @@ async function oauthPoll(state) {
   }
 
   r.logins.delete(state)
-  r.log(`workbuddy: 新账号已热加载 uid=${uid} nickname="${auth.nickname}"（免重启生效）`)
+  r.log(
+    `workbuddy: 新账号已热加载 uid=${uid} nickname="${auth.nickname}" ` +
+      `区域=${realm === authMod.REALM_GLOBAL ? '国际版' : '国内版'}（免重启生效）`
+  )
   return {
     done: true,
     uid,
     nickname: auth.nickname,
+    realm,
     credits,
     creditsTotal,
     checkinMessage
@@ -293,7 +335,7 @@ function removeAccount(uid) {
       /* 文件不存在忽略 */
     }
   }
-  r.models.ts = 0
+  invalidateModelCache(r)
   return true
 }
 
@@ -303,7 +345,7 @@ async function checkinAccount(uid) {
   const auth = r.pool.authByUID(uid)
   if (!auth) return { ok: false, message: '账号不存在' }
   return runTracked(uid, 'checkin', async () => {
-    const res = await client.dailyCheckin(auth, rtOpts(r))
+    const res = await client.dailyCheckin(auth, rtOpts(r, auth))
     if (res.ok) r.pool.noteCheckinDone(uid)
     return res
   })
@@ -320,7 +362,7 @@ async function refreshBalance(uid) {
 // 余额刷新并写回池（含余额恢复解冻）；运行态标记覆盖手动与批量调用
 async function refreshBalanceFor(r, auth) {
   return runTracked(auth.uid, 'balance', async () => {
-    const res = await client.userResource(auth, { ...rtOpts(r), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
+    const res = await client.userResource(auth, { ...rtOpts(r, auth), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
     if (res.ok) {
       r.pool.setCreditsDetailed(auth.uid, res.credits, res.total, res.expiring, res.earliestExpiry, res.earliestRemaining)
       r.pool.reenableIfCredits(auth.uid, res.credits, res.total)
@@ -368,7 +410,7 @@ async function keepaliveAccount(uid) {
 async function refreshTokenFor(r, auth) {
   // 运行态标记：面板可见「保活中」（手动与批量保活都走这里）
   return runTracked(auth.uid, 'keepalive', async () => {
-    const res = await client.refreshToken(auth, rtOpts(r))
+    const res = await client.refreshToken(auth, rtOpts(r, auth))
     // 最近保活结果与时间（面板展示）
     r.pool.noteKeepalive(auth.uid, !!res.ok)
     if (res.ok) {
@@ -436,30 +478,52 @@ function enableAccount(uid) {
 
 // ===== 模型目录 =====
 
-// 拉取上游模型列表（1h 缓存）；force 强制刷新
-async function listUpstreamModels(force) {
+// 拉取上游模型列表（1h 缓存，按区域分别缓存）；force 强制刷新
+// realm：'cn' / 'global' 按区域拉取。不传区域时按「选中账号自身的区域」缓存
+//（绝不混区：两地清单不同，混在 all 槽位会让某区域的请求拿到另一区域的目录）。
+async function listUpstreamModels(force, realm) {
   const r = ensure()
   const now = Date.now()
-  if (!force && r.models.list.length && now - r.models.ts < 3600000) {
-    return r.models.list
-  }
 
-  // 任取一个可用账号（健康优先，其次任意非禁用）
+  // 任取一个可用账号（健康优先，其次任意非禁用）；限定区域时只在区域内挑
   const accounts = r.pool.list()
+  const realmOfUid = uid => {
+    const a = r.pool.authByUID(uid)
+    return a && a.realm === 'global' ? 'global' : 'cn'
+  }
+  const inScope = st => !realm || realmOfUid(st.uid) === realm
   let picked = null
   for (const st of accounts) {
-    if (!st.disabled) {
+    if (!st.disabled && inScope(st)) {
       picked = r.pool.authByUID(st.uid)
       break
     }
   }
   for (const st of accounts) {
-    if (!picked) picked = r.pool.authByUID(st.uid)
+    if (!picked && inScope(st)) picked = r.pool.authByUID(st.uid)
   }
-  if (!picked) throw new Error('没有可用账号，请先添加 WorkBuddy 账号')
+  if (!picked) {
+    const label = realm === 'global' ? '国际版' : realm === 'cn' ? '国内版' : ''
+    throw new Error(`没有可用的${label}账号，请先添加 WorkBuddy 账号`)
+  }
 
-  const list = await client.fetchModels(picked, rtOpts(r))
-  r.models = { ts: now, list, efforts: buildEffortsMap(list, r), defaultEfforts: buildDefaultEffortsMap(list) }
+  // 缓存槽位按实际选中账号的区域（传了区域则必等于该区域）
+  const scope = realmOfUid(picked.uid)
+  const slot = (r.models.byRealm && r.models.byRealm[scope]) || { ts: 0, list: [], efforts: {}, defaultEfforts: {} }
+  if (!force && slot.list.length && now - slot.ts < 3600000) {
+    return slot.list
+  }
+
+  // 探测 opts 必须带区域：国际版走三路 UA + /v2 企业端点（在 client.fetchModels 内部分流），
+  // 国内版走原两路。不带 realm 的话 headers 层会按国内版处理，国际版探测就会走错路径与 UA
+  const list = await client.fetchModels(picked, { ...rtOpts(r, picked), realm: scope })
+  if (!r.models.byRealm) r.models.byRealm = {}
+  r.models.byRealm[scope] = {
+    ts: now,
+    list,
+    efforts: buildEffortsMap(list, r),
+    defaultEfforts: buildDefaultEffortsMap(list)
+  }
   return list
 }
 
@@ -481,11 +545,51 @@ function buildDefaultEffortsMap(list) {
   return map
 }
 
-// 当前缓存的档位表（供请求体管线降级使用）
+// 当前缓存的档位表（供请求体管线降级使用）。
+// 目录按区域分槽（byRealm.cn / byRealm.global），这里把所有槽位合并成一张表——
+// 模型 id 跨区域不重叠（少数同名模型的档位也一致），合并不会互相覆盖；
+// 只读单一槽位（历史 bug：读不存在的 byRealm.all）会让档位降级与默认档补全永远拿不到数据。
 function effortsSnapshot() {
   const r = rt
   if (!r) return { efforts: {}, defaultEfforts: {} }
-  return { efforts: r.models.efforts, defaultEfforts: r.models.defaultEfforts }
+  const byRealm = (r.models && r.models.byRealm) || {}
+  const efforts = {}
+  const defaultEfforts = {}
+  for (const slot of Object.values(byRealm)) {
+    if (!slot || typeof slot !== 'object') continue
+    if (slot.efforts && typeof slot.efforts === 'object') Object.assign(efforts, slot.efforts)
+    if (slot.defaultEfforts && typeof slot.defaultEfforts === 'object') Object.assign(defaultEfforts, slot.defaultEfforts)
+  }
+  return { efforts, defaultEfforts }
+}
+
+// 失效全部区域的模型目录缓存（账号增删 / 重新登录后调用）
+function invalidateModelCache(r) {
+  if (!r) return
+  r.models = { byRealm: {} }
+}
+
+// 在（区域优先的）模型目录里查找条目：先查本区域，再回落 all，
+// 最后在各区域目录里兜底找——区域目录尚未拉取时不至于拿不到能力信息
+function findModelEntry(r, model, realm) {
+  if (!model) return null
+  const byRealm = (r && r.models && r.models.byRealm) || {}
+  const scope = realm === 'global' || realm === 'cn' ? realm : ''
+  const order = []
+  if (scope) order.push(scope)
+  order.push('all')
+  for (const key of order) {
+    const slot = byRealm[key]
+    if (!slot || !Array.isArray(slot.list)) continue
+    const hit = slot.list.find(m => m && m.id === model)
+    if (hit) return hit
+  }
+  for (const slot of Object.values(byRealm)) {
+    if (!slot || !Array.isArray(slot.list)) continue
+    const hit = slot.list.find(m => m && m.id === model)
+    if (hit) return hit
+  }
+  return null
 }
 
 // ===== 聊天转发 =====
@@ -519,20 +623,27 @@ async function forwardChat(opts) {
   const logTaskKey = sessionMod.extractTaskKey(baseBody) || turnKey
   // 会话头族 meta：轮转循环外生成一次 → 换号/重试/降级全部同 ID，后台不再碎片化
   const chatMeta = buildChatMeta(baseBody, { sessionKey, turnKey, inbound: opts.inbound })
+  // 区域隔离选号：opts.realm 由调用方（router，按当前 WorkBuddy 源）指定。
+  // 未指定 = 不限区域（兼容旧调用方 / 单源场景）。
+  // 必须在 hintContextOf / modelRateOf / modelCapsOf 之前确定：它们要按区域查目录
+  const pickRealm = authMod.resolveRealm(opts.realm, '') === authMod.REALM_GLOBAL ? 'global' : opts.realm === 'cn' ? 'cn' : ''
   // gateway_hint 判定上下文（必须在提示词改写前取：改写会动 messages 内容）
-  const hintCtx = hintContextOf(r, baseBody, model)
-  // 用量统计的积分倍率：模型在 r.models.list 里的 rate 字段（缺失为 ''）
-  const modelRate = modelRateOf(r, model)
+  const hintCtx = hintContextOf(r, baseBody, model, pickRealm)
+  // 用量统计的积分倍率：模型在对应区域目录里的 rate 字段（缺失为 ''）
+  const modelRate = modelRateOf(r, model, pickRealm)
   // 提示词体系（降级期 append 退化为替换）
   const applied = promptMod.applyPromptMode(body, r.cfg.promptMode, r.cfg.promptText)
   body = applied.body
   let degradedApplied = applied.degradedApplied
 
   // 粘性号：循环外解析一次；不可用时解绑并回落普通轮换
+  // 区域校验：会话绑定不区分区域（会话路由器的可用集是全池），若不校验，
+  // 同一条会话先走国内源再走国际源时会把粘性号带过去 → 跨区派发（把请求发到错误上游）。
+  // 与 pick 一样，区域不符一律视为不可用（解绑后重新分配）。
   let stickyUID = ''
   if (sessionKey) {
     const bound = r.session.resolveForModel(sessionKey, model, null)
-    if (bound.ok) stickyUID = bound.uid
+    if (bound.ok && realmOfAuth(r, bound.uid) === pickRealm) stickyUID = bound.uid
   }
   const unbindSticky = () => {
     if (stickyUID) {
@@ -545,7 +656,7 @@ async function forwardChat(opts) {
   let lastError = null
   let wafIpBlocked = false // WAF IP 级判定后终止轮转
   // 模型上下文窗口与输出上限（所有尝试共用；请求级错误分支与管线都要用）
-  const caps = modelCapsOf(r, model)
+  const caps = modelCapsOf(r, model, pickRealm)
   // 上游报告上下文过长 → 下次尝试改用激进裁剪比例（0 表示用默认比例）
   let compressRatio = 0
   // 上游只产出思考、未产出最终回答（finish_reason=length）的换号重试剩余次数
@@ -560,21 +671,23 @@ async function forwardChat(opts) {
     // 选号：粘性优先，其次池 pick
     // relaxTried（空回答重试）时允许回落复用上次账号——失败未被罚号，严格排除 tried
     // 可能直接无号可用；但只要能换到新号就换，故先按 tried 选，取不到才放开
+    // realm：按区域隔离选号（国内/国际账号域名与能力不同，绝不跨区派发）
     const relaxTried = allowRetriedUID
     allowRetriedUID = false
     let auth = null
-    if (stickyUID && !tried.has(stickyUID)) auth = r.pool.pickByUID(stickyUID, model, null)
-    if (!auth && stickyUID) unbindSticky() // 粘性号在当前模型不可用（冷却/占满/模型受限）→ 解绑
-    if (!auth) auth = r.pool.pick({ tried, model })
-    if (!auth && relaxTried) auth = r.pool.pick({ model })
+    if (stickyUID && !tried.has(stickyUID)) auth = r.pool.pickByUID(stickyUID, model, null, pickRealm)
+    if (!auth && stickyUID) unbindSticky() // 粘性号在当前模型不可用（冷却/占满/模型受限/区域不符）→ 解绑
+    if (!auth) auth = r.pool.pick({ tried, model, realm: pickRealm })
+    if (!auth && relaxTried) auth = r.pool.pick({ model, realm: pickRealm })
     if (!auth) {
       // 区分「账号不可用」与「该模型在账号池中暂时不可用」——后者切换模型即可恢复
-      const diag = r.pool.diagnoseNoCandidate(model)
+      const diag = r.pool.diagnoseNoCandidate(model, pickRealm)
       const modelBlocked = diag.modelCooled > 0 && diag.healthy === 0 && diag.cooling === 0
+      const realmLabel = pickRealm === 'global' ? '国际版' : '国内版'
       const err = new Error(
         modelBlocked
-          ? `模型 ${model} 在账号池中暂时不可用（模型级限流或该后端无此模型），请切换其他模型或稍后重试`
-          : errMod.NO_HEALTHY_HINT
+          ? `模型 ${model} 在${realmLabel}账号池中暂时不可用（模型级限流或该后端无此模型），请切换其他模型或稍后重试`
+          : `${realmLabel}账号池中${errMod.NO_HEALTHY_HINT}`
       )
       err.code = modelBlocked ? 'model_temporarily_unavailable' : errMod.NO_HEALTHY_CODE
       err.noHealthy = true
@@ -619,8 +732,9 @@ async function forwardChat(opts) {
       })
       prepared = payloadMod.injectPromptCacheKey(prepared, auth.uid, sessionKey || '')
 
+      // 出站选项按「本次选中的账号」区域生成：国际版账号必须走 workbuddy.ai 域
       const upstreamRes = await client.chatStream(auth, prepared, {
-        ...rtOpts(r),
+        ...rtOpts(r, auth),
         clientIP: opts.clientIP,
         meta: chatMeta
       })
@@ -657,13 +771,32 @@ async function forwardChat(opts) {
       // 不调用 onDone 也不记用量为成功——调用方可能在 onDone 里已把响应交给客户端，
       // 此时重试会让客户端收到两份回答
       // opts.noEmptyRetry：调用方主动用极小输出预算（如 token 计数），空回答属预期，不重试
+      // 重试时上调输出预算：上游把 reasoning 计入 max_tokens，小预算下思考烧光预算、
+      // 正文为空；换号无法解决（每个账号行为一致），必须给足预算才可能拿到正文
       if (emptyAnswer && truncationRetries > 0 && !opts.noEmptyRetry) {
         truncationRetries--
         allowRetriedUID = true
         recordUsageAttempt(r, { auth, model, rate: modelRate, startedAt: attemptStarted, ok: false, delta: cost })
+        const raised = raiseOutputBudget(body, caps.maxOutput)
+        const changed = raised !== body
+        const before = (() => {
+          try {
+            return JSON.parse(body).max_tokens
+          } catch {
+            return undefined
+          }
+        })()
+        const after = (() => {
+          try {
+            return JSON.parse(raised).max_tokens
+          } catch {
+            return undefined
+          }
+        })()
+        body = raised
         r.pushLog(
           'chat',
-          `模型只产出思考未产出回答（finish_reason=length）→ 换号重试 model=${model} uid=${auth.uid.slice(0, 8)}`,
+          `模型只产出思考未产出回答（finish_reason=length）→ ${changed ? `输出预算 ${before} → ${after} 后重试` : '预算无法再提高，换号重试'} model=${model} uid=${auth.uid.slice(0, 8)}`,
           'warn'
         )
         if (!(await sleepCancellable(backoffAfter(attempt), opts.isAborted))) break
@@ -812,7 +945,11 @@ function applyErrorPolicy(r, uid, err, model) {
       return
     }
     case errMod.ERR_KIND.SESSION_DEAD:
-      pool.disable(uid, '12153 session dead')
+      // 与保活路径口径一致：连续 3 次才禁用。单次抖动或上游偶发 12153 不应把
+      // 可用账号打成终态（disable 只能人工 revive）。详见 keepalive 的同名处置
+      if (pool.noteSessionDead(uid)) {
+        pool.disable(uid, '12153 session dead (连续 3 次)')
+      }
       return
     case errMod.ERR_KIND.NOT_FOUND:
       pool.cooldown(uid, pool.COOL_SOFT, C.POOL_DEFAULTS.notFoundCooldownMs, 'upstream 404')
@@ -900,8 +1037,8 @@ function hasImagePart(bodyText) {
 }
 
 // gateway_hint 判定上下文（必须在提示词改写前取）
-function hintContextOf(r, bodyText, model) {
-  const entry = (r.models.list || []).find(m => m && m.id === model)
+function hintContextOf(r, bodyText, model, realm) {
+  const entry = findModelEntry(r, model, realm)
   return {
     model: model || '',
     hasImage: hasImagePart(bodyText),
@@ -986,9 +1123,8 @@ function recordUsageAttempt(r, info) {
 }
 
 // 取模型在 r.models.list 里的积分倍率（rate 字段，缺失为 ''）
-function modelRateOf(r, model) {
-  const list = (r.models && r.models.list) || []
-  const entry = list.find(m => m && m.id === model)
+function modelRateOf(r, model, realm) {
+  const entry = findModelEntry(r, model, realm)
   return entry && typeof entry.rate === 'string' ? entry.rate : ''
 }
 
@@ -1051,6 +1187,9 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
     let validFrames = 0
     let doneSent = false
     let buffer = ''
+    // UTF-8 增量解码器：分块边界可能落在多字节字符中间，逐块 toString() 会让
+    // 响应正文出现 U+FFFD 乱码（且不报错，属静默损坏）
+    const decoder = new StringDecoder('utf8')
     let finished = false
     let idleTimer = null
     let lastActivity = Date.now()
@@ -1081,7 +1220,6 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
 
     const writeFrame = payload => {
       if (doneSent) return
-      wroteFrames = true
       try {
         opts.onChunk?.(`data: ${payload}\n\n`)
       } catch {
@@ -1189,6 +1327,7 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
 
     const handleEnd = () => {
       if (finished) return
+      buffer += decoder.end() // 冲刷未完成的最后一个多字节字符
       // 冲刷残行
       if (buffer) {
         const res = handleLine(buffer)
@@ -1204,7 +1343,7 @@ function streamToClient(r, upstreamStream, opts, releaseHeld, hintCtx, declaredT
     upstreamStream.on('data', chunk => {
       if (finished) return
       lastActivity = Date.now()
-      buffer += chunk.toString()
+      buffer += decoder.write(chunk)
       let idx
       while ((idx = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, idx)
@@ -1256,6 +1395,8 @@ function frameShapeOf(payloads) {
 }
 
 // 聚合结果是否为「只有思考、没有最终回答」（与流式路径 frameShapeOf 判定一致）
+// opts 额外支持 { sawReasoning }：流式路径已知产出过思考帧时由调用方告知，
+// 非流式路径从 message.reasoning_content 推断；仅用于日志措辞与预算上调幅度
 function isEmptyAnswer(aggregated) {
   const choice = (aggregated && Array.isArray(aggregated.choices) && aggregated.choices[0]) || {}
   const message = choice.message && typeof choice.message === 'object' ? choice.message : {}
@@ -1264,10 +1405,46 @@ function isEmptyAnswer(aggregated) {
   return choice.finish_reason === 'length' && !hasContent && !hasCalls
 }
 
+// 截断重试时的输出预算上调：取 max(当前值 × 2, RAISE_MIN_TOKENS)，并以模型输出上限封顶。
+// 上游把 reasoning（思考）计入 max_tokens，思考型模型在小预算下会把预算全部烧在
+// 思考上、正文为空且 finish_reason=length —— 单纯换号重试无法解决（每个账号行为一致），
+// 只有给足预算才能拿到正文。
+// 下限取 32768 的依据（实测 deepseek-v4.1-flash + 复杂任务）：
+//   预算 4000  → 思考烧光、正文为空（失败）
+//   预算 16384 → 多数可拿到正文，但个别请求仍失败
+//   预算 32768 → 稳定拿到正文
+// 思考所需规模与请求原本的预算无关（预算 4000 与 100 的请求，思考量相同），
+// 故必须设绝对下限而非仅做倍数放大；32K 对上游 384K 的输出上限而言仍有充足空间。
+// 返回新的请求体文本；无法解析时原样返回
+const RAISE_MIN_TOKENS = 32768
+
+function raiseOutputBudget(bodyText, maxOutput) {
+  let obj
+  try {
+    obj = JSON.parse(bodyText)
+  } catch {
+    return bodyText
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return bodyText
+
+  const curRaw = Number(obj.max_tokens)
+  const cur = Number.isFinite(curRaw) && curRaw > 0 ? curRaw : 0
+  const cap = Number(maxOutput) > 0 ? Number(maxOutput) : 0
+  let next = Math.max(cur * 2, RAISE_MIN_TOKENS)
+  if (cap > 0 && next > cap) next = cap
+  if (next <= cur) return bodyText // 已达上限：无法再提高
+  obj.max_tokens = next
+  try {
+    return JSON.stringify(obj)
+  } catch {
+    return bodyText
+  }
+}
+
 // 模型上下文窗口与输出上限（供压缩判据与 max_tokens 兜底）
 // 上游模型目录命中优先，未命中回落静态兜底链；两者都拿不到时为 0（各自跳过对应动作）
-function modelCapsOf(r, model) {
-  const entry = (r.models.list || []).find(m => m && m.id === model)
+function modelCapsOf(r, model, realm) {
+  const entry = findModelEntry(r, model, realm)
   return {
     contextWindow: catalogMod.contextWindowOf(model, entry && entry.maxContext, { dataDir: r.dataDir }),
     maxOutput: catalogMod.outputTokensOf(model, entry && entry.maxOutput, { dataDir: r.dataDir })
@@ -1312,8 +1489,17 @@ function strOr(v) {
 }
 
 // 运行时配置 → 客户端调用选项
-function rtOpts(r) {
+// realmOrAuth：调用方已知的账号区域，可传 'global'/'cn' 字符串，或直接传 auth 对象
+//（传 auth 对象时按该账号自身区域判定，最不易出错）。
+// 国际版**不下发 identity 的 CN 域名覆盖**——那三个覆盖位是给国内版换自定义端点用的，
+// 若原样传给国际版会把请求发到国内域名。
+function rtOpts(r, realmOrAuth) {
   const id = r.cfg.identity || {}
+  const realm =
+    realmOrAuth && typeof realmOrAuth === 'object'
+      ? realmOrAuth.realm
+      : realmOrAuth
+  const global = realm === authMod.REALM_GLOBAL
   return {
     // 客户端指纹与版本覆盖（全字段透传，消费端留空回落官方默认；任务链路同样生效）
     identity: id,
@@ -1322,13 +1508,37 @@ function rtOpts(r) {
     // 使用端身份：出站 UA 与用量归属头（X-IDE-*）按此切换，热改后下一次请求即生效
     clientIdentity: r.cfg.clientIdentity,
     passthroughIP: false,
-    // 域名三件套（identity.chatBase / billingBase / webBase；留空回落 CN 默认）
-    chatBaseCN: id.chatBase || '',
-    billingBaseCN: id.billingBase || '',
-    webBaseCN: id.webBase || '',
+    // 区域：必须显式下发。OAuth 阶段还没有账号对象（chatBaseOf(null, opts)），
+    // 消费端只能靠 opts.realm 判定该走 workbuddy.ai 还是 copilot.tencent.com
+    realm: global ? 'global' : 'cn',
+    // 域名三件套（identity.chatBase / billingBase / webBase；留空回落默认）
+    // 国际版不下发这三个覆盖，交由消费端按区域取 workbuddy.ai
+    chatBaseCN: global ? '' : id.chatBase || '',
+    billingBaseCN: global ? '' : id.billingBase || '',
+    webBaseCN: global ? '' : id.webBase || '',
     // 设备令牌文件兜底（5min 缓存 + ≤1KB + 读失败不注入）
     deviceTokenFileReader: () => readDeviceTokenCached(r.cfg.deviceTokenFile)
   }
+}
+
+// 账号所属区域（uid → 'cn' / 'global'；账号不存在或未知一律回落 'cn'）
+// 供区域隔离判定复用（粘性号校验、按区域挑账号等）
+function realmOfAuth(r, uid) {
+  const a = r.pool.authByUID(uid)
+  return a && a.realm === authMod.REALM_GLOBAL ? 'global' : 'cn'
+}
+
+// 国际版是否跳过签到：上游对国际版不提供签到能力（调了必然 4xx，
+// 既消耗请求又污染错误计数），故整条跳过。
+// 与参考实现（workbuddy2api-panel）的调度侧 IsGlobal 门控一致。
+function skipCheckinFor(auth) {
+  return !!(auth && auth.realm === authMod.REALM_GLOBAL)
+}
+
+// 国际版是否跳过成长体系（成长任务 / 旅行 / 连登 / 夜猫子）：
+// 国际版无个人成长体系，这些端点一律拒绝
+function skipGrowthFor(auth) {
+  return !!(auth && auth.realm === authMod.REALM_GLOBAL)
 }
 
 // ===== 积分构成 / 模型清单 / 运行日志 =====
@@ -1338,7 +1548,7 @@ async function creditPackages(uid) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
-  return client.resourcePackages(auth, { ...rtOpts(r), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
+  return client.resourcePackages(auth, { ...rtOpts(r, auth), expiringSoonMs: r.pool.getConfig().expiringSoonMs })
 }
 
 // 积分变动流水（新的在前；limit 默认 50、上限 1000，uid 可选精确过滤，offset 翻页）
@@ -1372,20 +1582,26 @@ function creditHistory(limitArg, uidArg, offsetArg) {
 }
 
 // 账号池统一维护的启用模型清单（供 Provider 同步；只含落盘字段，不附加派生信息）
-function getEnabledModels() {
-  return ensure().enabledModels || []
+// realm：按区域取清单（国内/国际的模型清单不同）。不传 = 返回国内版清单（兼容旧调用）
+function getEnabledModels(realm) {
+  const r = ensure()
+  const scope = realm === 'global' ? 'global' : 'cn'
+  const byRealm = r.enabledModelsByRealm || {}
+  return byRealm[scope] || []
 }
 
 // 启用模型清单 + 后台拉取到的思考档位（供 Provider 弹窗渲染下拉选项与默认值）
 // 档位来源：上游模型清单命中则用上游 supportedEfforts，未命中回落静态兜底表；
 // 仅用于界面展示，不写入 Provider 配置，避免把派生字段落进 models.json
-function getEnabledModelsWithEfforts() {
+function getEnabledModelsWithEfforts(realm) {
   const r = ensure()
-  return (r.enabledModels || []).map(m => {
-    const entry = (r.models.list || []).find(x => x && x.id === m.id)
+  const scope = realm === 'global' ? 'global' : 'cn'
+  return getEnabledModels(scope).map(m => {
+    const entry = findModelEntry(r, m.id, scope)
     const upstreamEfforts = entry && Array.isArray(entry.efforts) ? entry.efforts : []
     return {
       ...m,
+      realm: scope,
       efforts: catalogMod.supportedEffortsOf(m.id, upstreamEfforts),
       defaultEffort: catalogMod.defaultEffortOf(m.id, upstreamEfforts, entry && entry.defaultEffort)
     }
@@ -1393,10 +1609,12 @@ function getEnabledModelsWithEfforts() {
 }
 
 // 设置启用模型清单（内存态；持久化由调用方写入 server-config）
-function setEnabledModels(models) {
+// realm：写入哪个区域的清单
+function setEnabledModels(models, realm) {
   const r = ensure()
+  const scope = realm === 'global' ? 'global' : 'cn'
   const list = Array.isArray(models) ? models : []
-  r.enabledModels = list
+  const normalized = list
     .map(m => ({
       id: String(m?.id || '').trim(),
       displayName: String(m?.displayName || m?.name || '').trim(),
@@ -1404,7 +1622,38 @@ function setEnabledModels(models) {
       maxOutput: toIntOrNull(m?.maxOutput)
     }))
     .filter(m => m.id)
-  return r.enabledModels
+  if (!r.enabledModelsByRealm) r.enabledModelsByRealm = { cn: [], global: [] }
+  r.enabledModelsByRealm[scope] = normalized
+  return normalized
+}
+
+// 校验一批模型是否属于指定区域（**只用已缓存目录，不触发网络请求**）。
+// 目的：阻止跨区域误写。国内版与国际版的模型清单完全不同
+// （国内 deepseek/glm/kimi…，国际 default-model/fast-model/o4-mini…），
+// 一旦把国际模型写进国内槽位，该源的全部模型引用都会失效——曾真实发生过。
+// 判定从严：「明确只存在于另一区域目录」才拒绝；任一目录未缓存则放行（不阻塞正常保存）
+function validateModelsForRegion(region, models) {
+  const r = rt
+  if (!r || !r.models) return { ok: true, rejected: [] }
+  const scope = region === 'global' ? 'global' : 'cn'
+  const other = scope === 'global' ? 'cn' : 'global'
+  const idsOf = key => {
+    const slot = (r.models.byRealm || {})[key]
+    if (!slot || !Array.isArray(slot.list) || !slot.list.length) return null
+    return new Set(slot.list.map(m => String(m && m.id || '').trim()).filter(Boolean))
+  }
+  const mine = idsOf(scope)
+  const theirs = idsOf(other)
+  if (!mine && !theirs) return { ok: true, rejected: [] } // 无缓存可依，放行
+  const rejected = []
+  for (const m of Array.isArray(models) ? models : []) {
+    const id = String((m && m.id) || '').trim()
+    if (!id) continue
+    const inMine = mine ? mine.has(id) : true // 本区域目录未知时视为可能属于
+    const inOther = theirs ? theirs.has(id) : false
+    if (!inMine && inOther) rejected.push(id)
+  }
+  return { ok: rejected.length === 0, rejected }
 }
 
 // 正整数或 null（未配置不写入）
@@ -1431,13 +1680,25 @@ function getLogs(options = {}) {
 }
 
 // ===== 成长任务 =====
+// 国际版账号没有个人成长体系（上游对成长任务端点一律拒绝），
+// 入口统一拒绝并给出明确原因，避免面板点了以后只看到一串上游 4xx。
+
+// 国际版成长任务统一错误
+function growthUnsupportedError(auth) {
+  const err = new Error(
+    `国际版账号（${String(auth?.nickname || auth?.uid || '').slice(0, 20)}）没有成长任务体系，该功能仅国内版可用`
+  )
+  err.code = 'growth_unsupported_realm'
+  return err
+}
 
 // 查询单账号任务列表（含进度与奖励）
 async function taskList(uid) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
-  return tasksMod.fetchTasks(auth, rtOpts(r))
+  if (skipGrowthFor(auth)) throw growthUnsupportedError(auth)
+  return tasksMod.fetchTasks(auth, rtOpts(r, auth))
 }
 
 // 一键完成：taskCode 为空跑全部可自动化任务，否则只跑指定任务
@@ -1445,7 +1706,8 @@ async function taskRun(uid, taskCode) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
-  return taskCode ? r.taskRunner.runOne(auth, taskCode, rtOpts(r)) : r.taskRunner.runAll(auth, rtOpts(r))
+  if (skipGrowthFor(auth)) throw growthUnsupportedError(auth)
+  return taskCode ? r.taskRunner.runOne(auth, taskCode, rtOpts(r, auth)) : r.taskRunner.runAll(auth, rtOpts(r, auth))
 }
 
 // 任务执行进度快照
@@ -1453,14 +1715,14 @@ function taskProgress() {
   return ensure().taskRunner.getProgress()
 }
 
-// 全账号任务扫描（返回每账号未完成/可自动化任务）
+// 全账号任务扫描（返回每账号未完成/可自动化任务）；国际版账号不参与扫描
 async function taskScan() {
   const r = ensure()
   const auths = r.pool
     .list()
     .filter(st => !st.disabled)
     .map(st => r.pool.authByUID(st.uid))
-    .filter(Boolean)
+    .filter(a => a && !skipGrowthFor(a))
   return tasksMod.scanTasks(auths, rtOpts(r))
 }
 
@@ -1477,16 +1739,17 @@ async function taskAccept(uid, codes) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
+  if (skipGrowthFor(auth)) throw growthUnsupportedError(auth)
   const list = (Array.isArray(codes) ? codes : []).filter(Boolean)
   if (list.length > 0) {
-    await tasksMod.acceptTasks(auth, list, rtOpts(r))
+    await tasksMod.acceptTasks(auth, list, rtOpts(r, auth))
     return { ok: true, accepted: list.length }
   }
-  const res = await tasksMod.acceptAllFor(auth, rtOpts(r), r.taskLog)
+  const res = await tasksMod.acceptAllFor(auth, rtOpts(r, auth), r.taskLog)
   return { ok: true, accepted: res.accepted, failed: res.failed }
 }
 
-// 接受多个账号的全部未接受任务（uids 为空则全部非禁用账号）
+// 接受多个账号的全部未接受任务（uids 为空则全部非禁用账号；国际版跳过）
 async function taskAcceptAll(uids) {
   const r = ensure()
   const filter = Array.isArray(uids) && uids.length > 0 ? new Set(uids.map(String)) : null
@@ -1497,8 +1760,12 @@ async function taskAcceptAll(uids) {
   for (const st of states) {
     const auth = r.pool.authByUID(st.uid)
     if (!auth) continue
+    if (skipGrowthFor(auth)) {
+      accounts.push({ uid: st.uid, accepted: 0, skipped: 'international' })
+      continue
+    }
     try {
-      const res = await tasksMod.acceptAllFor(auth, rtOpts(r), r.taskLog)
+      const res = await tasksMod.acceptAllFor(auth, rtOpts(r, auth), r.taskLog)
       accepted += res.accepted
       failed.push(...res.failed)
       accounts.push({ uid: st.uid, accepted: res.accepted })
@@ -1514,22 +1781,27 @@ async function taskClaim(uid, taskCode) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
+  if (skipGrowthFor(auth)) throw growthUnsupportedError(auth)
   const code = String(taskCode || '').trim()
   if (!code) throw new Error('缺少 taskCode')
-  const res = await tasksMod.claimTask(auth, code, rtOpts(r))
+  const res = await tasksMod.claimTask(auth, code, rtOpts(r, auth))
   return { ok: true, already_claimed: !!res.alreadyClaimed, credit: res.credit, energy: res.energy }
 }
 
-// 全账号（或指定 uids）入队执行成长任务
+// 全账号（或指定 uids）入队执行成长任务（国际版账号不入队）
+// 区域门控统一在队列的 skipAuth 里做（见 taskQueue 构造），此处只需透传 uids，
+// 保证「指定账号」与「全账号」两条路径行为一致
 function queueOnce(uids, options) {
   const r = ensure()
-  return r.taskQueue.runQueueOnce(uids, options || {})
+  const filter = Array.isArray(uids) && uids.length > 0 ? uids.map(String) : null
+  return r.taskQueue.runQueueOnce(filter, options || {})
 }
 
-// 指定账号入队执行指定任务码
+// 指定账号入队执行指定任务码（国际版拒绝）
 function enqueue(uid, codes) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
+  if (auth && skipGrowthFor(auth)) return { ok: false, enqueued: 0, error: growthUnsupportedError(auth).message }
   const nickname = auth ? auth.nickname : ''
   const n = r.taskQueue.enqueue(uid, codes, { nickname, auth })
   return { ok: true, enqueued: n }
@@ -1600,6 +1872,17 @@ module.exports = {
   // 供单测/调试：轮转退避与设备令牌文件读取
   backoffAfter,
   readDeviceTokenCached,
+  // 供单测/调试：截断重试时的输出预算上调
+  raiseOutputBudget,
+  isEmptyAnswer,
+  // 供单测/调试：区域门控
+  skipCheckinFor,
+  skipGrowthFor,
+  growthUnsupportedError,
+  realmOfAuth,
+  invalidateModelCache,
+  findModelEntry,
+  rtOpts,
   // 定时任务调度
   schedulerState: () => ensure().scheduler.getState(),
   schedulerRun: task => ensure().scheduler.runNow(task),
@@ -1622,8 +1905,16 @@ module.exports = {
   getEnabledModels,
   getEnabledModelsWithEfforts,
   setEnabledModels,
+  validateModelsForRegion,
   getLogs,
   // 用量 / 积分消耗统计
   usageSnapshot: hours => ensure().usage.snapshot(hours),
-  usageSave: () => ensure().usage.save()
+  usageSave: () => ensure().usage.save(),
+  // 仅供单测：清空单例，使后续 init 能以新的 dataDir 重新初始化。
+  // 生产代码不得调用（会让运行中的调度器/池状态与实例脱钩）
+  __resetForTest: () => {
+    if (rt && rt.scheduler && typeof rt.scheduler.stop === 'function') rt.scheduler.stop()
+    if (rt && rt.session && typeof rt.session.stopGC === 'function') rt.session.stopGC()
+    rt = null
+  }
 }

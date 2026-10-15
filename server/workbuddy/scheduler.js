@@ -186,8 +186,15 @@ function createScheduler(deps) {
   // ===== 通用工具（闭包内，需 deps）=====
 
   // 客户端调用选项（与 runtime rtOpts 同口径：identity 全字段透传 + 域名映射）
-  function baseOpts() {
+  // 区域感知：realmOrAuth 传账号对象（或 'cn'/'global' 字符串）。
+  // identity 的 chatBase/billingBase/webBase 语义是「给国内版换自定义端点」，
+  // 而 headers 层的显式覆盖**优先于**区域判断 —— 若原样下发，国际版账号的
+  // 签到 / 余额 / 活跃上报等定时任务会被拉回国内域名（实测：401 Authorization Required）。
+  // 故国际版一律不下发这三个覆盖，交由 headers 按区域取 workbuddy.ai。
+  function baseOpts(realmOrAuth) {
     const id = typeof deps.identityFor === 'function' ? deps.identityFor() || {} : {}
+    const realm = realmOrAuth && typeof realmOrAuth === 'object' ? realmOrAuth.realm : realmOrAuth
+    const global = realm === 'global'
     return {
       // 客户端指纹与版本覆盖（留空回落官方默认；实时读取，热改后任务类请求同样跟随）
       identity: id,
@@ -196,10 +203,12 @@ function createScheduler(deps) {
       // 使用端身份：由 runtime 注入的 getter 实时读取（热改后任务类请求同样跟随）
       clientIdentity: typeof deps.clientIdentityFor === 'function' ? deps.clientIdentityFor() : '',
       passthroughIP: false,
-      // 域名三件套（identity 覆盖；留空回落 CN 默认）
-      chatBaseCN: id.chatBase || '',
-      billingBaseCN: id.billingBase || '',
-      webBaseCN: id.webBase || ''
+      // 区域：必须显式下发，headers 据此选择 workbuddy.ai / copilot.tencent.com
+      realm: global ? 'global' : 'cn',
+      // 域名三件套（identity 覆盖；留空回落默认）。国际版不下发，避免被拉回国内域名
+      chatBaseCN: global ? '' : id.chatBase || '',
+      billingBaseCN: global ? '' : id.billingBase || '',
+      webBaseCN: global ? '' : id.webBase || ''
     }
   }
 
@@ -211,7 +220,7 @@ function createScheduler(deps) {
 
   // billing 域 POST（report / 礼包 / 补偿共用）
   async function billingPost(a, path, data) {
-    const opts = baseOpts()
+    const opts = baseOpts(a)
     const res = await client.send({
       method: 'POST',
       url: `${headers.billingBaseOf(a, opts)}${path}`,
@@ -280,29 +289,29 @@ function createScheduler(deps) {
 
   // 连登天数（只读 oracle）
   async function growthStreakDays(a) {
-    const data = await client.growthOK(a, 'GET', C.GROWTH_STREAK_PATH, null, baseOpts())
+    const data = await client.growthOK(a, 'GET', C.GROWTH_STREAK_PATH, null, baseOpts(a))
     return Number(data && data.streak && data.streak.days) || 0
   }
 
   // 连登完整状态
   async function growthStreakFull(a) {
-    return client.growthOK(a, 'GET', C.GROWTH_STREAK_PATH, null, baseOpts())
+    return client.growthOK(a, 'GET', C.GROWTH_STREAK_PATH, null, baseOpts(a))
   }
 
   // 兑换连登档位
   async function redeemTier(a, tier) {
-    await client.growthOK(a, 'POST', C.GROWTH_REDEEM_PATH, { tier, client_token: clientToken() }, baseOpts())
+    await client.growthOK(a, 'POST', C.GROWTH_REDEEM_PATH, { tier, client_token: clientToken() }, baseOpts(a))
   }
 
   // 抽奖次数
   async function lotteryChances(a) {
-    const data = await client.growthOK(a, 'GET', C.LOTTERY_SUMMARY_PATH, null, baseOpts())
+    const data = await client.growthOK(a, 'GET', C.LOTTERY_SUMMARY_PATH, null, baseOpts(a))
     return Number(data && data.chances) || 0
   }
 
   // 抽奖一次（返回原始奖品载荷）
   async function lotteryDraw(a) {
-    return client.growthOK(a, 'POST', C.LOTTERY_DRAW_PATH, { client_token: clientToken() }, baseOpts())
+    return client.growthOK(a, 'POST', C.LOTTERY_DRAW_PATH, { client_token: clientToken() }, baseOpts(a))
   }
 
   // 新手礼包（billing 域）
@@ -320,7 +329,7 @@ function createScheduler(deps) {
   // 昨日是否漏签（heatmap cell.score === 0）
   async function heatmapYesterdayMissed(a) {
     const yesterday = localYMD(Date.now() - 86400000)
-    const data = await client.growthOK(a, 'GET', HEATMAP_PATH, null, baseOpts())
+    const data = await client.growthOK(a, 'GET', HEATMAP_PATH, null, baseOpts(a))
     const cells = Array.isArray(data && data.cells) ? data.cells : []
     for (const cell of cells) {
       const date = String((cell && cell.date) || '')
@@ -333,12 +342,12 @@ function createScheduler(deps) {
 
   // 使用补签卡
   async function useMakeupCard(a, date) {
-    await client.growthOK(a, 'POST', MAKEUP_USE_PATH, { target_date: date }, baseOpts())
+    await client.growthOK(a, 'POST', MAKEUP_USE_PATH, { target_date: date }, baseOpts(a))
   }
 
   // 猫档案（无猫返回 null）
   async function buddyInfo(a) {
-    const data = await client.growthOK(a, 'GET', C.BUDDY_INFO_PATH, null, baseOpts())
+    const data = await client.growthOK(a, 'GET', C.BUDDY_INFO_PATH, null, baseOpts(a))
     const b = data ? data.buddy : null
     if (b === null || typeof b === 'undefined') return null
     if (typeof b === 'string') {
@@ -351,7 +360,7 @@ function createScheduler(deps) {
 
   // 旅行状态
   async function travelStatus(a) {
-    const data = await client.growthOK(a, 'GET', C.BUDDY_STATUS_PATH, null, baseOpts())
+    const data = await client.growthOK(a, 'GET', C.BUDDY_STATUS_PATH, null, baseOpts(a))
     const ts = data && typeof data === 'object' ? data : {}
     return {
       state: String(ts.state || ''),
@@ -363,23 +372,23 @@ function createScheduler(deps) {
 
   // 派出
   async function travelDepart(a) {
-    await client.growthOK(a, 'POST', C.BUDDY_DEPART_PATH, { location_id: C.TRAVEL_LOCATION_ID }, baseOpts())
+    await client.growthOK(a, 'POST', C.BUDDY_DEPART_PATH, { location_id: C.TRAVEL_LOCATION_ID }, baseOpts(a))
   }
 
   // 领奖（返回 reward_credit）
   async function travelClaim(a, recordId) {
-    const data = await client.growthOK(a, 'POST', C.BUDDY_CLAIM_PATH, { record_id: recordId }, baseOpts())
+    const data = await client.growthOK(a, 'POST', C.BUDDY_CLAIM_PATH, { record_id: recordId }, baseOpts(a))
     return Number(data && data.reward_credit) || 0
   }
 
   // 同意协议
   async function buddyAgreement(a) {
-    await client.growthOK(a, 'POST', C.BUDDY_AGREEMENT_PATH, { agree: true }, baseOpts())
+    await client.growthOK(a, 'POST', C.BUDDY_AGREEMENT_PATH, { agree: true }, baseOpts(a))
   }
 
   // 领养第一只猫
   async function buddyFirst(a) {
-    await client.growthOK(a, 'POST', C.BUDDY_FIRST_PATH, {}, baseOpts())
+    await client.growthOK(a, 'POST', C.BUDDY_FIRST_PATH, {}, baseOpts(a))
   }
 
   // 领养门槛未达标判定：HTTP 400 + first_buddy 关键词
@@ -391,7 +400,7 @@ function createScheduler(deps) {
 
   // 任务列表（black_cat 进度）
   async function listTasks(a) {
-    const data = await client.growthOK(a, 'GET', C.GROWTH_TASKS_PATH, null, baseOpts())
+    const data = await client.growthOK(a, 'GET', C.GROWTH_TASKS_PATH, null, baseOpts(a))
     return Array.isArray(data && data.tasks) ? data.tasks : []
   }
 
@@ -425,7 +434,7 @@ function createScheduler(deps) {
     let ckOk = false
     let ckMessage = ''
     try {
-      const ck = await client.dailyCheckin(a, baseOpts())
+      const ck = await client.dailyCheckin(a, baseOpts(a))
       ckOk = !!ck.ok
       ckMessage = ck.message || ''
       if (ck.ok) {
@@ -439,7 +448,7 @@ function createScheduler(deps) {
     }
     // 签到后必接余额查询（即使签到失败/幂等也查）
     try {
-      const res = await client.userResource(a, baseOpts())
+      const res = await client.userResource(a, baseOpts(a))
       if (!res || res.ok === false) {
         log(`user-resource ${lb}: ${(res && res.message) || '余额查询失败'}`)
         return { ok: ckOk, message: ckMessage }
@@ -544,15 +553,27 @@ function createScheduler(deps) {
   }
 
   // 全量签到（账号间 800ms 限速；末尾追加连登管家）
+  // ===== 区域门控 =====
+  // 国际版（global）账号没有个人成长体系：上游对签到 / 成长任务 / 旅行 / 连登 /
+  // 夜猫子这些端点一律拒绝（4xx）。若照常派发，每天会对必然失败的端点空发请求，
+  // 既浪费往返又污染账号错误计数（可能误触熔断）。故这些任务整体跳过国际版。
+  // **活跃上报与 token 保活两域都支持**，不跳过。
+  const isGlobalAuth = a => !!(a && a.realm === 'global')
+
   async function runCheckinAll() {
     let first = true
     let count = 0
     let ok = 0
+    let skippedGlobal = 0
     for (const st of pool.list()) {
       if (stopped) break
       if (st.disabled) continue
       const a = pool.authByUID(st.uid)
       if (!a || !a.refreshToken) continue
+      if (isGlobalAuth(a)) {
+        skippedGlobal++
+        continue // 国际版无签到能力
+      }
       if (!first) {
         await sleep(ACCOUNT_DELAY_MS)
         if (stopped) break
@@ -563,16 +584,18 @@ function createScheduler(deps) {
       if (r.ok) ok++
     }
     await runStreakBonusAll()
-    return `签到 ${ok}/${count}，连登管家已跑`
+    const tail = skippedGlobal > 0 ? `（跳过 ${skippedGlobal} 个国际版账号）` : ''
+    return `签到 ${ok}/${count}${tail}，连登管家已跑`
   }
 
-  // 全量连登管家
+  // 全量连登管家（国际版跳过）
   async function runStreakBonusAll() {
     for (const st of pool.list()) {
       if (stopped) break
       if (st.disabled) continue
       const a = pool.authByUID(st.uid)
       if (!a || !a.accessToken) continue
+      if (isGlobalAuth(a)) continue // 国际版无连登体系
       await streakBonusOne(a)
     }
   }
@@ -729,15 +752,20 @@ function createScheduler(deps) {
     }
   }
 
-  // 全量旅行巡检
+  // 全量旅行巡检（国际版跳过：无成长体系）
   async function runTravelAll() {
     let first = true
     let count = 0
+    let skippedGlobal = 0
     for (const st of pool.list()) {
       if (stopped) break
       if (st.disabled) continue
       const a = pool.authByUID(st.uid)
       if (!a || !a.refreshToken) continue
+      if (isGlobalAuth(a)) {
+        skippedGlobal++
+        continue
+      }
       if (!first) {
         await sleep(ACCOUNT_DELAY_MS)
         if (stopped) break
@@ -746,7 +774,8 @@ function createScheduler(deps) {
       await travelOne(a)
       count++
     }
-    return `巡检 ${count} 个账号`
+    const tail = skippedGlobal > 0 ? `（跳过 ${skippedGlobal} 个国际版账号）` : ''
+    return `巡检 ${count} 个账号${tail}`
   }
 
   // ===== token 保活 =====
@@ -787,7 +816,7 @@ function createScheduler(deps) {
         res = await client.chatStream(
           a,
           { model: 'glm-5.2', messages: [{ role: 'user', content: '1+1等于几？直接回答。' }], stream: true },
-          baseOpts()
+          baseOpts(a)
         )
       } catch (e) {
         return { ok, error: `第 ${i + 1} 次对话失败: ${errMsg(e)}` }
@@ -824,6 +853,7 @@ function createScheduler(deps) {
       if (st.disabled) continue
       const a = pool.authByUID(st.uid)
       if (!a || !a.accessToken) continue
+      if (isGlobalAuth(a)) continue // 国际版无夜猫子任务
       const lb = label(st.uid, st.nickname)
       let need
       try {

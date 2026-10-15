@@ -48,13 +48,17 @@ function runWithTimeout(fn, ms) {
 
 // 创建执行队列
 // opts: { pool, listAccounts?(), authByUID?(uid), scanPending(auth)->codes, runCode(auth, code)->{status,message},
-//         log, itemTimeoutMs }
+//         log, itemTimeoutMs, skipAuth?(auth)->bool }
+// skipAuth：账号级门控（如国际版无成长体系）。在**扫描前**过滤，故 uids 为空的
+// 「全账号」入口（含定时 growthHook 直接调用 runQueueOnce()）同样受控——
+// 只在 runtime.queueOnce 里过滤会漏掉定时触发这条路径。
 function createQueue(opts = {}) {
   const pool = opts.pool || null
   const log = typeof opts.log === 'function' ? opts.log : () => {}
   const scanPending = typeof opts.scanPending === 'function' ? opts.scanPending : async () => []
   const runCode = typeof opts.runCode === 'function' ? opts.runCode : async () => ({ status: 'done', message: '' })
   const itemTimeoutMs = Number(opts.itemTimeoutMs) > 0 ? Number(opts.itemTimeoutMs) : ITEM_TIMEOUT_MS
+  const skipAuth = typeof opts.skipAuth === 'function' ? opts.skipAuth : () => false
   const listAccounts =
     typeof opts.listAccounts === 'function'
       ? opts.listAccounts
@@ -68,6 +72,7 @@ function createQueue(opts = {}) {
   const waiting = [] // 待执行账号 [{uid, nickname, auth}]
   const queued = new Set() // 已入待执行列表的 uid
   let active = false // 调度是否在跑（防重复调度）
+  let scheduling = false // 本次 runQueueOnce 的扫描/入队阶段是否未结束
   let concurrency = DEFAULT_CONCURRENCY
 
   // 状态快照（轮询用；深拷贝条目避免外部误改）
@@ -108,9 +113,18 @@ function createQueue(opts = {}) {
     }
   }
 
-  // 结束收尾：仅当待执行账号清空且无在跑调度时
+  // 结束收尾：作业真正结束时才清 running——三个条件同时满足：
+  //   1) 入队流程已结束（scheduling=false，扫描/入队期间不得算结束）
+  //   2) 待执行账号清空
+  //   3) 无在跑 worker
+  // 这是「同一次 runQueueOnce 期间 running 恒为 true」的保证，避免前端轮询在扫描
+  // 尚未结束的窗口内误判结束、也避免窗口内二次 runQueueOnce 抹掉进行中的条目
   function finish() {
-    if (active || waiting.length > 0) return
+    if (scheduling || active || waiting.length > 0) return
+    // 兜底：作业未真正结束过。kick() 的收尾与 runQueueOnce 的 finally 可能交错
+    // （例如 waiting 空导致 kick 直接 finish，随后 finally 的 finish 因 scheduling
+    // 尚未落下而提前返回），漏掉这次兜底会让 running 永久卡在 true、后续全部 conflict
+    if (!state.running) return
     state.running = false
     state.finishedAt = Date.now()
     log(`[WorkBuddy队列] 执行结束（共 ${state.items.length} 项）`)
@@ -131,11 +145,15 @@ function createQueue(opts = {}) {
       async function worker() {
         while (waiting.length > 0) {
           const entry = waiting.shift()
-          queued.delete(entry.uid)
+          // 注意：queued 的释放必须在该账号执行完（finally）之后，不能在取下条目的
+          // 瞬间释放——否则执行期间同账号再次入队会绕过去重，起第二个 worker 并发
+          // 跑同一账号（上游 withAccountLock 会判 account_busy，条目变虚假失败）
           try {
             await runAccount(entry)
           } catch (err) {
             log(`[WorkBuddy队列] 账号 ${entry.uid} 执行异常：${err.message}`)
+          } finally {
+            queued.delete(entry.uid)
           }
         }
       }
@@ -180,7 +198,10 @@ function createQueue(opts = {}) {
       return { started: false, conflict: true, seq: -1, message: '队列正在执行中（可在任务中心查看进度）' }
     }
     concurrency = clampConcurrency(options.concurrency)
-    // 先占位：扫描（数秒级网络耗时）期间再次触发直接命中上面的 running 判拒
+    // 先占位：扫描（数秒级网络耗时）期间再次触发直接命中上面的 running 判拒。
+    // scheduling 与 running 同时置起，但只有 scheduling 会在扫描结束后落下
+    // （running 要等到所有 worker 跑完，见 finish 的三条件）
+    scheduling = true
     state.running = true
     state.startedAt = Date.now()
     state.finishedAt = 0
@@ -189,14 +210,21 @@ function createQueue(opts = {}) {
     state.seq += 1
     const seq = state.seq
 
+    try {
     const filterUids = Array.isArray(uids) && uids.length > 0 ? new Set(uids.map(String)) : null
     const fixedCodes = Array.isArray(options.taskCodes) ? options.taskCodes.filter(Boolean) : []
     const states = listAccounts().filter(st => !st.disabled && (!filterUids || filterUids.has(String(st.uid))))
 
     let total = 0
+    let skipped = 0
     for (const st of states) {
       const auth = authOf(st.uid)
       if (!auth) continue
+      // 账号级门控（区域能力差异）：在扫描前拦截，避免对必然失败的端点空发请求
+      if (skipAuth(auth)) {
+        skipped++
+        continue
+      }
       let codes = fixedCodes
       if (!codes.length) {
         try {
@@ -211,12 +239,22 @@ function createQueue(opts = {}) {
     }
 
     if (total === 0) {
-      state.running = false
       state.startedAt = 0
-      return { started: false, seq, total: 0, message: '全部账号没有待办任务' }
+      return {
+        started: false,
+        seq,
+        total: 0,
+        skipped,
+        message: skipped > 0 ? `没有可执行账号（已跳过 ${skipped} 个不适用账号）` : '全部账号没有待办任务'
+      }
     }
-    log(`[WorkBuddy队列] 已入队 ${total} 项（并发 ${concurrency}）`)
-    return { started: true, total, seq, conc: concurrency }
+    log(`[WorkBuddy队列] 已入队 ${total} 项（并发 ${concurrency}${skipped ? `，跳过 ${skipped} 个不适用账号` : ''}）`)
+    return { started: true, total, seq, conc: concurrency, skipped }
+    } finally {
+      // 扫描/入队阶段结束：此后 running 的归属完全由 worker 决定（见 finish）
+      scheduling = false
+      finish()
+    }
   }
 
   // 清空队列（测试/重置用）

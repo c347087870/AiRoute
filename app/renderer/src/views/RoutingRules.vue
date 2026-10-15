@@ -31,7 +31,10 @@
     <div class="section">
       <h2 class="section-title">智能路由规则</h2>
       <div class="card">
-        <div class="rule-hint" v-if="!hasEditableRule">暂无自定义路由规则，所有请求将使用兜底模型。点击下方添加规则。</div>
+        <div class="rule-hint" v-if="!hasEditableRule">
+          暂无智能路由规则。注意：智能路由仅在「当前模型」为 Auto 时生效——未命中任何条件时使用「默认」规则的目标，
+          未配置默认规则则回落到第一个可用模型；兜底模型只在主模型请求失败时启用。点击下方添加规则。
+        </div>
         <div v-for="(rule, i) in rules" :key="i" class="rule-row">
           <select v-model="rule.condition" class="rule-condition">
             <option value="contains_code">包含代码</option>
@@ -178,16 +181,21 @@ async function saveAll(message) {
 }
 
 // 加载 Provider、路由规则与兜底配置
+// 三个接口独立取值：任一失败不应把其余结果一起丢弃（Promise.all 一损俱损会让
+// 整个页面看起来像「配置全没了」，且外层 catch 静默、用户无从判断）
 async function loadData() {
-  try {
-    const [provs, rulesData, fb] = await Promise.all([
-      getProviders(), getRules(), getFallback()
-    ])
-    providers.value = provs
-    rules.value = rulesData.rules || []
-    customRules.value = rulesData.customRules || []
-    fallbackModel.value = fb.model || ''
-  } catch {}
+  const [provs, rulesData, fb] = await Promise.allSettled([
+    getProviders(), getRules(), getFallback()
+  ])
+  if (provs.status === 'fulfilled') providers.value = provs.value || {}
+  if (rulesData.status === 'fulfilled') {
+    rules.value = (rulesData.value && rulesData.value.rules) || []
+    customRules.value = (rulesData.value && rulesData.value.customRules) || []
+  }
+  if (fb.status === 'fulfilled') fallbackModel.value = (fb.value && fb.value.model) || ''
+  if (provs.status === 'rejected' || rulesData.status === 'rejected' || fb.status === 'rejected') {
+    showToast('部分配置加载失败，请检查服务状态后刷新重试', 'error', 4000)
+  }
 }
 
 onMounted(loadData)

@@ -175,11 +175,33 @@ function toMessage(agg, fallbackModel) {
     content,
     stop_reason: mapStopReason(choice.finish_reason),
     stop_sequence: null,
-    usage: {
-      input_tokens: Number(usage.prompt_tokens) || 0,
-      output_tokens: Number(usage.completion_tokens) || 0
-    }
+    usage: usageFrom(usage)
   }
+}
+
+// 上游 usage → Anthropic usage：补齐缓存两项，供客户端做缓存命中分析与成本核算。
+// OpenAI 协议没有「缓存写入」概念 → cache_creation_input_tokens 恒 0（不是"未知"）；
+// 缓存读沿用上游各种别名（sse.js 的 normalizeUsageCacheAliases 已归一，
+// 此处再做一次容错读取，兼容绕过归一化的调用方）
+function usageFrom(usage) {
+  const u = usage && typeof usage === 'object' ? usage : {}
+  const cached =
+    num(u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) ||
+    num(u.cache_read_input_tokens) ||
+    num(u.prompt_cache_hit_tokens) ||
+    num(u.cached_tokens)
+  return {
+    input_tokens: num(u.prompt_tokens),
+    output_tokens: num(u.completion_tokens),
+    cache_read_input_tokens: cached,
+    cache_creation_input_tokens: num(u.cache_creation_input_tokens)
+  }
+}
+
+// 数值容错：非数字/负数/NaN → 0
+function num(v) {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : 0
 }
 
 // 流式事件生成器：消费「重建后的 OpenAI 帧文本」，产出 Anthropic SSE 事件文本
@@ -317,10 +339,20 @@ function createStreamEmitter(opts = {}) {
       if (tb.opened) out += evt('content_block_stop', { type: 'content_block_stop', index: tb.block })
     }
     const outputTokens = lastUsage && Number(lastUsage.completion_tokens) > 0 ? Number(lastUsage.completion_tokens) : 0
+    // message_start 必须先于内容发出，此时拿不到上游 usage（通常在末帧），
+    // 故完整用量（含缓存两项）统一在 message_delta 补齐：
+    // Anthropic 协议的 message_delta.usage 允许携带 input/cache 字段，
+    // 客户端据此可算缓存命中率（此前只给 output_tokens，缓存信息全丢）
+    const full = usageFrom(lastUsage)
     out += evt('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { output_tokens: outputTokens }
+      usage: {
+        input_tokens: full.input_tokens,
+        output_tokens: outputTokens || full.output_tokens,
+        cache_read_input_tokens: full.cache_read_input_tokens,
+        cache_creation_input_tokens: full.cache_creation_input_tokens
+      }
     })
     out += evt('message_stop', { type: 'message_stop' })
     return out

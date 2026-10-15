@@ -1,6 +1,8 @@
 // 上游模型的调用协议封装
 // router（请求代理）与 benchmark（模型评测）都从这里取，避免协议逻辑重复实现
 
+const { StringDecoder } = require('string_decoder')
+
 // 去掉用户配置末尾的斜杠，避免拼出 //v1/messages 这样的双斜杠路径
 function trimTrailingSlash(url) {
   return String(url || '').replace(/\/+$/, '')
@@ -199,10 +201,13 @@ function parseUsageLine(line, isAnthropic) {
 // 缓冲残行后再解析，避免 usage 帧被截断丢失导致流式统计少计
 function createStreamUsageExtractor(isAnthropic) {
   let remainder = ''
+  // UTF-8 增量解码器：分块边界可能落在多字节字符中间，逐块 toString() 会产出
+  // U+FFFD 并破坏后续拼接，导致该帧 JSON.parse 失败、用量被静默丢弃
+  const decoder = new StringDecoder('utf8')
   return {
     // 推入一个 chunk，返回本次解析出的用量（可能为 null）
     push(chunk) {
-      remainder += chunk.toString()
+      remainder += decoder.write(chunk)
       const lines = remainder.split('\n')
       remainder = lines.pop() || ''
       let usage = null
@@ -214,6 +219,7 @@ function createStreamUsageExtractor(isAnthropic) {
     },
     // 流结束时冲刷残行，返回末尾帧的用量（可能为 null）
     end() {
+      remainder += decoder.end() // 冲刷未完成的最后一个多字节字符
       const found = parseUsageLine(remainder, isAnthropic)
       remainder = ''
       return found

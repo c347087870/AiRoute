@@ -207,9 +207,10 @@ export function clearBenchmarkRuns() {
 
 // ==================== WorkBuddy 账号池 ====================
 
-// 发起 OAuth 设备授权，返回 { ok, state, url }
-export function wbOauthStart() {
-  return api.post('/api/workbuddy/oauth/start', {}, { timeout: 30000 }).then(r => r.data)
+// 发起 OAuth 设备授权，返回 { ok, state, url, realm }
+// realm：'cn'（国内版，默认）/ 'global'（国际版）—— 决定用哪套域名与 OAuth 入口
+export function wbOauthStart(realm) {
+  return api.post('/api/workbuddy/oauth/start', { realm: realm || 'cn' }, { timeout: 30000 }).then(r => r.data)
 }
 
 // 轮询 OAuth 结果；data.done 为 true 表示登录完成并已热加载进池
@@ -263,8 +264,13 @@ export function wbRefreshAllBalances() {
 }
 
 // 上游模型列表；refresh 为 true 时强制刷新缓存
-export function wbModels(refresh = false) {
-  return api.get('/api/workbuddy/models', { params: refresh ? { refresh: 1 } : {}, timeout: 60000 }).then(r => r.data)
+// region：'cn'（国内版）/ 'global'（国际版）。两地模型清单完全不同
+//（国内是 deepseek/glm/hy 等，国际是 default-model/fast-model/o4-mini 等），
+// 必须按区域拉取，否则会拿到另一区域的清单并写错槽位
+export function wbModels(refresh = false, region = 'cn') {
+  const params = { region: region === 'global' ? 'global' : 'cn' }
+  if (refresh) params.refresh = 1
+  return api.get('/api/workbuddy/models', { params, timeout: 60000 }).then(r => r.data)
 }
 
 // 池统计与账号状态
@@ -344,14 +350,16 @@ export function wbCreditHistory({ limit = 50, uid = '', offset = 0 } = {}) {
   return api.get('/api/workbuddy/credit-history', { params: { limit, uid, offset } }).then(r => r.data)
 }
 
-// 账号池统一维护的启用模型清单
-export function wbEnabledModels() {
-  return api.get('/api/workbuddy/models/enabled').then(r => r.data)
+// 账号池统一维护的启用模型清单（按区域）
+export function wbEnabledModels(region) {
+  const params = { region: region === 'global' ? 'global' : 'cn' }
+  return api.get('/api/workbuddy/models/enabled', { params }).then(r => r.data)
 }
 
-// 保存启用模型清单（自动同步写入所有 workbuddy Provider）
-export function wbSaveEnabledModels(models) {
-  return api.post('/api/workbuddy/models/enabled', { models }, { timeout: 60000 }).then(r => r.data)
+// 保存启用模型清单（按区域写入，并只同步同区域的 workbuddy Provider）
+export function wbSaveEnabledModels(models, region) {
+  const body = { models, region: region === 'global' ? 'global' : 'cn' }
+  return api.post('/api/workbuddy/models/enabled', body, { timeout: 60000 }).then(r => r.data)
 }
 
 // WorkBuddy 运行日志（channel: chat / task / system）
@@ -368,6 +376,18 @@ export function wbConfig() {
 // 修改运行时配置（热生效并持久化到 server-config.json）
 export function wbUpdateConfig(patch) {
   return api.put('/api/workbuddy/config', patch).then(r => r.data)
+}
+
+// 客户端版本号对照（refresh=true 强制刷新，绕过 6 小时缓存）
+export function wbVersions(refresh = false) {
+  const params = refresh ? { refresh: 1 } : {}
+  return api.get('/api/workbuddy/versions', { params, timeout: 60000 }).then(r => r.data)
+}
+
+// 应用最新版本号（fields 可选：只应用指定字段）
+export function wbApplyVersions(fields) {
+  const body = Array.isArray(fields) && fields.length ? { fields } : {}
+  return api.post('/api/workbuddy/versions/apply', body, { timeout: 60000 }).then(r => r.data)
 }
 
 // 定时任务状态（开关 / 时点 / 最近执行）

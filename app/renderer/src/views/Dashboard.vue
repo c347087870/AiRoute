@@ -161,12 +161,12 @@
                 </span>
               </td>
               <td>{{ log.responseTime }}ms</td>
-              <td>{{ formatNumber(log.inputTokens) }}</td>
+              <td>{{ tokenCell(log.inputTokens) }}</td>
               <td :class="{ 'text-purple': log.cacheReadTokens > 0 }">
-                {{ log.cacheReadTokens ? formatNumber(log.cacheReadTokens) : '-' }}
+                {{ cacheCell(log.cacheReadTokens) }}
               </td>
-              <td>{{ formatNumber(log.outputTokens) }}</td>
-              <td>{{ formatNumber(log.totalTokens) }}</td>
+              <td>{{ tokenCell(log.outputTokens) }}</td>
+              <td>{{ tokenCell(log.totalTokens) }}</td>
               <td>{{ log.fallback ? '是' : '-' }}</td>
             </tr>
           </tbody>
@@ -186,6 +186,17 @@ import { listModels, AUTO_MODEL } from '../utils/models.js'
 import { formatNumber, formatTime } from '../utils/format.js'
 
 const { currentModel, providers, currentModelLabel, loadModelData, switchModel } = useModel()
+
+// Token 单元格：上游未返回用量时服务端给 null，显示 '-'（与日志页口径一致），
+// 直接 formatNumber(null) 会显示 0，容易被误读成「真实用量为 0」
+function tokenCell(v) {
+  return v === null || v === undefined ? '-' : formatNumber(v)
+}
+
+// 缓存列单元格：与日志页一致——0 与未知都显示 '-'（缓存读/写为 0 是常态，显示 0 反而噪音）
+function cacheCell(v) {
+  return v ? formatNumber(v) : '-'
+}
 
 const recentLogs = ref([]) // 最近 5 条请求日志
 const isOnline = ref(false) // Router 是否在线，只由健康检查决定
@@ -269,18 +280,18 @@ async function loadLogs() {
 }
 
 // 加载 Token 统计（今日、本月、各模型）
+// 用 allSettled：三个接口各自独立，任一失败不应把其余数据一起丢弃（否则用量显示为 0，误导用户）
 async function loadTokenStats() {
-  try {
-    const [today, month, all] = await Promise.all([
-      getTokenStatsToday(),
-      getTokenStatsMonth(),
-      getTokenStats()
-    ])
-    tokenStatsToday.value = today || emptyTokenStats()
-    tokenStatsMonth.value = month || emptyTokenStats()
-    tokenStatsByModel.value = (all && all.byModel) || {}
-  } catch (err) {
-    console.error('加载 Token 统计失败:', err)
+  const [today, month, all] = await Promise.allSettled([
+    getTokenStatsToday(),
+    getTokenStatsMonth(),
+    getTokenStats()
+  ])
+  if (today.status === 'fulfilled') tokenStatsToday.value = today.value || emptyTokenStats()
+  if (month.status === 'fulfilled') tokenStatsMonth.value = month.value || emptyTokenStats()
+  if (all.status === 'fulfilled') tokenStatsByModel.value = (all.value && all.value.byModel) || {}
+  for (const r of [today, month, all]) {
+    if (r.status === 'rejected') console.error('加载 Token 统计失败:', r.reason)
   }
 }
 

@@ -93,7 +93,7 @@
 
         <h3>Provider 管理</h3>
         <ul>
-          <li>右上角「+ 通用 Provider」手动添加；「+ 添加 WorkBuddy 账号池」通过 OAuth 添加账号池来源（已有 WorkBuddy 源时该按钮禁用）</li>
+          <li>右上角「+ 通用 Provider」手动添加；「+ 添加 WorkBuddy 账号池」通过 OAuth 添加账号池来源，需先选择<strong>国内版</strong>或<strong>国际版</strong>（两个区域可各建一个源，两个都建好后该按钮才禁用）</li>
           <li>每个 Provider 显示为一行：显示名、ID、模型芯片（含上下文 / 输出上限）；行内按钮为「测试」（连通性，显示耗时与本次用量）、「编辑」、「设为当前」、「删除」</li>
           <li>新增 / 编辑弹窗字段：名称（ID）、显示名称、Anthropic URL、OpenAI URL、API Key（支持明文 / 密码切换与复制）</li>
           <li>「模型列表」可添加多个模型，逐项填写模型 ID、显示名称、最大上下文、最大输出与推理档位（默认 / low / high / max / xhigh / 自定义）</li>
@@ -109,14 +109,21 @@
 
         <h3>WorkBuddy 账号池（八个页签）</h3>
         <p>顶部统计栏展示账号总数 / 可用 / 冷却 / 禁用，右侧「刷新」。八个页签的功能如下：</p>
+        <div class="tutorial-callout">
+          <strong>国内版与国际版的区别</strong>：添加账号时可选区域，列表里每个账号都带区域标签。
+          国内版走 <code>copilot.tencent.com</code>（三域），模型为 deepseek / glm / kimi / 混元 等；
+          国际版走 <code>www.workbuddy.ai</code>（单域），模型为 default-model / fast-model / o4-mini 等，两地清单完全不同。
+          <strong>国际版没有成长体系</strong>——签到、成长任务、旅行、连登、夜猫子都不可用（上游不支持），
+          但对话、余额查询、token 保活照常。两个区域各自维护模型清单与 Provider，互不混用。
+        </div>
         <ul>
-          <li><strong>账号池</strong>：「+ 添加账号」通过 OAuth 登录（打开授权链接或复制链接到浏览器完成，页面每 3 秒自动检测结果）；支持「全部签到」「刷新余额」；每行可单独签到、查余额、保活、看详情（冷却 / 熔断 / 在途 / 模型受限明细）、禁用恢复与移除</li>
+          <li><strong>账号池</strong>：「+ 添加账号」先选区域再走 OAuth 登录（打开授权链接或复制链接到浏览器完成，页面每 3 秒自动检测结果）；支持「全部签到」「刷新余额」（仅对国内版账号有效）；每行可单独签到、查余额、保活、看详情（冷却 / 熔断 / 在途 / 模型受限明细）、禁用恢复与移除；国际版账号的「签到」按钮为禁用状态</li>
           <li><strong>积分构成</strong>：按账号查看积分批次（剩余 / 已用 / 总额 / 到期时间 / 周期包）</li>
           <li><strong>用量</strong>：按「账号」与「模型 × 倍率」两个维度统计请求数 / 失败数、Token、平均延迟、平均输出速度与积分扣除；今天 / 昨天 / 72 小时 / 7 天 / 30 天 / 全部多窗口切换，工具栏显示「昨天」全天合计，支持「立即落盘」</li>
-          <li><strong>模型和档位</strong>：「拉取上游模型」获取可用模型，勾选后「保存启用模型」；可查看每个模型的支持档位与默认档位</li>
-          <li><strong>成长任务</strong>：接受任务、一键完成全部、全账号扫描未完成任务、入队执行与领奖</li>
-          <li><strong>定时任务</strong>：签到 / 旅行 / 活跃 / 保活 / 夜猫子 / 成长任务 / 余额刷新逐项启用与时点配置，支持「立即执行」与「保存排程」</li>
-          <li><strong>高级配置</strong>：提示词模式、改写档位（compat 修补 / native 保真直通）、使用端身份（WorkBuddy / CodeBuddy）、指纹脱敏、设备令牌文件可编辑并保存；账号池参数（冷却、熔断、在途上限等）只读展示</li>
+          <li><strong>模型和档位</strong>：先切换<strong>国内版 / 国际版</strong>再「拉取上游模型」——两地清单完全不同，必须分别拉取与保存；勾选后「保存启用模型」只同步到<strong>同区域</strong>的 Provider。后端会拒绝把另一区域的模型写进本区域</li>
+          <li><strong>成长任务</strong>：接受任务、一键完成全部、全账号扫描未完成任务、入队执行与领奖（<strong>仅国内版账号</strong>，下拉自动排除国际版）</li>
+          <li><strong>定时任务</strong>：签到 / 旅行 / 活跃 / 保活 / 夜猫子 / 成长任务 / 余额刷新逐项启用与时点配置，支持「立即执行」与「保存排程」；其中签到 / 旅行 / 成长任务 / 夜猫子<strong>对国际版账号自动跳过</strong>，活跃上报与保活两区域都生效</li>
+          <li><strong>高级配置</strong>：提示词模式、改写档位（compat 修补 / native 保真直通）、使用端身份（WorkBuddy / CodeBuddy）、指纹脱敏、设备令牌文件可编辑并保存；账号池参数（冷却、熔断、在途上限等）只读展示。国际版另有独立并发上限（默认 2，风控更紧）</li>
           <li><strong>运行日志</strong>：按频道（对话 / 任务 / 系统）与关键词过滤，支持 3 秒自动刷新</li>
         </ul>
 
@@ -232,6 +239,25 @@ onMounted(loadConfig)
 
 .tutorial-content {
   max-width: 800px;
+}
+
+/* 区域差异提示块（国内版 / 国际版） */
+.tutorial-callout {
+  margin: 10px 0 14px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--primary);
+  border-radius: 4px;
+  background: var(--primary-bg);
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text-2);
+}
+
+.tutorial-callout code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 12px;
 }
 
 .section {

@@ -6,8 +6,31 @@ const CHAT_BASE_CN = 'https://copilot.tencent.com' // CN 聊天域
 const BILLING_BASE_CN = 'https://www.codebuddy.cn' // CN 计费域
 const WEB_BASE_CN = 'https://www.workbuddy.cn' // CN 官网域
 
+// ===== 国际版（Global，workbuddy.ai）=====
+// 形态与 CN 不同：国际版 chat / billing / web **同域**（单个 base 兜住全部），
+// 不像 CN 拆成三域。取值来自对国际版客户端的实测对齐。
+const GLOBAL_BASE = 'https://www.workbuddy.ai'
+const GLOBAL_CHAT_BASE = GLOBAL_BASE
+const GLOBAL_BILLING_BASE = GLOBAL_BASE
+const GLOBAL_WEB_BASE = GLOBAL_BASE
+// 国际版 chat 出站必须显式声明的域（写死，不回退登录返回的 domain）
+const GLOBAL_DOMAIN_HEADER = 'www.workbuddy.ai'
+// 国际版 UA 的平台段：官方国际版 productName。送成 CN 的 `WorkBuddy`
+// 可能触发上游 403 code 11140（request illegal）
+const GLOBAL_UA_PLATFORM = 'WorkBuddy AI'
+// 国际版默认语言
+const GLOBAL_ACCEPT_LANGUAGE = 'en-US'
+
+// 国际版计费域路径：无 /v2 前缀优先，404 时回落带 /v2 形态
+// （与 CN 只认 /v2 不同，顺序写反会常态失败）
+const BILLING_METER_PATH_GLOBAL = '/billing/meter/get-user-resource'
+const BILLING_METER_PATH_GLOBAL_V2 = '/v2/billing/meter/get-user-resource'
+const DAILY_CHECKIN_PATH_GLOBAL = '/billing/meter/daily-checkin'
+const DAILY_CHECKIN_PATH_GLOBAL_V2 = '/v2/billing/meter/daily-checkin'
+
 // ===== 出站 Origin / Referer =====
 const ORIGIN_REFERER_CN = 'https://www.codebuddy.cn' // 出站 Origin/Referer 基础域
+const ORIGIN_REFERER_GLOBAL = GLOBAL_BASE // 国际版 Origin/Referer 基础域
 
 // ===== 版本号（可被配置覆盖）=====
 const DEFAULT_CLIENT_VERSION = '5.5.4' // UA 的 WorkBuddy/<ver> 与 X-IDE-Version
@@ -21,6 +44,7 @@ const CHAT_COMPLETIONS_PATH = '/v2/chat/completions' // 聊天唯一出站路径
 const TOKEN_REFRESH_PATH = '/v2/plugin/auth/token/refresh' // access token 刷新
 const REPORT_PATH = '/v2/report' // 活跃上报 / 桌面端事件上报
 const MODELS_ENTERPRISE_PATH = '/console/enterprises/personal/models' // 企业模型目录（探路首选）
+const MODELS_ENTERPRISE_PATH_GLOBAL = '/v2/enterprises/personal/models' // 国际版企业模型目录（实测 /v2 优先且更全；/console 为兜底）
 const V3_CONFIG_PATH = '/v3/config' // 官方 IDE 配置目录（模型 + 促销）
 const DASHBOARD_MODELS_PATH = '/v2/dashboard/models' // 模型探测路径（探测路之二）
 
@@ -69,6 +93,7 @@ const POOL_DEFAULTS = {
   degradeCooldownMs: 600000, // 连败降权时长 10m
   degradeCooldownMaxMs: 7200000, // 连败降权封顶 2h
   maxInFlight: 3, // 单账号最大在途请求数（0=不限）
+  maxInFlightGlobal: 2, // 国际版单账号最大在途请求数（国际版 WAF 风控更紧，压低并发）
   minPickGapMs: 100, // 防惊群：同账号最短重选间隔
   idleWeightPerHour: 0.5, // 闲置补偿：每小时未使用权重增量
   idleWeightMax: 5.0, // 闲置补偿权重封顶
@@ -158,6 +183,19 @@ module.exports = {
   BILLING_BASE_CN,
   WEB_BASE_CN,
   ORIGIN_REFERER_CN,
+  // 国际版
+  GLOBAL_BASE,
+  GLOBAL_CHAT_BASE,
+  GLOBAL_BILLING_BASE,
+  GLOBAL_WEB_BASE,
+  GLOBAL_DOMAIN_HEADER,
+  GLOBAL_UA_PLATFORM,
+  GLOBAL_ACCEPT_LANGUAGE,
+  BILLING_METER_PATH_GLOBAL,
+  BILLING_METER_PATH_GLOBAL_V2,
+  DAILY_CHECKIN_PATH_GLOBAL,
+  DAILY_CHECKIN_PATH_GLOBAL_V2,
+  ORIGIN_REFERER_GLOBAL,
   DEFAULT_CLIENT_VERSION,
   DEFAULT_CLI_VERSION,
   DEFAULT_IDE_VERSION,
@@ -167,6 +205,7 @@ module.exports = {
   TOKEN_REFRESH_PATH,
   REPORT_PATH,
   MODELS_ENTERPRISE_PATH,
+  MODELS_ENTERPRISE_PATH_GLOBAL,
   V3_CONFIG_PATH,
   DASHBOARD_MODELS_PATH,
   BILLING_METER_PATH_V2,

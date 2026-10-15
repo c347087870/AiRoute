@@ -135,6 +135,9 @@ app.whenReady().then(async () => {
       app.quit()
       return
     }
+    // 生产模式：让 Express 走 production 分支，默认错误处理器不再把堆栈与
+    // 绝对路径回给客户端（否则任何未捕获异常都会泄漏安装路径与源码结构）
+    process.env.NODE_ENV = 'production'
     // Express 使用事件循环，不会阻塞 Electron 窗口
     require(getServerEntry())
     console.log('[aiRoute] Server 已启动')
