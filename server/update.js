@@ -5,8 +5,17 @@ const fs = require('fs-extra')
 const path = require('path')
 
 const REPO = 'c347087870/AiRoute'
-const ASSET_NAME = 'AiRoute.exe'
 const CACHE_TTL = 30 * 60 * 1000
+
+// 发布资产名：Windows 是便携版单文件 exe；macOS 是带版本 + 架构的 dmg
+// （与 electron-builder.json 的 mac.artifactName 模板一致）
+const IS_MAC = process.platform === 'darwin'
+const MAC_ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
+
+function assetNameFor(version) {
+  if (!IS_MAC) return 'AiRoute.exe'
+  return `AiRoute-${String(version).replace(/^v/i, '')}-${MAC_ARCH}.dmg`
+}
 
 let cached = null // 检查结果缓存 { at, data }
 let downloadState = { status: 'idle', tag: '', savePath: '', received: 0, total: 0, error: '' } // 下载状态
@@ -43,7 +52,7 @@ async function fetchByApi() {
   })
   const data = res.data || {}
   if (!data.tag_name) throw new Error('API 返回缺少 tag_name')
-  const asset = (data.assets || []).find(a => a.name === ASSET_NAME)
+  const asset = (data.assets || []).find(a => a.name === assetNameFor(data.tag_name))
   return {
     tag: data.tag_name,
     notes: data.body || '',
@@ -90,7 +99,8 @@ async function checkUpdate(force) {
     notes: info.notes,
     publishedAt: info.publishedAt,
     size: info.size,
-    downloadUrl: `https://github.com/${REPO}/releases/download/${info.tag}/${ASSET_NAME}`
+    platform: IS_MAC ? 'mac' : 'win',
+    downloadUrl: `https://github.com/${REPO}/releases/download/${info.tag}/${assetNameFor(info.tag)}`
   }
   cached = { at: Date.now(), data }
   return data
@@ -117,7 +127,7 @@ function startDownload(tag, savePath) {
 async function runDownload(tag, savePath) {
   try {
     fs.ensureDirSync(path.dirname(savePath))
-    const url = `https://github.com/${REPO}/releases/download/${tag}/${ASSET_NAME}`
+    const url = `https://github.com/${REPO}/releases/download/${tag}/${assetNameFor(tag)}`
     const res = await axios.get(url, {
       responseType: 'stream',
       timeout: 30000,

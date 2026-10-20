@@ -13,6 +13,12 @@ const error = ref('')          // 最近一次手动检查的错误信息
 let inited = false   // 启动初始化只执行一次
 let pollTimer = null // 下载进度轮询定时器
 
+// 平台判定：以服务端 /api/update/check 返回的 platform 为准——真正决定下载哪个资产的是服务端，
+// 前端只按它决定扩展名与安装提示，避免两处各判一次
+function isMacPlatform() {
+  return info.value?.platform === 'mac'
+}
+
 // 检查更新：silent=true（启动自动检查）失败不打扰；手动检查成功/失败均有提示
 async function runCheck(silent = false, force = false) {
   if (checking.value) return false
@@ -55,7 +61,7 @@ function startPoll() {
         stopPoll()
         downloading.value = false
         savedPath.value = state.savePath
-        showToast('新版本已下载完成，可替换当前程序')
+        showToast(isMacPlatform() ? '新版本已下载完成，打开 dmg 将 AiRoute 拖到「应用程序」覆盖旧版' : '新版本已下载完成，可替换当前程序')
       } else if (state.status === 'error') {
         stopPoll()
         downloading.value = false
@@ -68,9 +74,10 @@ function startPoll() {
 // 开始下载：先弹“另存为”选保存路径，再请求服务端流式下载并轮询进度
 async function startDownload() {
   if (!info.value?.hasUpdate || downloading.value) return
+  const ext = isMacPlatform() ? 'dmg' : 'exe'
   let savePath = ''
   try {
-    savePath = window.electronAPI ? await window.electronAPI.saveFileDialog(`AiRoute-v${info.value.latest}.exe`) : ''
+    savePath = window.electronAPI ? await window.electronAPI.saveFileDialog(`AiRoute-v${info.value.latest}.${ext}`) : ''
   } catch {
     savePath = ''
   }
