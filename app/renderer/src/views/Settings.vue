@@ -113,7 +113,7 @@
             <div class="progress-fill" :style="{ width: percent + '%' }"></div>
           </div>
           <div v-if="savedPath" class="config-hint">已保存到：{{ savedPath }}</div>
-          <div class="config-hint">下载完成后请退出 AiRoute，用新文件替换当前 AiRoute.exe（不会自动替换）</div>
+          <div class="config-hint">{{ installHint }}</div>
         </div>
       </div>
     </div>
@@ -121,7 +121,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort, getSystemStatus, getLogsSize, clearLogs } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { formatBytes, formatTime } from '../utils/format.js'
@@ -138,6 +138,11 @@ const clearing = ref(false) // 清空缓存进行中
 
 // 更新功能共享状态与方法（与侧边栏提示条同源）
 const { info, checking, downloading, percent, savedPath, error, runCheck, startDownload, openFolder, openReleasePage } = useUpdate()
+
+// 安装方式提示：macOS 是 dmg 拖拽覆盖，Windows 是替换 exe 文件（平台取自服务端更新接口，见 useUpdate）
+const installHint = computed(() => info.value?.platform === 'mac'
+  ? '下载完成后打开 dmg，把 AiRoute 拖到「应用程序」覆盖旧版本（不会自动替换）'
+  : '下载完成后请退出 AiRoute，用新文件替换当前 AiRoute.exe（不会自动替换）')
 
 // 统一提取接口错误信息用于提示
 function errorText(err) {

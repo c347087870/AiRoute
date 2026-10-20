@@ -20,7 +20,19 @@ if (!gotTheLock) {
 
 let mainWindow = null
 
-Menu.setApplicationMenu(null)
+// macOS 上清空应用菜单会让 Cmd+C / Cmd+V / Cmd+Q 等系统快捷键全部失效，
+// 因此 darwin 保留最小菜单（应用/编辑/窗口），其他平台仍不显示菜单栏
+function setupApplicationMenu() {
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+      { role: 'windowMenu' }
+    ]))
+  } else {
+    Menu.setApplicationMenu(null)
+  }
+}
 
 function getServerEntry() {
   return path.join(__dirname, '..', 'server', 'router.js')
@@ -100,6 +112,8 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   if (!gotTheLock) return // 未获得单实例锁：进程正在退出
+
+  setupApplicationMenu()
 
   // 生产模式：在主进程中直接启动 Express server（非阻塞，秒启动）
   if (app.isPackaged) {
@@ -195,19 +209,22 @@ ipcMain.handle('get-auto-launch', () => {
 })
 
 ipcMain.handle('set-auto-launch', (_, enabled) => {
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    path: app.getPath('exe')
-  })
+  // path 是 Windows 专用参数；macOS 只认 openAtLogin（且要求 app 位于 /Applications 才稳定生效）
+  if (process.platform === 'darwin') {
+    app.setLoginItemSettings({ openAtLogin: enabled })
+  } else {
+    app.setLoginItemSettings({ openAtLogin: enabled, path: app.getPath('exe') })
+  }
   return true
 })
 
 // 更新功能：选择新版本安装包的保存位置（默认落到系统下载目录）
 ipcMain.handle('save-file-dialog', async (_, defaultName) => {
+  const isMac = process.platform === 'darwin'
   const options = {
     title: '保存新版本安装包',
-    defaultPath: path.join(app.getPath('downloads'), defaultName || 'AiRoute.exe'),
-    filters: [{ name: '可执行文件', extensions: ['exe'] }]
+    defaultPath: path.join(app.getPath('downloads'), defaultName || (isMac ? 'AiRoute.dmg' : 'AiRoute.exe')),
+    filters: [isMac ? { name: '磁盘映像', extensions: ['dmg'] } : { name: '可执行文件', extensions: ['exe'] }]
   }
   const result = mainWindow && mainWindow.isVisible()
     ? await dialog.showSaveDialog(mainWindow, options)

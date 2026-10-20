@@ -17,6 +17,27 @@ const buildDepsDir = path.join(root, '.build-node_modules')
 const buildOutputDir = path.join(appCwd, 'dist-electron')
 const releaseDir = path.join(appCwd, 'release')
 
+// 目标平台：默认跟随当前主机，可用 --mac / --win 显式指定（只为给出更清晰的报错）
+const targetPlatform = process.argv.includes('--mac') ? 'darwin' : process.argv.includes('--win') ? 'win32' : process.platform
+const isMac = targetPlatform === 'darwin'
+
+if (targetPlatform !== process.platform) {
+  console.error(`[aiRoute] ✖ 无法在 ${process.platform} 上构建 ${targetPlatform} 包：dmg 只能在 macOS 上构建，exe 只能在 Windows（或 Wine）上构建`)
+  process.exit(1)
+}
+if (!isMac && targetPlatform !== 'win32') {
+  console.error(`[aiRoute] ✖ 暂不支持的目标平台: ${targetPlatform}`)
+  process.exit(1)
+}
+
+// macOS 产物命名（与 electron-builder.json 的 mac.artifactName 模板一致；当前只出 arm64）
+const macDmgName = (version) => `AiRoute-${version}-arm64.dmg`
+const macAppDir = path.join(buildOutputDir, 'mac-arm64', 'AiRoute.app')
+const macInfoPlist = path.join(macAppDir, 'Contents', 'Info.plist')
+const macAsarPath = path.join(macAppDir, 'Contents', 'Resources', 'app.asar')
+const winExePath = path.join(buildOutputDir, 'AiRoute.exe')
+const winAsarPath = path.join(buildOutputDir, 'win-unpacked', 'resources', 'app.asar')
+
 // 复制 server 文件到 app/server/ 供打包
 // 排除：API Key、依赖、日志，以及 WorkBuddy 凭证与个人运行数据（避免随公开发布泄露）
 function copyServerFiles() {
@@ -47,6 +68,15 @@ function cleanServerDir() {
 function killProcesses(names) {
   for (const name of names) {
     try { execSync(`taskkill /F /IM ${name} /T`, { stdio: 'pipe' }) } catch {}
+  }
+}
+
+// 按平台结束残留进程：macOS 只匹配 app bundle 里的可执行文件，避免误杀构建进程本身
+function killAppProcesses() {
+  if (isMac) {
+    try { execSync(`pkill -f "AiRoute.app/Contents/MacOS/"`, { stdio: 'pipe' }) } catch {}
+  } else {
+    killProcesses(['electron.exe', 'AiRoute.exe', 'aiRoute.exe'])
   }
 }
 
@@ -101,12 +131,12 @@ function syncToRelease() {
   }
 }
 
-// 打包后版本自检：asar 内应用 package.json 与 exe 文件版本必须与根 package.json 一致，
+// 打包后版本自检：asar 内应用 package.json 与平台产物元数据必须与根 package.json 一致，
 // 不一致直接失败，避免版本错误的产物被同步到 release
 function verifyBuild(version) {
   const errors = []
+  const asarPath = isMac ? macAsarPath : winAsarPath
 
-  const asarPath = path.join(buildOutputDir, 'win-unpacked', 'resources', 'app.asar')
   try {
     const raw = fs.readFileSync(asarPath).toString('latin1')
     const m = raw.match(/"name":\s*"aiRoute",\s*"version":\s*"([^"]+)"/)
@@ -116,12 +146,37 @@ function verifyBuild(version) {
     errors.push(`读取 asar 失败: ${err.message}`)
   }
 
-  const exePath = path.join(buildOutputDir, 'AiRoute.exe')
-  try {
-    const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${exePath}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
-    if (meta !== version) errors.push(`exe 元数据版本 ${meta} != package.json 的 ${version}`)
-  } catch (err) {
-    errors.push(`读取 exe 元数据失败: ${err.message.split('\n')[0]}`)
+  if (isMac) {
+    try {
+      const meta = execSync(`plutil -extract CFBundleShortVersionString raw -o - "${macInfoPlist}"`, { encoding: 'utf8' }).trim()
+      if (meta !== version) errors.push(`Info.plist 版本 ${meta} != package.json 的 ${version}`)
+    } catch (err) {
+      errors.push(`读取 Info.plist 版本失败: ${err.message.split('\n')[0]}`)
+    }
+
+    // arm64 强制要求至少 ad-hoc 签名，签名缺失/失效会导致用户侧直接无法启动
+    try {
+      execSync(`codesign --verify --deep --strict "${macAppDir}"`, { stdio: 'pipe' })
+      const info = execSync(`codesign -dv --verbose=2 "${macAppDir}" 2>&1`, { encoding: 'utf8' })
+      if (!/Signature=adhoc/.test(info)) errors.push('未检测到 ad-hoc 签名（预期 identity: "-"）')
+    } catch (err) {
+      errors.push(`签名校验失败（app 将无法在 Apple Silicon 上启动）: ${err.message.split('\n')[0]}`)
+    }
+
+    const dmg = path.join(buildOutputDir, macDmgName(version))
+    try {
+      const size = fs.statSync(dmg).size
+      if (size < 10 * 1024 * 1024) errors.push(`dmg 体积异常: ${(size / 1024 / 1024).toFixed(1)} MB`)
+    } catch (err) {
+      errors.push(`未找到 dmg 产物 ${macDmgName(version)}: ${err.message.split('\n')[0]}`)
+    }
+  } else {
+    try {
+      const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${winExePath}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
+      if (meta !== version) errors.push(`exe 元数据版本 ${meta} != package.json 的 ${version}`)
+    } catch (err) {
+      errors.push(`读取 exe 元数据失败: ${err.message.split('\n')[0]}`)
+    }
   }
 
   if (errors.length) {
@@ -129,13 +184,13 @@ function verifyBuild(version) {
     for (const e of errors) console.error(`  - ${e}`)
     process.exit(1)
   }
-  console.log(`[aiRoute] ✔ 版本自检通过：asar 与 exe 元数据均为 ${version}`)
+  console.log(`[aiRoute] ✔ 版本自检通过：${isMac ? 'asar / Info.plist / ad-hoc 签名' : 'asar / exe 元数据'}均为 ${version}`)
 }
 
 // === 构建流程 ===
 
-console.log('[aiRoute] 正在清理构建环境...')
-killProcesses(['electron.exe', 'AiRoute.exe', 'aiRoute.exe'])
+console.log(`[aiRoute] 正在清理构建环境...（目标平台: ${targetPlatform}）`)
+killAppProcesses()
 cleanDir(buildOutputDir, 'dist-electron')
 
 console.log('[aiRoute] 正在构建渲染进程...')
@@ -158,10 +213,13 @@ buildRenderer.on('close', (code) => {
   copyServerFiles()
   installProductionDeps()
 
-  killProcesses(['electron.exe', 'AiRoute.exe', 'aiRoute.exe'])
+  killAppProcesses()
   cleanDir(buildOutputDir, 'dist-electron')
 
-  const buildApp = spawn('npx', ['electron-builder', '--config', 'electron-builder.json'], {
+  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', isMac ? '--mac' : '--win']
+  if (isMac) builderArgs.push('--arm64')
+
+  const buildApp = spawn('npx', builderArgs, {
     cwd: root,
     stdio: 'inherit',
     shell: true,
@@ -175,9 +233,10 @@ buildRenderer.on('close', (code) => {
       console.error('[aiRoute] Electron 打包失败')
       process.exit(1)
     }
+    const version = require(path.join(root, 'package.json')).version
     console.log('[aiRoute] 打包完成！')
-    console.log('[aiRoute] 输出: app/dist-electron/AiRoute.exe')
-    verifyBuild(require(path.join(root, 'package.json')).version)
+    console.log(isMac ? `[aiRoute] 输出: app/dist-electron/${macDmgName(version)}` : '[aiRoute] 输出: app/dist-electron/AiRoute.exe')
+    verifyBuild(version)
     syncToRelease()
   })
 })
