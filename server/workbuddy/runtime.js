@@ -154,8 +154,16 @@ function init(opts = {}) {
     pool,
     log: taskLog,
     skipAuth: skipGrowthExecFor,
+    // 账号占用与一键完成 / 补领清扫共用一把锁（tasks.js 模块级单表）。
+    // 队列在 runAccount 外层取锁并整轮持有，条目执行时不再重复抢占（lockHeld）。
+    tryLockAccount: tasksMod.tryLockAccount,
+    unlockAccount: tasksMod.unlockAccount,
     scanPending: auth => tasksMod.scanPendingCodes(auth, rtOpts(rt, auth)),
-    runCode: (auth, code) => rt.taskRunner.runOne(auth, code, rtOpts(rt, auth))
+    runCode: (auth, code) => {
+      const opts = rtOpts(rt, auth)
+      opts.lockHeld = true // 队列已持有该账号占用
+      return rt.taskRunner.runOne(auth, code, opts)
+    }
   })
 
   // 定时任务调度器（签到/活跃/旅行/保活/夜猫子/成长队列 + 余额后台刷新）
@@ -1592,6 +1600,21 @@ function skipGrowthExecFor(auth) {
   return authMod.isEnterpriseSession(auth)
 }
 
+// 是否跳过**补领清扫**（accept/claim 两条幂等读改请求，不跑任何行为上报）。
+//
+// 不能复用 skipGrowthExecFor：那条门控针对的是「行为事件被 200 静默丢弃」，而
+// 企业切换会话（token_source=enterprise_switch）的**读端点与领奖实测正常**（见
+// skipGrowthExecFor 注释）。拿它当清扫门控会让这类账号的达标奖励永远领不到——
+// 明明是能领的钱。
+// 真企业版（enterpriseId 非空）另当别论：上游对非个人账号直接 403
+// `growth system is only available for personal users`，每轮清扫都会刷一片错误，
+// 故整体跳过（与参考实现 workbuddy2api-panel 的 IsGlobal/IsEnterprise 门控一致）。
+function skipGrowthSweepFor(auth) {
+  if (!auth) return false
+  if (auth.realm === authMod.REALM_GLOBAL) return true
+  return authMod.isEnterprise(auth)
+}
+
 // ===== 积分构成 / 模型清单 / 运行日志 =====
 
 // 单账号积分批次明细（积分构成视图）
@@ -1794,7 +1817,8 @@ function taskProgress() {
 // 行为动作且一天只跑一次；一键完成对达标任务直接跳过。于是经真实对话点亮的任务
 // 会长期卡在「达标未领」，积分再也上不去。
 //
-// 门控用 skipGrowthExecFor（国际版 + 企业切换会话），被门控账号零上游请求。
+// 门控用 skipGrowthSweepFor（国际版 + 真企业版；企业切换会话照常清扫），
+// 被门控账号零上游请求。
 // 账号锁与一键完成/执行队列共享（tasks.tryLockAccount）：正在跑动作的账号整轮
 // 跳过，不打断进行中的链路。并发 2 与任务中心扫描同口径。
 async function sweepGrowthTasks(r) {
@@ -1803,7 +1827,7 @@ async function sweepGrowthTasks(r) {
     client,
     listAccounts: () => rt.pool.list(),
     authByUID: uid => rt.pool.authByUID(uid),
-    skipAuth: skipGrowthExecFor,
+    skipAuth: skipGrowthSweepFor,
     optsFor: a => rtOpts(rt, a),
     concurrency: 2,
     log: rt.taskLog
@@ -1980,6 +2004,7 @@ module.exports = {
   skipCheckinFor,
   skipGrowthFor,
   skipGrowthExecFor,
+  skipGrowthSweepFor,
   growthExecBlockedError,
   growthUnsupportedError,
   enterpriseSessionError,

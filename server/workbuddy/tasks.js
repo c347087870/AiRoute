@@ -127,11 +127,6 @@ function unlockAccount(uid) {
   if (id) activeUIDs.delete(id)
 }
 
-// 账号当前是否被占用（清扫/扫描前的预判，不改变占用状态）
-function isAccountBusy(uid) {
-  return !!(uid && activeUIDs.has(String(uid)))
-}
-
 // ===== 通用工具 =====
 
 // 睡眠指定毫秒
@@ -1859,9 +1854,16 @@ function createTaskRunner(deps = {}) {
   }
 
   // 一键完成单个任务（账号内串行）
+  //
+  // lockHeld：调用方已持有该账号占用（执行队列按账号整轮持锁后逐条调用）。
+  // 此时不能再抢一次锁——自抢自会立刻判占用，条目变虚假失败。仍要摘掉该键，
+  // 避免它被当作请求 opt 透传给下游。
   async function runOne(auth, taskCode, options = {}) {
-    return withAccountLock(auth, async () => {
-      const opts = mkOpts(options)
+    const lockHeld = !!(options && options.lockHeld === true)
+    const body = async () => {
+      // 复制一份再摘键：mkOpts 原样返回调用方对象，直接 delete 会污染调用方 opts
+      const opts = { ...mkOpts(options) }
+      delete opts.lockHeld
       const code = String(taskCode || '').trim()
       if (!TASK_ACTIONS[code]) {
         throw new Error(`该任务不可自动化（无对应动作）：${code}`)
@@ -1875,7 +1877,8 @@ function createTaskRunner(deps = {}) {
       state.running = false
       state.finishedAt = Date.now()
       return item
-    })
+    }
+    return lockHeld ? body() : withAccountLock(auth, body)
   }
 
   // 当前执行进度（供前端轮询展示）
@@ -2030,11 +2033,17 @@ async function sweepAccountWith(client, auth, opts, log) {
         const res = mp
           ? await client.claimRewardMP(auth, t.task_code, opts)
           : await client.claimReward(auth, t.task_code, opts)
-        r.claimed++
-        r.credits += Number(res && res.credit) || 0
-        r.energy += Number(res && res.energy) || 0
-        r.codes.push(t.task_code)
-        if (log) log(`[WorkBuddy补领] ${accountLabel(auth)} 补领 ${t.task_code} +${(res && res.credit) || 0} 分${res && res.alreadyClaimed ? '（此前已领）' : ''}`)
+        // 上游回「已领取」（already_claimed，0 分 0 能）不计入补领数：否则当列表
+        // 仍报 claimable（accept_status 未落到 claimed）时，每轮都记一次「补领 1 项
+        // +0 分」，摘要与日志被永久噪音占满，而实际一分没到账。
+        // 注意不要用 continue 跳出——那样会跳过下面的请求间隔节流。
+        if (!(res && res.alreadyClaimed)) {
+          r.claimed++
+          r.credits += Number(res && res.credit) || 0
+          r.energy += Number(res && res.energy) || 0
+          r.codes.push(t.task_code)
+          if (log) log(`[WorkBuddy补领] ${accountLabel(auth)} 补领 ${t.task_code} +${(res && res.credit) || 0} 分`)
+        }
       } catch (err) {
         r.errors++
         if (log) log(`[WorkBuddy补领] ${accountLabel(auth)} ${t.task_code} 领取失败：${err.message}`)
@@ -2148,7 +2157,6 @@ module.exports = {
   // 账号占用（一键完成 / 执行队列 / 补领清扫共享同一把锁）
   tryLockAccount,
   unlockAccount,
-  isAccountBusy,
   // 任务补领清扫
   sweepOnce,
   sweepAccountWith,

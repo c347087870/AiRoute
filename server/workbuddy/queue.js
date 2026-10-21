@@ -59,6 +59,12 @@ function createQueue(opts = {}) {
   const runCode = typeof opts.runCode === 'function' ? opts.runCode : async () => ({ status: 'done', message: '' })
   const itemTimeoutMs = Number(opts.itemTimeoutMs) > 0 ? Number(opts.itemTimeoutMs) : ITEM_TIMEOUT_MS
   const skipAuth = typeof opts.skipAuth === 'function' ? opts.skipAuth : () => false
+  // 账号占用（与一键完成 / 补领清扫共用同一把锁）。
+  // 队列按**账号整轮**持锁：清扫在队列两条任务之间抢到锁，会让后续条目被判
+  // account_busy 变虚假失败。故锁必须在 runAccount 外层取、整个账号跑完后放。
+  // 未注入时（测试/独立调用）退化为不加锁，语义同旧版。
+  const lockAccount = typeof opts.tryLockAccount === 'function' ? opts.tryLockAccount : () => true
+  const unlockAccount = typeof opts.unlockAccount === 'function' ? opts.unlockAccount : () => {}
   const listAccounts =
     typeof opts.listAccounts === 'function'
       ? opts.listAccounts
@@ -105,11 +111,26 @@ function createQueue(opts = {}) {
   }
 
   // 账号 worker：该账号条目按 index 顺序串行执行（账号内串行）
+  // 整轮持锁：期间补领清扫 / 一键完成抢不到该账号，下一轮再补，不产生虚假失败。
   async function runAccount(entry) {
-    for (let i = 0; i < state.items.length; i++) {
-      const it = state.items[i]
-      if (it.uid !== entry.uid || it.status !== 'pending') continue
-      await execItem(it, entry.auth)
+    if (!lockAccount(entry.uid)) {
+      // 该账号正被一键完成 / 上一条链路占用：本轮条目标记跳过（不是失败）
+      for (const it of state.items) {
+        if (it.uid !== entry.uid || it.status !== 'pending') continue
+        it.status = 'skipped'
+        it.message = '该账号有其它任务动作在执行，跳过'
+        it.finished_at = Date.now()
+      }
+      return
+    }
+    try {
+      for (let i = 0; i < state.items.length; i++) {
+        const it = state.items[i]
+        if (it.uid !== entry.uid || it.status !== 'pending') continue
+        await execItem(it, entry.auth)
+      }
+    } finally {
+      unlockAccount(entry.uid)
     }
   }
 

@@ -1651,6 +1651,90 @@ async function main() {
     await waitQueue(q)
   })
 
+  await testAsync('队列：整轮持锁——清扫/一键完成抢不到正在排队的账号', async () => {
+    // 队列按账号整轮持锁：两条任务之间若让出锁，补领清扫会抢到并改动上游状态，
+    // 后续条目要么虚假失败、要么与清扫对同一账号并发写。这里用共享锁表复现。
+    const locked = new Set()
+    const seenBusy = []
+    const q = queueMod.createQueue({
+      listAccounts: () => [{ uid: 'u1', nickname: '甲', disabled: false }],
+      authByUID: () => makeAuth('u1'),
+      tryLockAccount: uid => {
+        if (locked.has(uid)) return false
+        locked.add(uid)
+        return true
+      },
+      unlockAccount: uid => locked.delete(uid),
+      scanPending: async () => ['a', 'b', 'c'],
+      runCode: async (auth, code) => {
+        // 每条任务执行期间锁都应仍被队列持有（清扫此时抢不到）
+        seenBusy.push(locked.has('u1'))
+        await new Promise(r => setTimeout(r, 5))
+        return { status: 'done', message: code }
+      },
+      itemTimeoutMs: 5000,
+      log: () => {}
+    })
+    await q.runQueueOnce()
+    await waitQueue(q)
+    assert.deepStrictEqual(seenBusy, [true, true, true], '整轮期间锁必须一直持有')
+    assert.strictEqual(q.queueStatus().items.filter(i => i.status === 'done').length, 3)
+    assert.strictEqual(locked.has('u1'), false, '账号跑完后必须释放锁')
+  })
+
+  await testAsync('队列：账号已被占用时条目记「跳过」而非「失败」', async () => {
+    const q = queueMod.createQueue({
+      listAccounts: () => [{ uid: 'u1', nickname: '', disabled: false }],
+      authByUID: () => makeAuth('u1'),
+      tryLockAccount: () => false, // 一键完成/清扫正持锁
+      unlockAccount: () => {},
+      scanPending: async () => ['a', 'b'],
+      runCode: async () => {
+        throw new Error('不应执行')
+      },
+      itemTimeoutMs: 5000,
+      log: () => {}
+    })
+    await q.runQueueOnce()
+    await waitQueue(q)
+    const items = q.queueStatus().items
+    assert.strictEqual(items.length, 2)
+    assert.strictEqual(
+      items.every(i => i.status === 'skipped'),
+      true,
+      '被占用只跳过，不算失败'
+    )
+    assert.ok(items[0].message.includes('跳过'), items[0].message)
+  })
+
+  test('runOne(lockHeld) 不重复抢占账号锁', async () => {
+    // 执行队列已持锁后逐条调用 runOne；若 runOne 再抢一次会自锁自，条目变虚假失败。
+    const runner = tasksMod.createTaskRunner({ client: {}, log: () => {}, chatOnce: async () => ({}) })
+    assert.strictEqual(typeof runner.runOne, 'function')
+    assert.strictEqual(tasksMod.tryLockAccount('lock-held-uid'), true)
+    try {
+      // 持锁状态下走 lockHeld 分支：不应抛 account_busy（动作不可自动化属另一类错误）
+      let err = null
+      try {
+        await runner.runOne(makeAuth('lock-held-uid'), 'not_a_task', { lockHeld: true })
+      } catch (e) {
+        err = e
+      }
+      assert.ok(err, '未知任务码应报错')
+      assert.strictEqual(err.code, undefined, `不应是 account_busy：${err.message}`)
+      // 无 lockHeld 时自抢自必然 account_busy
+      let busyErr = null
+      try {
+        await runner.runOne(makeAuth('lock-held-uid'), 'chat_5', {})
+      } catch (e) {
+        busyErr = e
+      }
+      assert.strictEqual(busyErr && busyErr.code, 'account_busy')
+    } finally {
+      tasksMod.unlockAccount('lock-held-uid')
+    }
+  })
+
   test('成长排程默认值：growthHours=[1]，growthEnabled=true，可热改', () => {
     const s = schedulerMod.createScheduler({
       pool: poolMod.createPool({}),
@@ -4034,9 +4118,10 @@ async function main() {
     assert.strictEqual(st.credits, 300, '100（web）+ 200（mp）')
   })
 
-  await testAsync('sweepOnce：国际版与企业切换会话零上游请求', async () => {
-    const client = makeSweepClient({ cn: [taskOf('chat_5', 5, 5)] })
-    // 企业切换会话：accessToken 的 JWT payload 带 token_source=enterprise_switch
+  await testAsync('sweepOnce：国际版与真企业版零上游请求；企业切换会话照常补领', async () => {
+    const client = makeSweepClient({ cn: [taskOf('chat_5', 5, 5)], e1: [taskOf('chat_5', 5, 5)] })
+    // 企业切换会话：accessToken 的 JWT payload 带 token_source=enterprise_switch，
+    // 但 enterpriseId 为空 —— 读端点与领奖实测正常，达标奖励属于「能领的钱」。
     const entToken = `x.${Buffer.from(JSON.stringify({ token_source: 'enterprise_switch' })).toString('base64url')}.y`
     const st = await tasksMod.sweepOnce({
       client,
@@ -4048,14 +4133,31 @@ async function main() {
       ],
       authByUID: uid =>
         makeAuth(uid, uid === 'g1' ? { realm: 'global' } : uid === 'e1' ? { accessToken: entToken } : {}),
-      skipAuth: a => a.realm === 'global' || authMod.isEnterpriseSession(a),
+      // 与 runtime.skipGrowthSweepFor 同语义：国际版 + 真企业版
+      skipAuth: a => a.realm === 'global' || authMod.isEnterprise(a),
       concurrency: 2
     })
-    assert.strictEqual(st.gated, 2, '国际版 + 企业切换会话都被门控')
-    assert.strictEqual(st.accounts, 1, '只有国内普通号参与')
+    assert.strictEqual(st.gated, 1, '只有国际版被门控')
+    assert.strictEqual(st.accounts, 2, '国内普通号 + 企业切换会话都参与')
     const touched = new Set(client.calls.map(c => c.auth))
-    assert.deepStrictEqual([...touched], ['cn'], '被门控账号不得发任何上游请求')
-    assert.strictEqual(st.claimed, 1)
+    assert.strictEqual(touched.has('g1'), false, '国际版不得发任何上游请求')
+    assert.strictEqual(touched.has('e1'), true, '企业切换会话要照常清扫（读/领奖正常）')
+    assert.strictEqual(st.claimed, 2, '两个账号的达标奖励都要领掉')
+  })
+
+  await testAsync('sweepOnce：真企业版（enterpriseId 非空）整体跳过', async () => {
+    // 上游对非个人账号直接 403 `growth system is only available for personal users`，
+    // 每轮清扫都会刷一片错误，故整体跳过（与参考实现 IsEnterprise 门控一致）。
+    const c2 = makeSweepClient({ ent: [taskOf('chat_5', 5, 5)] })
+    const st2 = await tasksMod.sweepOnce({
+      client: c2,
+      listAccounts: () => [{ uid: 'ent', disabled: false }],
+      authByUID: () => makeAuth('ent', { enterpriseId: 'ent-1' }),
+      skipAuth: a => a.realm === 'global' || authMod.isEnterprise(a),
+      concurrency: 1
+    })
+    assert.strictEqual(st2.gated, 1)
+    assert.strictEqual(c2.calls.length, 0, '真企业版零上游请求')
   })
 
   await testAsync('sweepOnce：单项领奖失败不阻塞其余，且计入 errors', async () => {
@@ -4116,6 +4218,37 @@ async function main() {
     assert.strictEqual(st.errors, 1)
     assert.strictEqual(st.claimed, 0)
     assert.deepStrictEqual(calls, [], '默认列表失败即无法判定判据，不应继续拉 mp 列表')
+  })
+
+  await testAsync('sweepOnce：上游回「已领取」不计入补领数（防摘要被 +0 分噪音占满）', async () => {
+    // accept_status 未落到 claimed 时列表仍报 claimable；领奖回 already_claimed。
+    // 若把它算作补领，每轮摘要都会写「补领 1 项 +0 分」而实际零到账。
+    const client = {
+      calls: [],
+      async growthOK() {
+        return { tasks: [taskOf('chat_5', 5, 5)] }
+      },
+      async listTasksMP() {
+        return { tasks: [] }
+      },
+      async claimReward(auth, code) {
+        this.calls.push(code)
+        return { credit: 0, energy: 0, alreadyClaimed: true }
+      }
+    }
+    const st = await tasksMod.sweepOnce({
+      client,
+      listAccounts: () => [{ uid: 's1', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    })
+    assert.deepStrictEqual(client.calls, ['chat_5'], '仍要真的发一次领奖请求（幂等探测）')
+    assert.strictEqual(st.claimed, 0, 'already_claimed 不算补领')
+    assert.strictEqual(st.credits, 0)
+    assert.deepStrictEqual(st.codes, [])
+    const summary = tasksMod.sweepSummary(st)
+    assert.strictEqual(summary.includes('补领'), false, `摘要不该出现补领：${summary}`)
   })
 
   await testAsync('sweepSummary：文案只在有动静时提数字，门控/占用各自显形', async () => {

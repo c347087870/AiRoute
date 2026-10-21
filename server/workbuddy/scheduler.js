@@ -769,9 +769,14 @@ function createScheduler(deps) {
   const ENTERPRISE_SESSION_HINT = '企业切换会话（token_source=enterprise_switch）：上游行为上报静默丢弃，请在浏览器退出企业空间后重新登录授权'
 
   // 成长任务「执行侧」门控（与 runtime.skipGrowthExecFor 同语义）：
-  // 国际版无成长体系；企业切换会话下行为上报被静默丢弃。补领清扫虽是 accept/claim
-  // 而非行为上报，但仍属成长体系端点，同样跳过以避免空发请求。
+  // 国际版无成长体系；企业切换会话下行为上报被静默丢弃。
   const skipGrowthExecFor = a => isGlobalAuth(a) || isEnterpriseSessionAuth(a)
+
+  // 补领清扫门控（与 runtime.skipGrowthSweepFor 同语义）：清扫只做 accept/claim
+  // 两条幂等读改请求，不跑行为上报——企业切换会话的读/领奖实测正常，故**不跳过**，
+  // 否则这类账号的达标奖励永远领不到。真企业版上游直接 403
+  // （growth system is only available for personal users），整体跳过。
+  const skipGrowthSweepFor = a => isGlobalAuth(a) || authMod.isEnterprise(a)
 
   async function runCheckinAll() {
     let first = true
@@ -1171,7 +1176,7 @@ function createScheduler(deps) {
         client,
         listAccounts: () => pool.list(),
         authByUID: uid => pool.authByUID(uid),
-        skipAuth: skipGrowthExecFor,
+        skipAuth: skipGrowthSweepFor,
         optsFor: a => baseOpts(a),
         concurrency: 2,
         log
