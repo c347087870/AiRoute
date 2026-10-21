@@ -95,6 +95,50 @@ function str(v) {
   return typeof v === 'string' ? v.trim() : ''
 }
 
+// 是否真企业版（计费口径：enterpriseId 非空）
+function isEnterprise(auth) {
+  return !!(auth && String(auth.enterpriseId || '').trim())
+}
+
+// 解出 JWT payload 里的 token_source 声明。
+// 非 JWT / 解码失败 / payload 非 JSON 一律返回 ''（老 token 与非标准形态按无此声明
+// 处理，零回归）。先按无填充 base64url 解（JWT 标准），失败再试带填充形态。
+function jwtTokenSource(token) {
+  const parts = String(token || '').split('.')
+  if (parts.length < 2) return ''
+  let raw
+  try {
+    raw = Buffer.from(parts[1], 'base64url').toString('utf8')
+  } catch {
+    return ''
+  }
+  let payload
+  try {
+    payload = JSON.parse(raw)
+  } catch {
+    return ''
+  }
+  return payload && typeof payload.token_source === 'string' ? payload.token_source : ''
+}
+
+// 是否处于「企业上下文」：账号本身是企业版，或 accessToken 签发自**企业切换会话**
+// （JWT payload 带 token_source=enterprise_switch —— 浏览器在企业空间状态下完成
+// OAuth 授权时签发）。
+//
+// 为什么单独一站：企业切换会话与真企业版的上游表现不同（实测 2026-10-12）——
+// 成长任务列表 / 额度查询 / 领养 Buddy 等**读端点与直连 API 照常**，但行为事件
+// 上报（/v2/report）**返回 200 却被上游静默丢弃**：成长任务全部 0/x，重跑并回读
+// 进度从不跳动。即「读得见、记不上账」。不跳过则调度队列每轮白跑全部任务（含
+// 真实对话配额），且无任何报错可查。
+// 因此行为类任务（活跃上报 / 连登管家 / 猫猫旅行 / 夜猫子 / 成长任务执行）的门控
+// 用本函数；签到不在此列（签到失败是显式报错），任务列表扫描与保活照常。
+//
+// 每次现解码而非缓存：refresh 会整体换发 token，企业切换状态可能随重新授权翻转。
+function isEnterpriseSession(auth) {
+  if (isEnterprise(auth)) return true
+  return jwtTokenSource(auth && auth.accessToken) === 'enterprise_switch'
+}
+
 // 原子落盘（嵌套形，插件可读格式）：tmp + rename，权限 0600
 function saveAtomic(auth) {
   if (!auth) return
@@ -182,6 +226,10 @@ module.exports = {
   pathFor,
   loadDir,
   needsRefresh,
+  // 企业上下文判定（计费口径 / 行为任务门控口径）
+  isEnterprise,
+  isEnterpriseSession,
+  jwtTokenSource,
   // 区域判定
   REALM_CN,
   REALM_GLOBAL,

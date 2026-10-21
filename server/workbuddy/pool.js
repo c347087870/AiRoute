@@ -528,12 +528,17 @@ function createPool(opts = {}) {
     dirty = true
   }
 
-  // 清 11102 负缓存（不碰 6004）
+  // 清模型不可用负缓存（11102「该后端无此模型」/ 11158「账号类型无权限」，不碰 6004 限流）
+  //
+  // 两类都走 blockModelBackoff 写同一张表，reason 分别以 '11102' / '11158' 开头；
+  // 调用成功即证明该模型对该账号可用，两类都该清。只清 11102 会让 11158 的条目
+  // 一直挂到 TTL 到期（最长 6 小时），期间该模型对该账号始终不可选。
   function blockModelClear(uid, model) {
     const e = byUID.get(uid)
     if (!e) return
     const mc = e.modelCooldowns[model]
-    if (!mc || !String(mc.reason || '').startsWith('11102')) return
+    const reason = String(mc && mc.reason ? mc.reason : '')
+    if (!mc || !(reason.startsWith('11102') || reason.startsWith('11158'))) return
     delete e.modelCooldowns[model]
     dirty = true
   }
@@ -939,9 +944,12 @@ function createPool(opts = {}) {
     const rateLimitedModels = []
     for (const [model, mc] of Object.entries(e.modelCooldowns)) {
       if (!mc.until || now >= mc.until) continue
+      const reason = String(mc.reason || '')
+      // 11102 / 11158 都是确定性模型拒绝（该后端无此模型 / 该账号类型无权限），
+      // 走 (账号,模型) 负缓存；6004 是模型级限流，两者展示语义不同
       const item = {
         model,
-        kind: String(mc.reason || '').startsWith('11102') ? 'model_unavailable' : 'rate_limit',
+        kind: reason.startsWith('11102') || reason.startsWith('11158') ? 'model_unavailable' : 'rate_limit',
         until: mc.until
       }
       if (mc.resetAt && mc.resetAt !== mc.until) item.resetAt = mc.resetAt
@@ -965,7 +973,11 @@ function createPool(opts = {}) {
       cooling: !!cooling,
       coolKind: cooling ? coolKind : '',
       coolRemaining,
-      reason: e.reason || '',
+      // 冷却原因只在与冷却态同时存在时透出：冷却到期后 e.reason 仍留着上次的
+      // 文案（冷却结束不清 reason），原样透出会让面板把健康账号标成「限流中」，
+      // 也把历史上游原文（含账号/上游业务码）长期暴露在 /status 响应里。
+      // 禁用态的 reason 由 disabledReason 单独透出，不受此处影响。
+      reason: cooling ? e.reason || '' : '',
       successCount: e.successCount,
       errTotal: e.errTotal,
       lastSuccess: e.lastSuccess,

@@ -131,6 +131,14 @@ export function testProvider(name, model = '') {
   return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000 }).then(r => r.data)
 }
 
+// 用 URL + Key 直接探测上游模型清单（无状态：表单未保存也能用）
+// 服务端最多串行探测两个协议端点（各 10s）+ 限时补上限，故超时放宽到 45s
+export function fetchProviderModels({ baseURL = '', openaiURL = '', apiKey = '' }) {
+  return api
+    .post('/api/providers/fetch-models', { baseURL, openaiURL, apiKey }, { timeout: 45000 })
+    .then(r => r.data)
+}
+
 export function getHealth() {
   return api.get('/api/health').then(r => r.data)
 }
@@ -395,14 +403,30 @@ export function wbScheduler() {
   return api.get('/api/workbuddy/scheduler').then(r => r.data)
 }
 
-// 手动触发单类定时任务（checkin / travel / activity / keepalive / blackcat / balance）
+// 手动触发单类定时任务（checkin / travel / activity / keepalive / blackcat /
+// growth / balance / taskSweep）
 export function wbSchedulerRun(task) {
   return api.post('/api/workbuddy/scheduler/run', { task }, { timeout: 600000 }).then(r => r.data)
 }
 
-// 修改排程（时点 / 开关 / 余额刷新间隔）
+// 修改排程（时点 / 开关 / 余额刷新间隔 / 补领清扫开关与间隔）
 export function wbSchedulerUpdate(patch) {
   return api.put('/api/workbuddy/scheduler', patch).then(r => r.data)
+}
+
+// 官方补偿活动状态（只读，不领取）。补偿带领取截止日，先查后领才看得见「可领未领」
+export function wbCompensation() {
+  return api.get('/api/workbuddy/compensation', { timeout: 60000 }).then(r => r.data)
+}
+
+// 逐号领取补偿（先查状态 → 待领才领）；返回 summary{claimed,skipped,errored,credit}
+export function wbCompensationClaimAll() {
+  return api.post('/api/workbuddy/compensation/claim_all', {}, { timeout: 600000 }).then(r => r.data)
+}
+
+// 单号领取补偿
+export function wbCompensationClaim(uid) {
+  return api.post(`/api/workbuddy/accounts/${encodeURIComponent(uid)}/compensation`, {}, { timeout: 120000 }).then(r => r.data)
 }
 
 // ==================== 更新检查 ====================

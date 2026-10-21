@@ -220,7 +220,7 @@
           <div v-if="!(detailAcct.rateLimitedModels || []).length" class="wb-note">无</div>
           <div v-else class="wb-model-limited">
             <div v-for="m in detailAcct.rateLimitedModels" :key="m.model">
-              {{ m.model }}｜{{ m.kind === 'model_unavailable' ? '该后端无此模型' : '模型级限流' }}｜解除 {{ formatTime(m.until) }}
+              {{ m.model }}｜{{ m.kind === 'model_unavailable' ? '该后端无此模型/无权限' : '模型级限流' }}｜{{ modelCooldownText(m) }}
             </div>
           </div>
         </div>
@@ -712,6 +712,98 @@
                   </button>
                 </td>
               </tr>
+              <tr>
+                <td><input type="checkbox" v-model="schedForm.taskSweepEnabled" /></td>
+                <td>
+                  <div class="wb-task-name">补领清扫</div>
+                  <div class="wb-desc">按分钟间隔扫全账号，把「已达标未领」的成长任务奖励领掉（只 accept/claim，不跑对话）</div>
+                </td>
+                <td><input v-model.number="schedForm.taskSweepMinutes" class="wb-hours-input" placeholder="分钟" /></td>
+                <td class="nowrap">{{ schedState.taskSweep && schedState.taskSweep.at ? formatTime(schedState.taskSweep.at) : '-' }}</td>
+                <td>{{ (schedState.taskSweep && schedState.taskSweep.summary) || '-' }}</td>
+                <td class="nowrap">
+                  <button class="btn-ghost btn-sm" :disabled="runningTask === 'taskSweep'" @click="runSchedulerTask('taskSweep')">
+                    {{ runningTask === 'taskSweep' ? '执行中…' : '立即执行' }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="wb-note">
+          <strong>补领清扫</strong>解决的是「任务达标了但没人领奖」：执行队列只扫有自动动作的任务，
+          队列路径还要先重跑行为动作且一天只跑一次，一键完成对达标任务直接跳过——三条链路都不负责领奖，
+          积分会长期卡在达标未领。清扫只做 <strong>接受 + 领奖</strong> 两条幂等读改请求
+          （重复领返回「已领取」，零副作用），故分钟级跑也几乎零负担；判据只用进度口径
+          （当前 ≥ 目标），不用「已完成」状态（该字段回读会短暂翻转，据此领奖会误领）。
+          正在执行任务的账号整轮跳过，不打断进行中的链路；国际版与真企业版账号零上游请求
+          （企业切换会话的读端点与领奖实测正常，照常清扫——否则这类账号的达标奖励永远领不到）。
+        </div>
+      </div>
+
+      <!-- 官方补偿：先查后领。补偿带领取截止日，签到排程停摆就会静默过期，
+           故把「可领未领」与「领取失败」都显式呈现在这里 -->
+      <div class="card wb-card" style="margin-top: 12px">
+        <div class="section-title">官方补偿</div>
+        <div class="wb-note">
+          官方限时补偿带领取截止日。旧实现是<strong>盲领</strong>（直接调领取接口），
+          导致「没有补偿」「已经领过」「<strong>领取真的失败</strong>」三种情形无法区分；
+          签到排程停摆（被禁用 / 机器关机 / 账号被禁用）时补偿还会静默过期。
+          这里改为<strong>先查状态、待领才领</strong>：可领未领与查询失败都会显形。
+        </div>
+
+        <div class="wb-toolbar">
+          <button class="btn-ghost btn-sm" :disabled="compLoading" @click="loadCompensation(false)">
+            {{ compLoading ? '查询中…' : '刷新状态' }}
+          </button>
+          <button
+            class="btn-primary btn-sm"
+            :disabled="compClaiming"
+            @click="claimCompensationAll"
+          >{{ compClaiming ? '领取中…' : '逐号领取' }}</button>
+          <span class="wb-desc">
+            待领 {{ compPendingCount }} 个<template v-if="compErrorCount">，查询失败 {{ compErrorCount }} 个</template>
+          </span>
+        </div>
+
+        <div v-if="compLoadError" class="wb-note" style="color: #c0392b">
+          补偿状态查询失败：{{ compLoadError }}（这不是「没有待领补偿」，请检查网络或账号凭证后重试）
+        </div>
+        <div v-else-if="!compRows.length && !compLoading" class="wb-note">暂无账号或尚未查询</div>
+
+        <div v-else class="table-wrap">
+          <table class="wb-table">
+            <thead>
+              <tr>
+                <th>账号</th>
+                <th>状态</th>
+                <th>待领额度</th>
+                <th>领取截止</th>
+                <th>倒计时</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in compRows" :key="row.uid">
+                <td>{{ row.nickname || row.uid.slice(0, 8) }}</td>
+                <!-- 查询失败的账号必须显形（红字），不能被渲染成「无活动」 -->
+                <td :style="row.error ? 'color: #c0392b' : ''">{{ compRowText(row) }}</td>
+                <td>{{ compPending(row) ? row.status.creditNum : '-' }}</td>
+                <td class="nowrap">{{ compEndMs(row) ? formatTime(compEndMs(row)) : '-' }}</td>
+                <!-- ≤48 小时标红：补偿带截止日，临近过期需要立刻处理 -->
+                <td class="nowrap" :style="compUrgent(row) ? 'color: #c0392b; font-weight: 600' : ''">
+                  {{ compCountdown(row) }}
+                </td>
+                <td class="nowrap">
+                  <button
+                    v-if="compPending(row)"
+                    class="btn-ghost btn-sm"
+                    :disabled="!!compClaimingUid"
+                    @click="claimCompensationOne(row)"
+                  >{{ compClaimingUid === row.uid ? '领取中…' : '领取' }}</button>
+                  <span v-else class="wb-desc">-</span>
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -815,6 +907,12 @@
         <div class="wb-kv">
           <span class="wb-kv-label">余额刷新间隔</span>
           <span class="wb-kv-value">{{ schedState.balanceRefreshMinutes || 0 }} 分钟</span>
+        </div>
+        <div class="wb-kv">
+          <span class="wb-kv-label">补领清扫间隔</span>
+          <span class="wb-kv-value">
+            {{ schedState.taskSweepEnabled === false ? '已停用' : `${schedState.taskSweepMinutes || 0} 分钟` }}
+          </span>
         </div>
       </div>
 
@@ -1177,6 +1275,9 @@ import {
   wbScheduler,
   wbSchedulerRun,
   wbSchedulerUpdate,
+  wbCompensation,
+  wbCompensationClaimAll,
+  wbCompensationClaim,
   wbLogs,
   wbStatus,
   wbConfig,
@@ -1375,12 +1476,86 @@ const schedForm = ref({
   blackcatHours: '',
   growthEnabled: true,
   growthHours: '',
-  balanceRefreshMinutes: 0
+  balanceRefreshMinutes: 0,
+  taskSweepEnabled: true,
+  taskSweepMinutes: 15
 })
 // 排程保存中标记
 const schedSaving = ref(false)
 // 正在手动执行的任务名（避免重复点击）
 const runningTask = ref('')
+
+// ==================== 官方补偿状态 ====================
+
+// 补偿状态行：[{ uid, nickname, status: {active,claimed,creditNum,validityPeriod,endTime}|null, skip, skipMsg, error }]
+// 补偿带领取截止日，签到排程停摆（禁用/关机/账号被禁）就会静默过期，故单独可视化。
+// 取数与呈现分离：这里只在进页面与手动点击时取数（无 overview 快照可吃，
+// 挂进轮询就是定期轰炸上游），倒计时走动靠本地重渲染，不发请求。
+const compRows = ref([])
+// 状态查询中标记
+const compLoading = ref(false)
+// 领取中标记
+const compClaiming = ref(false)
+// 正在单号领取的 uid（避免重复点击）
+const compClaimingUid = ref('')
+// 上次取数时刻（驱动倒计时的本地重渲染）
+const compFetchedAt = ref(0)
+// 取数整体失败原因（必须显形，不能被渲染成「没有待领补偿」）
+const compLoadError = ref('')
+// 本地时钟（只用于让倒计时走动；不触发任何请求）
+const compNow = ref(Date.now())
+let compTick = null
+
+// 待领判据：active && !claimed && creditNum > 0（与后端 compensationPending 同口径）
+function compPending(row) {
+  return !!(
+    row &&
+    !row.skip &&
+    !row.error &&
+    row.status &&
+    row.status.active &&
+    !row.status.claimed &&
+    Number(row.status.creditNum) > 0
+  )
+}
+
+// 待领账号数
+const compPendingCount = computed(() => compRows.value.filter(compPending).length)
+// 查询失败账号数（必须显形，不能被说成「没有待领补偿」）
+const compErrorCount = computed(() => compRows.value.filter(r => r && r.error).length)
+// 截止时间解析：上游为 "2026-10-22 23:59:59"（无时区，按本地时间解读）
+function compEndMs(row) {
+  const t = row && row.status && row.status.endTime
+  if (!t) return 0
+  const ms = new Date(String(t).replace(' ', 'T')).getTime()
+  return Number.isFinite(ms) ? ms : 0
+}
+// 距截止的倒计时文案（≤48h 标红由模板判断）
+function compCountdown(row) {
+  const end = compEndMs(row)
+  if (!end) return '-'
+  const left = end - compNow.value
+  if (left <= 0) return '已过期'
+  return `剩 ${formatCountdown(left / 1000)}`
+}
+// 是否已进入紧急期（≤48 小时）
+function compUrgent(row) {
+  const end = compEndMs(row)
+  if (!end) return false
+  const left = end - compNow.value
+  return left > 0 && left <= 48 * 3600 * 1000
+}
+// 行状态文案
+function compRowText(row) {
+  if (!row) return '-'
+  if (row.error) return `查询失败：${row.error}`
+  if (row.skip) return row.skipMsg || row.skip
+  if (!row.status) return '-'
+  if (!row.status.active) return '当前无生效补偿'
+  if (row.status.claimed) return '本次活动已领取'
+  if (Number(row.status.creditNum) <= 0) return '活动在但额度为 0'
+  return `待领 ${row.status.creditNum} 积分`
+}
 
 // ==================== 高级配置状态 ====================
 
@@ -1494,6 +1669,7 @@ onUnmounted(() => {
   stopTaskPolling()
   stopQueuePolling()
   stopLogAuto()
+  stopCompTick()
 })
 
 // Tab 切换时按需加载该分区数据
@@ -1504,8 +1680,12 @@ watch(tab, key => {
   else if (key === 'tasks') {
     if (taskUid.value) loadTasks()
     refreshQueue()
-  } else if (key === 'scheduler') loadScheduler()
-  else if (key === 'logs') loadLogs()
+  } else if (key === 'scheduler') {
+    loadScheduler()
+    // 补偿状态只在进页面时取一次（不挂轮询：没有 overview 快照，轮询就是轰炸上游）
+    loadCompensation(false)
+    startCompTick()
+  } else if (key === 'logs') loadLogs()
   else if (key === 'advanced') {
     loadAdvanced()
     // 版本对照走缓存（6 小时 TTL），进页即显示上次结果，不额外发网络请求
@@ -2161,6 +2341,8 @@ async function loadScheduler() {
       form[t.hoursKey] = ((data.hours && data.hours[t.key]) || []).join(',')
     }
     form.balanceRefreshMinutes = data.balanceRefreshMinutes || 0
+    form.taskSweepEnabled = data.taskSweepEnabled !== false
+    form.taskSweepMinutes = data.taskSweepMinutes || 15
     schedForm.value = form
   } catch (err) {
     showToast('排程加载失败: ' + errText(err), 'error')
@@ -2264,6 +2446,36 @@ async function saveConfig() {
   }
 }
 
+// 模型受限明细的时间文案（until / resetAt 双时钟）
+//
+// 黄框出现与消失由 until 决定：网关为防「上游报超长限流把整池拖死」把重试时刻
+// 封顶在 now+softRateMax，而上游文案里的 resetAt 往往更晚。原实现只显示 until，
+// 用户看到「解除 14:30」却在 14:30 之后一用又弹限流，以为网关没生效。
+// until < resetAt 时明示两个时刻与口径，倒计时跟随 until（与实际掉框一致）。
+function modelCooldownText(m) {
+  const now = Date.now()
+  const until = Number(m.until) || 0
+  const resetAt = Number(m.resetAt) || 0
+  if (until && resetAt && until < resetAt) {
+    const retryIn = until > now ? Math.round((until - now) / 1000) : 0
+    const countdown = retryIn > 0 ? `（剩余 ${formatCountdown(retryIn)}）` : '（可重试）'
+    return `网关 ${formatTime(until)} 起重试${countdown} · 上游称 ${formatTime(resetAt)} 恢复`
+  }
+  return `解除 ${formatTime(until)}`
+}
+
+// 秒数格式化为倒计时文案
+function formatCountdown(sec) {
+  const n = Math.max(0, Math.round(Number(sec) || 0))
+  if (n >= 3600) {
+    const h = Math.floor(n / 3600)
+    const m = Math.round((n % 3600) / 60)
+    return m > 0 ? `${h} 小时 ${m} 分` : `${h} 小时`
+  }
+  if (n >= 60) return `${Math.floor(n / 60)} 分 ${n % 60} 秒`
+  return `${n} 秒`
+}
+
 // 毫秒时长格式化为可读文案
 function formatDuration(ms) {
   const n = Number(ms)
@@ -2271,6 +2483,89 @@ function formatDuration(ms) {
   if (n >= 3600000) return `${Math.round((n / 3600000) * 10) / 10} 小时`
   if (n >= 60000) return `${Math.round(n / 60000)} 分钟`
   return `${Math.round(n / 1000)} 秒`
+}
+
+// ==================== 官方补偿状态 ====================
+
+// 加载全账号补偿状态（只读，不领取）
+// silent=true：进页自动加载用——失败只在页面显形（红色提示），不弹 toast 打断
+async function loadCompensation(silent = true) {
+  compLoading.value = true
+  try {
+    const data = await wbCompensation()
+    compRows.value = Array.isArray(data && data.rows) ? data.rows : []
+    compLoadError.value = ''
+    compFetchedAt.value = Date.now()
+  } catch (err) {
+    // 取数整体失败必须显形：清空行会让界面看起来像「没有待领补偿」，
+    // 故障被说成「没活动」比不说更糟
+    compRows.value = []
+    compLoadError.value = errText(err)
+    if (!silent) showToast('补偿状态查询失败: ' + errText(err), 'error', 5000)
+  } finally {
+    compLoading.value = false
+  }
+}
+
+// 本地时钟 tick（仅驱动倒计时文案走动，不发请求）
+function startCompTick() {
+  if (compTick) return
+  compTick = setInterval(() => {
+    compNow.value = Date.now()
+  }, 1000)
+}
+
+function stopCompTick() {
+  if (compTick) {
+    clearInterval(compTick)
+    compTick = null
+  }
+}
+
+// 逐号领取（先查状态 → 待领才领）
+// 汇总里 errored 与 claimed 分开计：上游全挂时每个账号都走 error 分支，
+// 只看 claimed 会把「全部查询失败」说成「当前没有待领补偿」——比不说更糟。
+async function claimCompensationAll() {
+  compClaiming.value = true
+  try {
+    const res = await wbCompensationClaimAll()
+    const s = (res && res.summary) || {}
+    if (s.errored > 0) {
+      showToast(
+        `补偿领取：成功 ${s.claimed || 0} 个 +${s.credit || 0} 积分，失败 ${s.errored} 个（详见行内红字）`,
+        'error',
+        8000
+      )
+    } else if (s.claimed > 0) {
+      showToast(`补偿领取：${s.claimed} 个账号 +${s.credit || 0} 积分`)
+    } else {
+      showToast('当前没有待领补偿')
+    }
+    await loadCompensation(true)
+  } catch (err) {
+    showToast('补偿领取失败: ' + errText(err), 'error', 5000)
+  } finally {
+    compClaiming.value = false
+  }
+}
+
+// 单号领取补偿
+async function claimCompensationOne(row) {
+  if (!row || compClaimingUid.value) return
+  compClaimingUid.value = row.uid
+  try {
+    const res = await wbCompensationClaim(row.uid)
+    if (res && res.error) showToast('领取失败: ' + res.error, 'error', 6000)
+    else if (res && res.claimed) showToast(`补偿领取成功 +${res.credit || 0} 积分`)
+    else if (res && res.skip) showToast(res.skipMsg || '无需领取')
+    else showToast('无可领取的补偿')
+    await loadCompensation(true)
+    await reload()
+  } catch (err) {
+    showToast('领取失败: ' + errText(err), 'error', 5000)
+  } finally {
+    compClaimingUid.value = ''
+  }
 }
 
 // 保存排程（时点 / 开关 / 余额刷新间隔）
@@ -2291,7 +2586,9 @@ async function saveScheduler() {
       keepaliveHours: parseHours(form.keepaliveHours),
       blackcatHours: parseHours(form.blackcatHours),
       growthHours: parseHours(form.growthHours),
-      balanceRefreshMinutes: Number(form.balanceRefreshMinutes) || 0
+      balanceRefreshMinutes: Number(form.balanceRefreshMinutes) || 0,
+      taskSweepEnabled: !!form.taskSweepEnabled,
+      taskSweepMinutes: Number(form.taskSweepMinutes) || 0
     }
     await wbSchedulerUpdate(patch)
     showToast('排程已保存并热生效')

@@ -54,6 +54,9 @@ function prepareBody(src, opts = {}) {
   // 角色与图片结构映射属上游硬性要求，两种档位都保留
   normalizeRoles(obj)
   normalizeImageURL(obj)
+  // 剔除 content 数组里的思考片段（属上游硬性要求：content 类型白名单不含它们，
+  // 命中即 400 code=11101，故两种档位都执行）
+  dropReasoningContentParts(obj)
   // S9 上下文压缩（native 不压缩）
   if (!native) {
     // S9 上下文压缩（先于配对清理：裁掉最旧整轮后，再统一清理孤儿 tool_call）
@@ -314,6 +317,58 @@ function normalizeImageURL(obj) {
   }
 }
 
+// 剔除 chat content 数组里的 reasoning_text / reasoning 片段。
+//
+// Codex 只走 /v1/responses：new-api 的 responses→chat 转换器
+// （openai_responses_to_openai_chat_completions）会把助手历史里的思考片段原样透传进
+// /v1/chat/completions。上游 content 类型白名单不含 reasoning_text，命中即 HTTP 400
+// code=11101 "unsupported content type at index 0: reasoning_text"。
+//
+// 思考片段只是模型私有推理，下游续写不需要，剔除无副作用：
+//   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）
+//   - 若删除后 content 为空且该消息无 tool_calls，整条消息一并删除
+function dropReasoningContentParts(obj) {
+  if (!Array.isArray(obj.messages)) return
+  const out = []
+  let changed = false
+  for (const rawMsg of obj.messages) {
+    if (!rawMsg || typeof rawMsg !== 'object' || Array.isArray(rawMsg) || !Array.isArray(rawMsg.content)) {
+      out.push(rawMsg)
+      continue
+    }
+    const kept = []
+    for (const part of rawMsg.content) {
+      if (!part || typeof part !== 'object' || Array.isArray(part)) {
+        kept.push(part)
+        continue
+      }
+      const ptype = typeof part.type === 'string' ? part.type.trim() : ''
+      if (ptype === 'reasoning_text' || ptype === 'reasoning') {
+        changed = true
+        continue
+      }
+      kept.push(part)
+    }
+    if (kept.length === 0) {
+      // 只剩被剔除的思考片段：无 tool_calls 就整条删掉（否则留下空 content 消息，
+      // 上游同样会以"空消息"拒绝）；有 tool_calls 则保留消息但把 content 整个摘掉
+      // ——留一个空数组同样会撞 "unsupported content type"，摘掉字段才是干净的调用消息
+      if (!Array.isArray(rawMsg.tool_calls) || rawMsg.tool_calls.length === 0) {
+        changed = true
+        continue
+      }
+      if ('content' in rawMsg) {
+        delete rawMsg.content
+        changed = true
+      }
+      out.push(rawMsg)
+      continue
+    }
+    if (kept.length !== rawMsg.content.length) rawMsg.content = kept
+    out.push(rawMsg)
+  }
+  if (changed) obj.messages = out
+}
 // S9 工具配对第 0 步：合并背靠背相邻的同批 assistant 工具声明（须先于 repack 与 cleanup）
 // 形态一：本条 assistant 仅有非空 tool_calls 无正文 → 声明顺序拼接进上一条同型 assistant
 // 形态二：本条 assistant 是纯文本（连 tool_calls 键都没有）→ 折进上一条无正文的 calls assistant
@@ -429,11 +484,20 @@ function repackToolResultBlocks(messages) {
 }
 
 // S9b：剔除无法配对的 tool_call 与 tool 结果（对称裁剪）
+//
+// 追加的否决条件：function.name 为空（含纯空白）的调用一律不保留。
+// 上游流式响应在工具调用 name 分片到达前异常结束（200 空流也算）时，聚合器按
+// 占位符产出 name:"" 的条目，客户端把它写进会话历史；下一轮原样转发时上游直接判
+//   400 {"code":11133,"extError":{"code":"model_param_invalid"}}
+//   tool_calls[i].function.name must be a non-empty string
+// 且带不带配对结果都会拒——带结果的脏条目原本会命中 keep 集合原样出站，整条会话
+// 从此每轮 503，只能手动清空历史。删除动作完全复用既有的两侧对称裁剪。
 function cleanupOrphanToolCalls(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages
 
   const resultIds = new Set()
   const callIds = new Set()
+  const emptyNameIds = new Set()
   let hasToolTraffic = false
   for (const m of messages) {
     if (!m || typeof m !== 'object' || Array.isArray(m)) continue
@@ -444,7 +508,12 @@ function cleanupOrphanToolCalls(messages) {
     if (Array.isArray(m.tool_calls)) {
       hasToolTraffic = true
       for (const call of m.tool_calls) {
-        if (call && typeof call === 'object' && call.id) callIds.add(call.id)
+        if (call && typeof call === 'object' && call.id) {
+          callIds.add(call.id)
+          // 收集阶段照常登记 id（保住 hasToolTraffic 语义：否则「空 name 且无结果」
+          // 这种本可被孤儿规则删掉的形态会漏出站），只在 keep 集合一处否决
+          if (toolCallNameEmpty(call)) emptyNameIds.add(call.id)
+        }
       }
     }
   }
@@ -452,6 +521,7 @@ function cleanupOrphanToolCalls(messages) {
 
   const keep = new Set()
   for (const id of callIds) {
+    if (emptyNameIds.has(id)) continue
     if (resultIds.has(id)) keep.add(id)
   }
 
@@ -482,6 +552,17 @@ function cleanupOrphanToolCalls(messages) {
   }
 
   return changed ? out : messages
+}
+
+// 单个 tool_call 的 function.name 是否为空。
+// 仅当 function 对象存在、name 字段存在且为空白字符串时判真；function / name
+// 字段缺失时判假——历史报文里存在不带 function 的占位条目，上游不会因此拒参，
+// 这里不扩大打击面。
+function toolCallNameEmpty(tc) {
+  const fn = tc && typeof tc === 'object' ? tc.function : null
+  if (!fn || typeof fn !== 'object' || Array.isArray(fn)) return false
+  if (typeof fn.name !== 'string') return false
+  return fn.name.trim() === ''
 }
 
 // 是否 DeepSeek 模型（思维链注入的触发条件）

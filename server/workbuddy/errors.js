@@ -11,7 +11,9 @@ const ERR_KIND = {
   CONTENT_BLOCKED: 'content_blocked', // 内容策略拦截
   BAD_PARAMS: 'bad_params', // 请求体解析失败（11101）
   ACCOUNT_FAULT: 'account_fault', // 账号级授权/配额故障
-  MODEL_BLOCKED: 'model_blocked', // 11102 该后端无此模型
+  MODEL_BLOCKED: 'model_blocked', // 11102 该后端无此模型 / 11158 账号×模型无权限
+  CHANNEL_REFUSED: 'channel_refused', // 11-128 通道校验失败（账号健康，不罚号）
+  UPSTREAM_BUSY: 'upstream_busy', // 6021 渠道队列满载（非账号问题，不罚号不轮转）
   WAF_BLOCK: 'waf_block', // 403 + 非业务信封（WAF 页）
   PROMPT_TOO_LONG: 'prompt_too_long', // 11115 prompt 过长
   IMAGE_INVALID: 'image_invalid', // 图片格式/数据无效
@@ -55,7 +57,42 @@ const SOFT_RATE_MARKERS = [
 const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153']
 
 // 账号级故障关键词（小写匹配）
-const ACCOUNT_FAULT_MARKERS = ['request illegal', 'trial not activated', 'trial version is not yet activated']
+// 注意：'request illegal' 不能作为通用 marker——WorkBuddy 的 11-128 通道校验失败
+// （{"code":"11-128","msg":"request illegal"}）与 11140 账号限制（{"code":11140,
+// "msg":"request illegal"}）文案完全相同。只看文案会把一次通道校验失败误判成账号
+// 封禁并硬禁用健康账号。11140 的判定统一走 isAccountRestricted（code + 文案双条件）。
+const ACCOUNT_FAULT_MARKERS = ['trial not activated', 'trial version is not yet activated']
+
+// 11140 / 11-128 共用的正文关键词
+const REQUEST_ILLEGAL_MSG = 'request illegal'
+
+// 业务码是否存在（不依赖 JSON 可解析：上游 11-128 的 code 是带连字符的字符串，
+// 非法 JSON 形态也出现过，故按字面量多形态匹配）
+function literalCode(raw, code) {
+  const s = String(raw || '')
+  const forms = [`"code":"${code}"`, `"code":" ${code}"`, `"code":${code}`, `"code": ${code}`]
+  return forms.some(f => s.includes(f))
+}
+
+// 是否 11-128 通道校验失败（上游认为请求不是官方客户端发出）
+// 必须 code + 文案双条件：11-128 还承载内容审核变体（"blocked by security policy"，
+// 应归 content_blocked），按 code 一刀切会把内容拦截也变成通道拒绝。
+function isChannelRefused(body) {
+  const raw = String(body || '')
+  if (!raw.toLowerCase().includes(REQUEST_ILLEGAL_MSG)) return false
+  return literalCode(raw, '11-128')
+}
+
+// 是否 11140 账号被上游限制（异常行为/风控）
+// 必须 code + 文案双条件：
+//   - 只看文案："request illegal" 也出现在 11-128 通道校验失败里（健康账号）；
+//   - 只看 code：11140 也承载模型级限流文案（"The model provider is rate-limiting
+//     requests."），那种场景必须保持 soft_rate。
+function isAccountRestricted(body) {
+  const raw = String(body || '')
+  if (!raw.toLowerCase().includes(REQUEST_ILLEGAL_MSG)) return false
+  return literalCode(raw, '11140')
+}
 
 // 内容拦截关键词（小写匹配）
 const CONTENT_BLOCKED_MARKERS = ['blocked by security policy', 'unapproved channel', 'illegal api invocation']
@@ -116,12 +153,41 @@ function hasBusinessCode(body, want) {
   return false
 }
 
-// 是否「该后端无此模型」（11102）：仅 400/404
+// 确定性模型拒绝的两个业务码：
+//   11102「该后端无此模型」——模型在该后端不存在
+//   11158「该账号类型无权使用该模型」——同一模型在不同账号类型上权限不同，
+//         换有权限的账号仍可能成功，所以与 11102 同属 (账号,模型) 负缓存
+const MODEL_BLOCK_CODE = '11102'
+const MODEL_FORBIDDEN_CODE = '11158'
+const MODEL_BLOCK_MSG = 'service info not found'
+const MODEL_FORBIDDEN_MSG = 'is not allowed for user type'
+
+// 取确定性模型拒绝的负缓存 reason（pool.blockModelClear 按前缀区分条目，
+// 不能碰 6004 的独立冷却表——6004 有自身上游重置墙钟语义）
+function modelBlockReasonFor(body) {
+  const raw = String(body || '')
+  const lower = raw.toLowerCase()
+  if (literalCode(raw, MODEL_FORBIDDEN_CODE) || lower.includes(MODEL_FORBIDDEN_MSG)) {
+    return '11158 model not allowed for account type'
+  }
+  return '11102 model not available'
+}
+
+// 是否确定性模型拒绝（11102 该后端无此模型 / 11158 账号类型无权限）：仅 400/404
+// 只比对 code/msg 独立字段，绝不做整段文本子串匹配——错误体还带 requestId 等字段，
+// 拿整段文本匹配会把 code 撞在 ID 上、误避让一个本来能用的模型。
 function isModelBlocked(status, body) {
   if (status !== 400 && status !== 404) return false
   if (!body) return false
   const lower = body.toLowerCase()
-  if (!body.includes('11102') && !lower.includes('service info not found')) return false
+  if (
+    !body.includes(MODEL_BLOCK_CODE) &&
+    !body.includes(MODEL_FORBIDDEN_CODE) &&
+    !lower.includes(MODEL_BLOCK_MSG) &&
+    !lower.includes(MODEL_FORBIDDEN_MSG)
+  ) {
+    return false
+  }
 
   let parsed
   try {
@@ -136,8 +202,10 @@ function isModelBlocked(status, body) {
     if (!layer || typeof layer !== 'object') continue
     const code = layer.code ?? layer.errCode ?? layer.error_code
     const msg = typeof layer.msg === 'string' ? layer.msg : typeof layer.message === 'string' ? layer.message : ''
-    if (String(code).trim() === '11102') return true
-    if (msg.toLowerCase().includes('service info not found')) return true
+    const codeStr = String(code).trim()
+    if (codeStr === MODEL_BLOCK_CODE || codeStr === MODEL_FORBIDDEN_CODE) return true
+    const lowerMsg = msg.toLowerCase()
+    if (lowerMsg.includes(MODEL_BLOCK_MSG) || lowerMsg.includes(MODEL_FORBIDDEN_MSG)) return true
   }
   return false
 }
@@ -153,6 +221,16 @@ function isWafBlocked(status, body) {
 // 是否模型级 429 限流（code 6004）
 function isModelRateLimit(body) {
   return /"code"\s*:\s*"?6004"?/.test(String(body || ''))
+}
+
+// 是否渠道级队列满载（code 6021 queue.full）：推理集群排队打满时上游回
+// 429 + {"code":6021,"msg":"queue.full.title"}。这是渠道容量事件，不是账号问题——
+// 同一时刻换任何账号都撞同一堵墙。按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号。
+// 结构码为主判据，"queue.full" 文案为外卡（避免 code 形态差异漏判）。
+function isUpstreamBusy(body) {
+  const raw = String(body || '')
+  if (literalCode(raw, '6021')) return true
+  return raw.toLowerCase().includes('queue.full')
 }
 
 // 是否重复签到（幂等判定）
@@ -180,8 +258,16 @@ function classify(status, body) {
   if (status === 402) return ERR_KIND.HARD_CREDIT
   // 2. session 失效（须先于 429：401+12153 混排 rate limit 文案仍属 session 失效）
   if (SESSION_DEAD_MARKERS.some(m => raw.includes(m))) return ERR_KIND.SESSION_DEAD
-  // 3. 账号级故障（须先于 429：429+14017 属账号故障）
+  // 3. 通道校验失败 / 账号被限制（11-128 与 11140 的 msg 同为 "request illegal"，
+  //    必须按业务码分流，且都须先于 429 与 4xx 兜底）：
+  //      - 11-128 = 通道校验失败（上游认为请求不是官方客户端发出）→ 账号健康，不罚号
+  //      - 11140 = 账号被上游限制（异常行为/风控）→ account_fault，由策略层禁用
+  if (isChannelRefused(raw)) return ERR_KIND.CHANNEL_REFUSED
+  if (isAccountRestricted(raw)) return ERR_KIND.ACCOUNT_FAULT
+  // 3.1 账号级故障（须先于 429：429+14017 属账号故障）
   if (ACCOUNT_FAULT_MARKERS.some(m => lower.includes(m))) return ERR_KIND.ACCOUNT_FAULT
+  // 3.2 渠道级队列满载（6021）：须先于 status==429 兜底，否则整池被误冷却
+  if (isUpstreamBusy(raw)) return ERR_KIND.UPSTREAM_BUSY
   // 4. 429 + 14018 = 积分耗尽（须先于通用 429 兜底）
   if (status === 429 && hasBusinessCode(raw, '14018')) return ERR_KIND.HARD_CREDIT
   // 5. 通用 429 = 软限流
@@ -277,6 +363,8 @@ const GATEWAY_HINTS = {
   [ERR_KIND.SESSION_DEAD]: 'account session expired at upstream; the account is disabled until re-login',
   [ERR_KIND.HARD_CREDIT]: 'account credits exhausted at upstream; waiting for daily check-in to restore',
   [ERR_KIND.MODEL_BLOCKED]: 'upstream has no such model on this backend; switch model or retry on another account',
+  [ERR_KIND.CHANNEL_REFUSED]: 'upstream rejected this channel request (it did not look like an official client); the account itself is healthy and the gateway keeps rotating',
+  [ERR_KIND.UPSTREAM_BUSY]: 'upstream inference queue is full (not an account problem); wait a moment and retry',
   [ERR_KIND.CONTENT_BLOCKED]: 'request content was rejected by content policy; adjust the prompt and retry',
   [ERR_KIND.TIMEOUT]: 'upstream did not return response headers before the deadline; the gateway stops rotating accounts for this request, retry later'
 }
@@ -350,6 +438,10 @@ module.exports = {
   codeMarker,
   hasBusinessCode,
   isModelBlocked,
+  isChannelRefused,
+  isAccountRestricted,
+  isUpstreamBusy,
+  modelBlockReasonFor,
   isWafBlocked,
   isModelRateLimit,
   isAlreadyCheckin,
@@ -358,5 +450,7 @@ module.exports = {
   truncateMsg,
   NO_HEALTHY_HINT,
   NO_HEALTHY_CODE,
-  ALREADY_CHECKIN_MARKERS
+  ALREADY_CHECKIN_MARKERS,
+  MODEL_BLOCK_CODE,
+  MODEL_FORBIDDEN_CODE
 }

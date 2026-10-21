@@ -153,9 +153,17 @@ function init(opts = {}) {
   rt.taskQueue = queueMod.createQueue({
     pool,
     log: taskLog,
-    skipAuth: skipGrowthFor,
+    skipAuth: skipGrowthExecFor,
+    // 账号占用与一键完成 / 补领清扫共用一把锁（tasks.js 模块级单表）。
+    // 队列在 runAccount 外层取锁并整轮持有，条目执行时不再重复抢占（lockHeld）。
+    tryLockAccount: tasksMod.tryLockAccount,
+    unlockAccount: tasksMod.unlockAccount,
     scanPending: auth => tasksMod.scanPendingCodes(auth, rtOpts(rt, auth)),
-    runCode: (auth, code) => rt.taskRunner.runOne(auth, code, rtOpts(rt, auth))
+    runCode: (auth, code) => {
+      const opts = rtOpts(rt, auth)
+      opts.lockHeld = true // 队列已持有该账号占用
+      return rt.taskRunner.runOne(auth, code, opts)
+    }
   })
 
   // 定时任务调度器（签到/活跃/旅行/保活/夜猫子/成长队列 + 余额后台刷新）
@@ -178,7 +186,10 @@ function init(opts = {}) {
       rt.taskQueue.runQueueOnce().catch(err => {
         rt.pushLog('task', `成长任务队列触发失败：${err.message}`, 'error')
       })
-    }
+    },
+    // 到点补领「已达标未领」的成长任务奖励（分钟级、幂等，不跑行为链路）。
+    // 走 runtime 注入是为了拿到区域感知的 rtOpts（identity / 域名映射）与共享账号锁。
+    taskSweepHook: () => sweepGrowthTasks(rt)
   })
   rt.scheduler.start()
 
@@ -682,15 +693,21 @@ async function forwardChat(opts) {
     if (!auth) {
       // 区分「账号不可用」与「该模型在账号池中暂时不可用」——后者切换模型即可恢复
       const diag = r.pool.diagnoseNoCandidate(model, pickRealm)
+      // 该区域所有账号都对该模型有确定性拒绝（11102 无此模型 / 11158 账号类型无权限）
+      // 或模型级限流：这是「模型不可用」，不是「池子没号」。按 503 no_healthy_account
+      // 报会让客户端以为是网关故障并重试整池；应为 400 model_unavailable（客户端
+      // 该换模型，重试同一模型不会自愈）。区域隔离下不跨区取证：只看本区域。
       const modelBlocked = diag.modelCooled > 0 && diag.healthy === 0 && diag.cooling === 0
       const realmLabel = pickRealm === 'global' ? '国际版' : '国内版'
       const err = new Error(
         modelBlocked
-          ? `模型 ${model} 在${realmLabel}账号池中暂时不可用（模型级限流或该后端无此模型），请切换其他模型或稍后重试`
+          ? `模型 ${model} 在${realmLabel}账号池中不可用（该后端无此模型、账号类型无权限或模型级限流），请切换其他模型`
           : `${realmLabel}账号池中${errMod.NO_HEALTHY_HINT}`
       )
-      err.code = modelBlocked ? 'model_temporarily_unavailable' : errMod.NO_HEALTHY_CODE
+      err.code = modelBlocked ? 'model_unavailable' : errMod.NO_HEALTHY_CODE
       err.noHealthy = true
+      // 状态码：模型不可用属客户端可纠正的请求问题（400）；池中无号才是网关侧 503
+      err.status = modelBlocked ? 400 : 503
       err.input = logInput
       err.taskKey = logTaskKey
       // gateway_hint：模型级受限给「换模型」指向；账号级给本地调度提示
@@ -873,6 +890,17 @@ async function forwardChat(opts) {
         r.pushLog('chat', 'WAF IP 级拦截判定（60s 窗内多个账号被拦）→ 终止本次轮转，等待窗口自然解除', 'warn')
       }
 
+      // 上游队列满载（6021 queue.full）：渠道级容量事件，换任何账号都撞同一堵墙。
+      // 不轮转、不透传「账号错误」，直接把上游原文抛给客户端按退避重试。
+      if (kind === errMod.ERR_KIND.UPSTREAM_BUSY) {
+        err.input = logInput
+        err.taskKey = logTaskKey
+        // 503 = 临时不可用，客户端按退避重试是正确处置（不换号、不换模型也无需换）
+        err.status = 503
+        r.pushLog('chat', `上游推理队列满载（6021 queue.full）→ 终止轮转，透传原文等待客户端退避重试 uid=${auth.uid.slice(0, 8)}`, 'warn')
+        throw err
+      }
+
       // 请求级错误：不轮转，直接抛给调用方（补挂日志字段，供 router 失败日志完整记录）
       // TIMEOUT：首字节超时换号多半再撞同一个慢上游，直接终止轮转
       if (
@@ -955,19 +983,36 @@ function applyErrorPolicy(r, uid, err, model) {
       pool.cooldown(uid, pool.COOL_SOFT, C.POOL_DEFAULTS.notFoundCooldownMs, 'upstream 404')
       return
     case errMod.ERR_KIND.ACCOUNT_FAULT: {
-      const body = String(err.body || '').toLowerCase()
-      if (body.includes('request illegal')) {
-        pool.disable(uid, 'account banned by upstream (11140 request illegal), re-login required')
+      // 账号级授权/配额故障按业务码分野（与 classify 口径一致）：
+      //   11140 + "request illegal" → 账号被上游限制（异常行为/风控）：硬禁用。
+      //     解除只能由用户在 WorkBuddy 官方渠道申诉，重登无效。
+      //   14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
+      //     保持软冷却（禁用会让用户补完 register 后仍无法用）。
+      // 注意 11-128 的 msg 同为 "request illegal"，但那是通道校验失败，已在
+      // classify 分流到 CHANNEL_REFUSED，走不到这里。
+      if (errMod.isAccountRestricted(String(err.body || ''))) {
+        pool.disable(uid, 'account restricted by upstream (11140 request illegal); appeal in WorkBuddy (submit feedback) to lift the restriction')
       } else {
         pool.cooldown(uid, pool.COOL_SOFT, softBase, 'account fault (14017)')
       }
       return
     }
+    case errMod.ERR_KIND.CHANNEL_REFUSED:
+      // 11-128 通道校验失败（上游判定请求可能不是官方客户端发出）：账号本身健康
+      // ——官方客户端可正常使用同一账号。这不是账号级故障，**不罚账号**（无冷却/
+      // 熔断/错误计数），由轮转继续尝试。与 CONTENT_BLOCKED 同待遇。
+      return
+    case errMod.ERR_KIND.UPSTREAM_BUSY:
+      // 6021 queue.full 渠道级容量满载：零动作（不冷却/不熔断/不计错误/不连败）。
+      // 轮转循环对该 kind 直接 fail-fast，见 chat()。
+      return
     case errMod.ERR_KIND.SERVER:
       pool.noteError(uid)
       return
     case errMod.ERR_KIND.MODEL_BLOCKED:
-      if (model) pool.blockModelBackoff(uid, model, pool.reason.MODEL_BLOCK_REASON)
+      // 11102（该后端无此模型）/ 11158（账号类型无权限）：reason 前缀决定
+      // pool.blockModelClear 能否在成功时清掉该条负缓存，不能混用
+      if (model) pool.blockModelBackoff(uid, model, errMod.modelBlockReasonFor(String(err.body || '')))
       return
     case errMod.ERR_KIND.CONTENT_BLOCKED:
     case errMod.ERR_KIND.PROMPT_TOO_LONG:
@@ -1541,6 +1586,35 @@ function skipGrowthFor(auth) {
   return !!(auth && auth.realm === authMod.REALM_GLOBAL)
 }
 
+// 是否跳过成长任务的**执行**（一键完成 / 入队执行 / 定时队列）。
+//
+// 比 skipGrowthFor 多一类：企业切换会话（token_source=enterprise_switch）。该形态
+// 下成长任务列表 / 额度查询等**读端点照常**，但 /v2/report 行为事件返回 200 却被
+// 上游静默丢弃——「读得见、记不上账」，任务进度永不跳动。跑执行队列只会白耗真实
+// 对话配额且无任何报错，故执行侧统一门控。
+// 读取（taskList / taskScan）、接任务（taskAccept）、领奖（taskClaim）与签到、
+// 保活不受影响：这些不是行为上报路径，实测正常。
+function skipGrowthExecFor(auth) {
+  if (!auth) return false
+  if (auth.realm === authMod.REALM_GLOBAL) return true
+  return authMod.isEnterpriseSession(auth)
+}
+
+// 是否跳过**补领清扫**（accept/claim 两条幂等读改请求，不跑任何行为上报）。
+//
+// 不能复用 skipGrowthExecFor：那条门控针对的是「行为事件被 200 静默丢弃」，而
+// 企业切换会话（token_source=enterprise_switch）的**读端点与领奖实测正常**（见
+// skipGrowthExecFor 注释）。拿它当清扫门控会让这类账号的达标奖励永远领不到——
+// 明明是能领的钱。
+// 真企业版（enterpriseId 非空）另当别论：上游对非个人账号直接 403
+// `growth system is only available for personal users`，每轮清扫都会刷一片错误，
+// 故整体跳过（与参考实现 workbuddy2api-panel 的 IsGlobal/IsEnterprise 门控一致）。
+function skipGrowthSweepFor(auth) {
+  if (!auth) return false
+  if (auth.realm === authMod.REALM_GLOBAL) return true
+  return authMod.isEnterprise(auth)
+}
+
 // ===== 积分构成 / 模型清单 / 运行日志 =====
 
 // 单账号积分批次明细（积分构成视图）
@@ -1689,7 +1763,27 @@ function growthUnsupportedError(auth) {
     `国际版账号（${String(auth?.nickname || auth?.uid || '').slice(0, 20)}）没有成长任务体系，该功能仅国内版可用`
   )
   err.code = 'growth_unsupported_realm'
+  // 422：请求本身可理解但该账号当前形态不能执行（与 400 参数错误、500 网关故障区分）
+  err.status = 422
   return err
+}
+
+// 企业切换会话的执行拒绝错误（附重登指引；422 与「参数错误」区分）
+function enterpriseSessionError(auth) {
+  const err = new Error(
+    `账号（${String(auth?.nickname || auth?.uid || '').slice(0, 20)}）当前是企业切换会话（token_source=enterprise_switch）：` +
+      '上游对行为事件上报返回 200 但静默丢弃，成长任务进度不会增长，执行只会白耗对话配额。' +
+      '请在浏览器退出企业空间后重新登录授权该账号'
+  )
+  err.code = 'enterprise_session_relogin'
+  err.status = 422
+  return err
+}
+
+// 按账号形态取「不能执行」的错误（国际版 / 企业切换会话）
+function growthExecBlockedError(auth) {
+  if (auth && auth.realm === authMod.REALM_GLOBAL) return growthUnsupportedError(auth)
+  return enterpriseSessionError(auth)
 }
 
 // 查询单账号任务列表（含进度与奖励）
@@ -1706,13 +1800,44 @@ async function taskRun(uid, taskCode) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
   if (!auth) throw new Error('账号不存在')
-  if (skipGrowthFor(auth)) throw growthUnsupportedError(auth)
+  if (skipGrowthExecFor(auth)) throw growthExecBlockedError(auth)
   return taskCode ? r.taskRunner.runOne(auth, taskCode, rtOpts(r, auth)) : r.taskRunner.runAll(auth, rtOpts(r, auth))
 }
 
 // 任务执行进度快照
 function taskProgress() {
   return ensure().taskRunner.getProgress()
+}
+
+// ===== 成长任务补领清扫 =====
+
+// 全账号一轮补领清扫：把「已达标未领」的任务奖励领掉（不做任何行为上报）。
+//
+// 现有三条链路都不负责这一环：执行队列只扫「有自动动作」的任务；队列路径要重跑
+// 行为动作且一天只跑一次；一键完成对达标任务直接跳过。于是经真实对话点亮的任务
+// 会长期卡在「达标未领」，积分再也上不去。
+//
+// 门控用 skipGrowthSweepFor（国际版 + 真企业版；企业切换会话照常清扫），
+// 被门控账号零上游请求。
+// 账号锁与一键完成/执行队列共享（tasks.tryLockAccount）：正在跑动作的账号整轮
+// 跳过，不打断进行中的链路。并发 2 与任务中心扫描同口径。
+async function sweepGrowthTasks(r) {
+  const rt = r || ensure()
+  const st = await tasksMod.sweepOnce({
+    client,
+    listAccounts: () => rt.pool.list(),
+    authByUID: uid => rt.pool.authByUID(uid),
+    skipAuth: skipGrowthSweepFor,
+    optsFor: a => rtOpts(rt, a),
+    concurrency: 2,
+    log: rt.taskLog
+  })
+  const summary = tasksMod.sweepSummary(st)
+  // 只在有实际动静时写日志：分钟级周期任务每次刷一条「无事发生」会淹没有效信息
+  if (st.claimed > 0 || st.accepted > 0 || st.errors > 0) {
+    rt.pushLog('task', `补领清扫：${summary}`, st.errors > 0 ? 'warn' : 'info')
+  }
+  return { ...st, summary }
 }
 
 // 全账号任务扫描（返回每账号未完成/可自动化任务）；国际版账号不参与扫描
@@ -1797,11 +1922,11 @@ function queueOnce(uids, options) {
   return r.taskQueue.runQueueOnce(filter, options || {})
 }
 
-// 指定账号入队执行指定任务码（国际版拒绝）
+// 指定账号入队执行指定任务码（国际版 / 企业切换会话拒绝）
 function enqueue(uid, codes) {
   const r = ensure()
   const auth = r.pool.authByUID(uid)
-  if (auth && skipGrowthFor(auth)) return { ok: false, enqueued: 0, error: growthUnsupportedError(auth).message }
+  if (auth && skipGrowthExecFor(auth)) return { ok: false, enqueued: 0, error: growthExecBlockedError(auth).message }
   const nickname = auth ? auth.nickname : ''
   const n = r.taskQueue.enqueue(uid, codes, { nickname, auth })
   return { ok: true, enqueued: n }
@@ -1878,7 +2003,11 @@ module.exports = {
   // 供单测/调试：区域门控
   skipCheckinFor,
   skipGrowthFor,
+  skipGrowthExecFor,
+  skipGrowthSweepFor,
+  growthExecBlockedError,
   growthUnsupportedError,
+  enterpriseSessionError,
   realmOfAuth,
   invalidateModelCache,
   findModelEntry,
@@ -1887,6 +2016,14 @@ module.exports = {
   schedulerState: () => ensure().scheduler.getState(),
   schedulerRun: task => ensure().scheduler.runNow(task),
   schedulerUpdateConfig: patch => ensure().scheduler.updateConfig(patch),
+  // 官方补偿（可观测化：先查后领）
+  compensationStatusAll: () => ensure().scheduler.compensationStatusAll(),
+  compensationClaimAll: async () => {
+    const results = await ensure().scheduler.compensationClaimAll()
+    return { ok: true, results, summary: ensure().scheduler.summarizeCompensation(results) }
+  },
+  compensationClaimFor: async uid => ensure().scheduler.compensationClaimFor(uid),
+  summarizeCompensation: results => ensure().scheduler.summarizeCompensation(results),
   // 成长任务
   taskList,
   taskRun,

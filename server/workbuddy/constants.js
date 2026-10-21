@@ -117,7 +117,12 @@ const SCHEDULE_DEFAULTS = {
   keepaliveEnabled: true,
   blackcatEnabled: true,
   growthEnabled: true,
-  balanceRefreshMinutes: 5 // 余额后台刷新周期（分钟）
+  balanceRefreshMinutes: 5, // 余额后台刷新周期（分钟）
+  // 任务补领清扫：分钟级、幂等、只做 accept/claim（不跑任何行为链路）。
+  // 与成长队列（小时制、跑真实对话）职责分离：队列负责「点亮」，清扫负责「把
+  // 已达标的奖领掉」——后者是长期缺失的一环（积分卡在达标未领）。
+  taskSweepEnabled: true,
+  taskSweepMinutes: 15
 }
 
 // ===== 会话失效阈值 =====

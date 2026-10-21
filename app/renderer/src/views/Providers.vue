@@ -250,11 +250,22 @@
           <div v-if="form.type !== 'workbuddy'" class="model-editor">
             <div class="model-editor-header">
               <span class="model-editor-title">模型列表</span>
-              <button class="btn-ghost btn-sm" @click="addModelRow">+ 添加模型</button>
+              <div class="model-editor-actions">
+                <button
+                  class="btn-ghost btn-sm"
+                  :disabled="picker.loading"
+                  title="用上面的 URL 与 API Key 向上游查询 /models 接口"
+                  @click="openModelPicker"
+                >
+                  {{ picker.loading ? '拉取中…' : '从接口拉取模型' }}
+                </button>
+                <button class="btn-ghost btn-sm" @click="addModelRow">+ 添加模型</button>
+              </div>
             </div>
             <div class="model-editor-hint">
               第一个模型为默认模型。最大上下文与最大输出不填即为空，填写后会在请求未指定 max_tokens 时自动注入。
               推理档位逐模型配置（下拉可选 low / high / max / xhigh，或输入自定义值），选「默认」表示不干预客户端请求。
+              填好 URL 与 Key 后点「从接口拉取模型」，可一次带出上游全部模型。
             </div>
 
             <div v-for="(model, index) in form.models" :key="index" class="model-edit-row">
@@ -298,6 +309,59 @@
         </div>
       </div>
     </div>
+
+    <!-- 模型清单选择层：放在 Provider 弹窗之外，避免被 .form 的输入框/label 样式影响 -->
+    <div v-if="picker.open" class="modal-overlay picker-overlay">
+      <div class="card modal picker-modal">
+        <div class="modal-header">
+          <h2>从接口拉取模型</h2>
+          <button class="modal-close" @click="closePicker">×</button>
+        </div>
+
+        <div v-if="picker.loading" class="picker-state">正在向上游查询模型列表…</div>
+        <div v-else-if="picker.error" class="picker-state picker-error">
+          <div>{{ picker.error }}</div>
+          <button class="btn-ghost btn-sm" @click="openModelPicker">重试</button>
+        </div>
+        <template v-else>
+          <div class="picker-meta">
+            来源 {{ picker.sources.map(sourceLabel).join(' + ') || '未知' }} · 共
+            {{ picker.all.length }} 个模型 · 已选 {{ picker.selected.size }} 个。
+            应用后合并进表单：已存在的模型保留原有上限与推理档位，新模型自动带出命中的上下文/输出上限。
+          </div>
+          <div class="picker-toolbar">
+            <input v-model="picker.keyword" class="picker-search" placeholder="搜索模型 ID" />
+            <label class="picker-toggle">
+              <input v-model="picker.showAll" type="checkbox" />
+              显示全部（含 embedding / 语音 / 图像）
+            </label>
+            <button class="btn-ghost btn-sm" @click="selectAllVisible">全选</button>
+            <button class="btn-ghost btn-sm" @click="clearSelection">清空</button>
+          </div>
+          <div class="picker-list">
+            <label v-for="m in visiblePickerModels" :key="m.id" class="picker-row">
+              <input type="checkbox" :checked="picker.selected.has(m.id)" @change="togglePick(m.id)" />
+              <span class="picker-id">{{ m.id }}</span>
+              <span v-if="!m.chat" class="picker-tag">非对话</span>
+              <span v-if="m.maxContext" class="picker-limit">ctx {{ formatNumber(m.maxContext) }}</span>
+              <span v-if="m.displayName" class="picker-name">{{ m.displayName }}</span>
+            </label>
+            <div v-if="!visiblePickerModels.length" class="picker-empty">没有匹配的模型</div>
+          </div>
+        </template>
+
+        <div class="form-actions">
+          <button class="btn-ghost" @click="closePicker">取消</button>
+          <button
+            class="btn-primary"
+            :disabled="picker.loading || !picker.selected.size"
+            @click="applyPickedModels"
+          >
+            应用（{{ picker.selected.size }}）
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -312,6 +376,7 @@ import {
   updateProvider,
   deleteProvider,
   testProvider,
+  fetchProviderModels,
   wbAccounts as fetchWbAccounts,
   wbEnabledModels
 } from '../api.js'
@@ -332,7 +397,31 @@ const wbAccounts = ref([]) // WorkBuddy 账号池的账号列表（只读展示�
 const enabledModels = ref([]) // 账号池统一维护的启用模型清单（只读展示）
 const wbModelList = ref([]) // WorkBuddy 表单的模型清单（由启用清单构建，档位可逐模型编辑）
 
+// 上游模型探测结果（选择层）：只存在于表单内，不落盘
+// all：探测到的全部模型（含 chat 标记与命中的上下限）；selected：勾选的模型 ID
+const picker = ref({
+  open: false, // 选择层是否可见
+  loading: false, // 正在探测上游
+  error: '', // 探测失败文案
+  sources: [], // 命中的协议来源（openai / anthropic）
+  all: [], // 探测到的模型
+  selected: new Set(), // 已勾选的模型 ID
+  keyword: '', // 搜索关键字
+  showAll: false // 是否显示非对话模型
+})
+
 const providerCount = computed(() => Object.keys(providers.value).length)
+
+// 选择层当前可见的模型：默认隐藏非对话模型，关键字按 ID 与展示名匹配
+const visiblePickerModels = computed(() => {
+  const keyword = picker.value.keyword.trim().toLowerCase()
+  return picker.value.all.filter(m => {
+    if (!picker.value.showAll && !m.chat) return false
+    if (!keyword) return true
+    const name = (m.displayName || '').toLowerCase()
+    return m.id.toLowerCase().includes(keyword) || name.includes(keyword)
+  })
+})
 
 // WorkBuddy 源按区域唯一：每个区域最多一个源，两个区域可共存
 const wbProvidersByRegion = computed(() => {
@@ -510,6 +599,7 @@ function toggleExpand(name) {
 function resetForm() {
   form.value = emptyForm()
   showKey.value = false
+  resetPicker()
 }
 
 // 关闭弹窗
@@ -531,9 +621,144 @@ function removeModelRow(index) {
   form.value.models.splice(index, 1)
 }
 
+// 探测来源的展示文案
+function sourceLabel(protocol) {
+  if (protocol === 'openai') return 'OpenAI /models'
+  if (protocol === 'anthropic') return 'Anthropic /v1/models'
+  return protocol
+}
+
+// 清空选择层状态（关闭时调用，避免下次打开闪出上次的结果）
+function resetPicker() {
+  picker.value = {
+    open: false,
+    loading: false,
+    error: '',
+    sources: [],
+    all: [],
+    selected: new Set(),
+    keyword: '',
+    showAll: false
+  }
+}
+
+// 关闭选择层
+function closePicker() {
+  resetPicker()
+}
+
+// 用表单当前的 URL 与 Key 探测上游模型清单
+async function openModelPicker() {
+  const baseURL = form.value.baseURL.trim()
+  const openaiURL = form.value.openaiURL.trim()
+  const apiKey = form.value.apiKey.trim()
+  if (!baseURL && !openaiURL) {
+    showToast('请先填写 Anthropic 或 OpenAI 端点 URL', 'error')
+    return
+  }
+  if (!apiKey) {
+    showToast('请先填写 API Key', 'error')
+    return
+  }
+
+  picker.value.open = true
+  picker.value.loading = true
+  picker.value.error = ''
+  picker.value.keyword = ''
+  try {
+    const res = await fetchProviderModels({ baseURL, openaiURL, apiKey })
+    if (!res || !res.ok) {
+      picker.value.error = (res && res.error) || '拉取失败'
+      picker.value.all = []
+      picker.value.sources = []
+      picker.value.selected = new Set()
+      return
+    }
+    picker.value.all = Array.isArray(res.models) ? res.models : []
+    picker.value.sources = Array.isArray(res.sources) ? res.sources : []
+    // 默认勾选：表单里已有的模型必选（保住手填配置），其余对话模型一并带上；
+    // 非对话模型不默认勾选，需要切到「显示全部」再手动选
+    const existing = new Set(form.value.models.map(m => (m.id || '').trim()).filter(Boolean))
+    picker.value.selected = new Set(
+      picker.value.all.filter(m => existing.has(m.id) || m.chat).map(m => m.id)
+    )
+  } catch (err) {
+    picker.value.error = err?.response?.data?.error || err?.message || '无法连接本地服务'
+  } finally {
+    picker.value.loading = false
+  }
+}
+
+// 勾选/取消单个模型（替换 Set 实例以触发响应式更新）
+function togglePick(id) {
+  const next = new Set(picker.value.selected)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  picker.value.selected = next
+}
+
+// 全选当前可见（受搜索与「显示全部」过滤）的模型
+function selectAllVisible() {
+  const next = new Set(picker.value.selected)
+  for (const m of visiblePickerModels.value) next.add(m.id)
+  picker.value.selected = next
+}
+
+// 清空勾选
+function clearSelection() {
+  picker.value.selected = new Set()
+}
+
+// 把勾选的模型合并进表单：
+// 已存在的行保留原对象（上限/档位/顺序都不动）；上游有但被取消勾选的移除；上游没返回的手填模型保留；
+// 新勾选的模型追加在后（上下限命中 models.dev 时已预填）
+function applyPickedModels() {
+  const selectedIds = picker.value.selected
+  if (!selectedIds.size) {
+    showToast('请至少勾选一个模型', 'error')
+    return
+  }
+
+  const existing = new Map()
+  for (const row of form.value.models) {
+    const id = (row.id || '').trim()
+    if (id && !existing.has(id)) existing.set(id, row)
+  }
+
+  const next = []
+  const fetched = new Set(picker.value.all.map(m => m.id))
+  for (const [id, row] of existing) {
+    // 上游列表里有的按勾选结果决定去留；上游没返回的（手填模型）原样保留，避免被静默删掉
+    if (fetched.has(id) && !selectedIds.has(id)) continue
+    next.push(row)
+  }
+
+  for (const m of picker.value.all) {
+    if (!selectedIds.has(m.id) || existing.has(m.id)) continue
+    next.push({
+      id: m.id,
+      displayName: m.displayName || '',
+      maxContext: m.maxContext ?? null,
+      maxOutput: m.maxOutput ?? null,
+      reasoningEffort: ''
+    })
+  }
+
+  if (!next.length) {
+    showToast('至少需要一个模型，且模型 ID 不能为空', 'error')
+    return
+  }
+
+  const added = next.filter(row => !existing.has(row.id)).length
+  form.value.models = next
+  closePicker()
+  showToast(added ? `已合并 ${next.length} 个模型（新增 ${added} 个）` : `已同步 ${next.length} 个模型`)
+}
+
 // 打开编辑弹窗，加载完整的 apiKey 与账号池数据
 async function editProvider(name, provider) {
   editingName.value = name
+  resetPicker()
   form.value = {
     name,
     displayName: provider.displayName || '',
@@ -1428,6 +1653,150 @@ onMounted(() => {
 .model-editor-empty {
   font-size: 12px;
   color: var(--text-weak);
+}
+
+/* 模型编辑区标题栏右侧的操作按钮组（拉取 / 添加） */
+.model-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ===== 模型拉取选择层 ===== */
+
+/* 叠在 Provider 弹窗之上 */
+.picker-overlay {
+  z-index: 200;
+}
+
+.modal.picker-modal {
+  width: 680px;
+}
+
+.picker-state {
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.picker-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--danger);
+}
+
+.picker-meta {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+
+.picker-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.picker-search {
+  flex: 1;
+  min-width: 160px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+/* 复选框统一小而紧凑：覆盖全局 input 的大内边距 */
+.picker-toolbar input[type='checkbox'],
+.picker-row input[type='checkbox'] {
+  width: auto;
+  flex-shrink: 0;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.picker-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.picker-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-1);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--bg-page);
+}
+
+.picker-row:last-child {
+  border-bottom: none;
+}
+
+.picker-row:hover {
+  background: var(--bg-hover);
+}
+
+.picker-id {
+  color: var(--text-1);
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.picker-name {
+  font-size: 11px;
+  color: var(--text-3);
+  max-width: 38%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-limit {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.picker-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-page);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.picker-empty {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+/* 未勾选任何模型时「应用」按钮置灰，避免看起来可点 */
+.picker-modal .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .form-actions {
