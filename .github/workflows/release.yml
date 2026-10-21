@@ -117,8 +117,9 @@ jobs:
           if [ "${{ matrix.platform }}" = "mac" ]; then
             cp "app/release/AiRoute-${version}-arm64.dmg" dist-assets/
           else
-            # electron-builder 的 win 产物名不带版本号，上传前补上
-            cp app/release/AiRoute.exe "dist-assets/AiRoute-${version}-win-x64.exe"
+            # 保持 AiRoute.exe：server/update.js 的 assetNameFor 写死了这个文件名来拼下载地址，
+            # 改名会让应用内更新 404（历史 Release v1.6.x 也都是 AiRoute.exe）
+            cp app/release/AiRoute.exe dist-assets/
           fi
           ls -lh dist-assets
 
