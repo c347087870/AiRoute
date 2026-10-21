@@ -2,11 +2,23 @@ const { spawn, execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs-extra')
 
-// 旧镜像路径 npmmirror.com/mirrors/electron/ 在 electron-builder 26 下重定向拼接会 404，改用 CDN 直连
-process.env.ELECTRON_MIRROR = 'https://cdn.npmmirror.com/binaries/electron/'
+// 二进制下载源：默认 npmmirror（国内快），可被 AIROUTE_ELECTRON_SOURCE 覆盖：
+//   official      -> 清掉镜像变量，走 GitHub 官方源（CI / 海外环境用）
+//   <https 地址>  -> 作为 ELECTRON_MIRROR 直连该地址
+const electronSource = process.env.AIROUTE_ELECTRON_SOURCE || 'npmmirror'
+if (electronSource === 'official') {
+  delete process.env.ELECTRON_MIRROR
+  delete process.env.ELECTRON_BUILDER_BINARIES_MIRROR
+} else if (electronSource === 'npmmirror') {
+  // 旧镜像路径 npmmirror.com/mirrors/electron/ 在 electron-builder 26 下重定向拼接会 404，改用 CDN 直连
+  process.env.ELECTRON_MIRROR = 'https://cdn.npmmirror.com/binaries/electron/'
+  process.env.ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+} else {
+  process.env.ELECTRON_MIRROR = electronSource
+}
+console.log(`[aiRoute] 二进制下载源: ${electronSource}`)
 // 系统环境变量若残留 ELECTRON_CUSTOM_DIR，会把 Electron 下载路径指向错误版本目录导致 404，强制清掉
 delete process.env.ELECTRON_CUSTOM_DIR
-process.env.ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
 
 const root = path.resolve(__dirname, '..')
 const appCwd = path.join(root, 'app')
