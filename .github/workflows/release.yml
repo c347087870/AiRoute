@@ -1,0 +1,154 @@
+name: Release
+
+# 打 tag（v1.6.1）自动构建双平台产物并创建 GitHub Release；也可手动触发只做构建（不建 Release）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 同一 tag 不并发，避免两个 job 同时写 Release 资产
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # CI 在海外，走 GitHub 官方源（脚本默认 npmmirror，国内本地构建更快）
+  AIROUTE_ELECTRON_SOURCE: official
+  # 无证书构建：ad-hoc 签名由 electron-builder.json 的 identity: "-" 显式指定，禁止自动发现证书
+  CSC_IDENTITY_AUTO_DISCOVERY: false
+
+jobs:
+  test:
+    name: 测试与版本校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # 测试全部离线、不依赖 electron 二进制，跳过安装脚本来省掉 ~100MB 下载
+      - name: 安装依赖
+        run: npm ci --ignore-scripts
+
+      - name: 单元测试（WorkBuddy 模块）
+        run: npm test
+
+      - name: 端到端冒烟测试
+        run: npm run test:e2e
+
+      # tag 与 package.json 版本必须一致，否则产物版本与 Release 对不上
+      - name: 校验 tag 与 package.json 版本
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json ${pkg} 不一致"
+            exit 1
+          fi
+          echo "版本一致：${pkg}"
+
+  build:
+    name: 构建 (${{ matrix.platform }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 起 GitHub 的 macOS runner 是 arm64，与当前只出 arm64 dmg 一致
+          - os: macos-14
+            platform: mac
+            buildArg: --mac
+          - os: windows-latest
+            platform: win
+            buildArg: --win
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # .npmrc 里的 electron_mirror 优先级高于 ELECTRON_MIRROR 环境变量，先清掉才走官方源
+      - name: 移除国内镜像配置
+        shell: bash
+        run: npm config delete electron_mirror --location=project || true
+
+      - name: 缓存 electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 打包 + 版本自检（asar / 平台元数据 / ad-hoc 签名 / dmg 体积）都在 build.js 内完成
+      - name: 打包
+        run: npm run build -- ${{ matrix.buildArg }}
+
+      # 复用发布前检查：asar、平台元数据、CHANGELOG 顶部版本、产物体积与 SHA256
+      - name: 发布前检查
+        run: node scripts/verify-release.js
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          mkdir -p dist-assets
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            cp "app/release/AiRoute-${version}-arm64.dmg" dist-assets/
+          else
+            # electron-builder 的 win 产物名不带版本号，上传前补上
+            cp app/release/AiRoute.exe "dist-assets/AiRoute-${version}-win-x64.exe"
+          fi
+          ls -lh dist-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.platform }}
+          path: dist-assets/*
+          if-no-files-found: error
+
+  release:
+    name: 创建 Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-assets
+          merge-multiple: true
+
+      - name: 生成 SHA256 校验文件
+        run: |
+          cd dist-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Release 已存在（重跑 workflow）时改为覆盖上传，避免 422
+      - name: 发布资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist-assets/* \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
