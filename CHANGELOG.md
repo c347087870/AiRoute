@@ -2,6 +2,20 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.7.0-beta.1] - 2026-10-21
+
+### 新增
+
+- **macOS 安装包（arm64 dmg）**：electron-builder 增加 mac 目标，采用 ad-hoc 签名（`identity: "-"`，无需开发者证书），产物名 `AiRoute-<version>-arm64.dmg`；`scripts/build.js` 与 `scripts/verify-release.js` 补齐 Info.plist 版本、代码签名有效性、dmg 体积与 asar 版本自检，签名缺失或版本不一致会直接中断构建，避免放出无法启动的包
+- **自动发布流水线**：新增 `.github/workflows/release.yml`，推送 `v*` tag 时自动在 macOS / Windows 双平台构建、跑离线测试与发布前自检，并创建 GitHub Release；带后缀的 tag（如 `v1.7.0-beta.1`）自动标记为 prerelease，同时上传 `SHA256SUMS.txt`
+
+### 构建与工程
+
+- 提交 `package-lock.json`，CI 用 `npm ci` 可复现安装
+- Electron 二进制下载源改为 `AIROUTE_ELECTRON_SOURCE` 控制：不设时走 npmmirror（本地行为不变），CI 走 GitHub 官方源
+- electron-builder 显式 `--publish never`：在 tag 上构建时它默认 `onTagOrDraft` 会隐式发布，无 `GH_TOKEN` 时会让已生成的产物被判失败
+- 发布前的 SHA256 改用 Node 内置 `crypto` 计算，不再依赖 `shasum` / PowerShell `Get-FileHash`（后者在 Windows runner 上会因模块未自动加载而失败）
+
 ## [1.6.1] - 2026-10-15
 
 发布前全面自检（新增端到端冒烟测试 54 项、离线模块测试 220 项，均通过），修复以下问题：
