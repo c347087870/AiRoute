@@ -105,6 +105,33 @@ function isMPTaskCode(code) {
 // 无独立领奖的任务（buddy/first 即发放奖励）
 const NO_CLAIM_CODES = new Set(['first_buddy'])
 
+// ===== 账号任务占用（跨「一键完成 / 执行队列 / 补领清扫」共享）=====
+//
+// 三条链路都会对同一账号发写请求（accept / claim / 行为上报）。各自维护一套锁
+// 在交叉时必然并发：上游判 account_busy，条目变虚假失败。故收敛成模块级单表。
+// 语义：tryLock 失败即「他人正在用该账号」，调用方应整账号跳过而非排队等待。
+const activeUIDs = new Set()
+
+// 尝试占用账号；uid 为空视为无需占用（返回 true）
+function tryLockAccount(uid) {
+  const id = String(uid || '')
+  if (!id) return true
+  if (activeUIDs.has(id)) return false
+  activeUIDs.add(id)
+  return true
+}
+
+// 释放账号占用
+function unlockAccount(uid) {
+  const id = String(uid || '')
+  if (id) activeUIDs.delete(id)
+}
+
+// 账号当前是否被占用（清扫/扫描前的预判，不改变占用状态）
+function isAccountBusy(uid) {
+  return !!(uid && activeUIDs.has(String(uid)))
+}
+
 // ===== 通用工具 =====
 
 // 睡眠指定毫秒
@@ -1671,7 +1698,6 @@ function accountBusyError() {
 function createTaskRunner(deps = {}) {
   const client = deps.client || clientMod
   const log = typeof deps.log === 'function' ? deps.log : msg => console.log(msg)
-  const activeUIDs = new Set() // 正在执行任务的账号（占用即他处 409，不再排队等待）
   const dailyDone = new Map() // `${uid}|${code}|${date}` → 时间戳（行为事件按天幂等）
   const state = { running: false, current: '', startedAt: 0, finishedAt: 0, items: [] }
 
@@ -1682,15 +1708,14 @@ function createTaskRunner(deps = {}) {
 
   // 账号任务互斥：同账号已占用时直接抛 account_busy（占用即 409，不再排队）；
   // 队列内部逐条串行调用，正常路径不会并发占用。
+  // 锁表是模块级共享的（见 tryLockAccount）：补领清扫也会占用同一账号，二者
+  // 交叉时不会同时对该账号发写请求。
   function withAccountLock(auth, fn) {
     const uid = (auth && auth.uid) || ''
-    if (uid && activeUIDs.has(uid)) return Promise.reject(accountBusyError())
-    if (uid) activeUIDs.add(uid)
+    if (!tryLockAccount(uid)) return Promise.reject(accountBusyError())
     return Promise.resolve()
       .then(() => fn())
-      .finally(() => {
-        if (uid) activeUIDs.delete(uid)
-      })
+      .finally(() => unlockAccount(uid))
   }
 
   // 按天幂等键
@@ -1913,6 +1938,185 @@ function acceptAllFor(auth, opts = {}, log) {
   return acceptAllWith(clientMod, auth, opts, log)
 }
 
+// ===== 任务补领清扫（周期幂等）=====
+//
+// 为什么需要这条独立链路：现有三条路径都不负责「把已达标的奖领掉」——
+//   1. 执行队列只扫「有自动动作」的任务（TASK_ACTIONS 白名单），不在白名单的
+//      达标任务永远扫不进队列；
+//   2. 队列路径还要先重跑一遍行为动作，而行事件按天幂等，当天第二次直接跳过；
+//   3. 一键完成对已达标任务直接跳过（历史实现连奖都不领）。
+// 于是经过真实对话等链路点亮的任务，积分会长期卡在「达标未领」。
+//
+// 判据只用 progress 口径（task.claimable = !claimed && target>0 && current>=target），
+// **不用 accept_status === 'completed'**：该字段在回读时会短暂转 completed 后整体
+// 回滚，据此领奖会误领。领奖幂等（重复领 already_claimed → 0 分 0 能），宁可多试
+// 一轮也不漏领。
+
+// 单账号一轮清扫（账号内串行）。命中账号占用（正在跑任务动作）时整账号跳过：
+// 不打断进行中的链路，下一轮自然补上。
+// 返回 { accounts, skipped, accepted, claimed, credits, energy, errors, codes, error }
+async function sweepAccountWith(client, auth, opts, log) {
+  const r = { accounts: 1, skipped: 0, accepted: 0, claimed: 0, credits: 0, energy: 0, errors: 0, codes: [], error: '' }
+  const uid = (auth && auth.uid) || ''
+  if (!tryLockAccount(uid)) {
+    r.skipped = 1
+    return r
+  }
+  try {
+    // 默认口径列表失败视为本轮该账号失败（无法判定任何判据）
+    let tasks
+    try {
+      tasks = await fetchTasksWith(client, auth, opts)
+    } catch (err) {
+      r.errors++
+      r.error = err.message
+      return r
+    }
+    // 小程序口径补充（school_season / Sequential_Tasks_* 仅在该口径下发）；
+    // mp 列表失败静默（活动结束 / 无 mp 任务），与既有 merge 语义一致。
+    // 单独记 mpOnly：领奖端点按「端标记」分流，不能只看码是否在 MP_TASK_CODES 里
+    //（上线后新增的 mp 任务不在该常量里，靠出处判定才不会走错端点）。
+    const mpOnly = new Set()
+    try {
+      const mp = await fetchTasksMPWith(client, auth, opts)
+      const seen = new Set(tasks.map(t => t.task_code))
+      for (const t of mp) {
+        if (!t.task_code || seen.has(t.task_code)) continue
+        mpOnly.add(t.task_code)
+        tasks.push(t)
+      }
+    } catch {
+      /* mp 列表不可用：只用默认口径 */
+    }
+
+    // 阶段一：接受未接受的任务。默认与 mp 口径必须分开提交（端标记不同，混提交
+    // 会让 mp 任务报 task not found）。
+    const codes = []
+    const mpCodes = []
+    for (const t of tasks) {
+      if (t.claimed || t.locked) continue
+      if (t.accept_status === 'accepted' || t.accept_status === 'completed') continue
+      if (!t.task_code) continue
+      if (mpOnly.has(t.task_code) || isMPTaskCode(t.task_code)) mpCodes.push(t.task_code)
+      else codes.push(t.task_code)
+    }
+    for (const batch of chunk(codes, ACCEPT_BATCH)) {
+      try {
+        const a = await acceptTasksWith(client, auth, batch, opts)
+        if (a.ok) r.accepted += batch.length
+        else r.errors++
+      } catch {
+        r.errors++
+      }
+      await sleep(ACCEPT_BATCH_GAP)
+    }
+    if (mpCodes.length > 0) {
+      try {
+        const a = await acceptTasksMPWith(client, auth, mpCodes, opts)
+        if (a.ok) r.accepted += mpCodes.length
+        else r.errors++
+      } catch {
+        r.errors++
+      }
+      await sleep(ACCEPT_BATCH_GAP)
+    }
+
+    // 阶段二：领已达标的奖。单项失败只记数、不中断后续任务。
+    for (const t of tasks) {
+      if (!t.claimable) continue
+      if (NO_CLAIM_CODES.has(t.task_code)) continue
+      const mp = mpOnly.has(t.task_code) || isMPTaskCode(t.task_code)
+      try {
+        const res = mp
+          ? await client.claimRewardMP(auth, t.task_code, opts)
+          : await client.claimReward(auth, t.task_code, opts)
+        r.claimed++
+        r.credits += Number(res && res.credit) || 0
+        r.energy += Number(res && res.energy) || 0
+        r.codes.push(t.task_code)
+        if (log) log(`[WorkBuddy补领] ${accountLabel(auth)} 补领 ${t.task_code} +${(res && res.credit) || 0} 分${res && res.alreadyClaimed ? '（此前已领）' : ''}`)
+      } catch (err) {
+        r.errors++
+        if (log) log(`[WorkBuddy补领] ${accountLabel(auth)} ${t.task_code} 领取失败：${err.message}`)
+      }
+      await sleep(REPORT_GAP)
+    }
+    return r
+  } finally {
+    unlockAccount(uid)
+  }
+}
+
+// 全账号一轮补领清扫（账号间并发、账号内串行）。
+// deps: { client?, listAccounts(), authByUID?(uid), skipAuth?(auth), concurrency?, log? }
+// skipAuth 用于区域/企业门控：被跳过的账号**零上游请求**（不查列表也不领奖）
+async function sweepOnce(deps = {}) {
+  const client = deps.client || clientMod
+  const log = typeof deps.log === 'function' ? deps.log : () => {}
+  const listAccounts =
+    typeof deps.listAccounts === 'function'
+      ? deps.listAccounts
+      : () => (deps.pool && typeof deps.pool.list === 'function' ? deps.pool.list() : [])
+  const authOf =
+    typeof deps.authByUID === 'function'
+      ? deps.authByUID
+      : uid => (deps.pool && typeof deps.pool.authByUID === 'function' ? deps.pool.authByUID(uid) : null)
+  const skipAuth = typeof deps.skipAuth === 'function' ? deps.skipAuth : () => false
+  const conc = Math.min(Math.max(Math.trunc(Number(deps.concurrency)) || 2, 1), 4)
+
+  const st = { accounts: 0, skipped: 0, accepted: 0, claimed: 0, credits: 0, energy: 0, errors: 0, gated: 0, codes: [] }
+  const queue = []
+  for (const s of listAccounts()) {
+    if (!s || s.disabled) continue
+    const a = authOf(s.uid)
+    if (!a) continue
+    // 门控账号不发任何上游请求（国际版无成长体系 / 企业切换会话上报被丢弃）
+    if (skipAuth(a)) {
+      st.gated++
+      continue
+    }
+    queue.push(a)
+  }
+
+  const workerCount = Math.min(conc, queue.length)
+  const workers = []
+  for (let i = 0; i < workerCount; i++) {
+    workers.push(
+      (async () => {
+        while (queue.length) {
+          const a = queue.shift()
+          // opts 交由调用方按账号构造（区域/identity 感知）；缺省为空对象
+          const opts = typeof deps.optsFor === 'function' ? deps.optsFor(a) || {} : {}
+          const r = await sweepAccountWith(client, a, opts, log)
+          st.accounts += r.accounts
+          st.skipped += r.skipped
+          st.accepted += r.accepted
+          st.claimed += r.claimed
+          st.credits += r.credits
+          st.energy += r.energy
+          st.errors += r.errors
+          st.codes.push(...r.codes)
+          if (r.error) log(`[WorkBuddy补领] ${accountLabel(a)} 扫描失败：${r.error}`)
+        }
+      })()
+    )
+  }
+  await Promise.all(workers)
+  return st
+}
+
+// 清扫结果摘要文案（供排程日志与状态摘要展示）
+function sweepSummary(st) {
+  if (!st) return '未执行'
+  const parts = [`账号 ${st.accounts} 个`]
+  if (st.gated > 0) parts.push(`门控跳过 ${st.gated}`)
+  if (st.skipped > 0) parts.push(`占用跳过 ${st.skipped}`)
+  if (st.accepted > 0) parts.push(`接受 ${st.accepted}`)
+  if (st.claimed > 0) parts.push(`补领 ${st.claimed} 项 +${st.credits} 分 +${st.energy} 能`)
+  if (st.errors > 0) parts.push(`出错 ${st.errors}`)
+  return parts.join(' · ')
+}
+
 // 扫描全账号任务列表（并发上限 2；返回每账号未完成任务 + 可自动化标记）
 async function scanTasks(auths, opts = {}) {
   const list = Array.isArray(auths) ? auths.filter(Boolean) : []
@@ -1941,6 +2145,14 @@ module.exports = {
   scanPendingCodes,
   acceptAllFor,
   accountBusyError,
+  // 账号占用（一键完成 / 执行队列 / 补领清扫共享同一把锁）
+  tryLockAccount,
+  unlockAccount,
+  isAccountBusy,
+  // 任务补领清扫
+  sweepOnce,
+  sweepAccountWith,
+  sweepSummary,
   isMPTaskCode,
   taskOrderIndex,
   mergeTasksByCode,

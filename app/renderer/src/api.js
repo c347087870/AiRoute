@@ -403,12 +403,13 @@ export function wbScheduler() {
   return api.get('/api/workbuddy/scheduler').then(r => r.data)
 }
 
-// 手动触发单类定时任务（checkin / travel / activity / keepalive / blackcat / balance）
+// 手动触发单类定时任务（checkin / travel / activity / keepalive / blackcat /
+// growth / balance / taskSweep）
 export function wbSchedulerRun(task) {
   return api.post('/api/workbuddy/scheduler/run', { task }, { timeout: 600000 }).then(r => r.data)
 }
 
-// 修改排程（时点 / 开关 / 余额刷新间隔）
+// 修改排程（时点 / 开关 / 余额刷新间隔 / 补领清扫开关与间隔）
 export function wbSchedulerUpdate(patch) {
   return api.put('/api/workbuddy/scheduler', patch).then(r => r.data)
 }

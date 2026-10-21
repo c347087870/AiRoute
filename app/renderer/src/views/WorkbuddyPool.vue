@@ -712,8 +712,31 @@
                   </button>
                 </td>
               </tr>
+              <tr>
+                <td><input type="checkbox" v-model="schedForm.taskSweepEnabled" /></td>
+                <td>
+                  <div class="wb-task-name">补领清扫</div>
+                  <div class="wb-desc">按分钟间隔扫全账号，把「已达标未领」的成长任务奖励领掉（只 accept/claim，不跑对话）</div>
+                </td>
+                <td><input v-model.number="schedForm.taskSweepMinutes" class="wb-hours-input" placeholder="分钟" /></td>
+                <td class="nowrap">{{ schedState.taskSweep && schedState.taskSweep.at ? formatTime(schedState.taskSweep.at) : '-' }}</td>
+                <td>{{ (schedState.taskSweep && schedState.taskSweep.summary) || '-' }}</td>
+                <td class="nowrap">
+                  <button class="btn-ghost btn-sm" :disabled="runningTask === 'taskSweep'" @click="runSchedulerTask('taskSweep')">
+                    {{ runningTask === 'taskSweep' ? '执行中…' : '立即执行' }}
+                  </button>
+                </td>
+              </tr>
             </tbody>
           </table>
+        </div>
+        <div class="wb-note">
+          <strong>补领清扫</strong>解决的是「任务达标了但没人领奖」：执行队列只扫有自动动作的任务，
+          队列路径还要先重跑行为动作且一天只跑一次，一键完成对达标任务直接跳过——三条链路都不负责领奖，
+          积分会长期卡在达标未领。清扫只做 <strong>接受 + 领奖</strong> 两条幂等读改请求
+          （重复领返回「已领取」，零副作用），故分钟级跑也几乎零负担；判据只用进度口径
+          （当前 ≥ 目标），不用「已完成」状态（该字段回读会短暂翻转，据此领奖会误领）。
+          正在执行任务的账号整轮跳过，不打断进行中的链路；国际版与企业切换会话账号零上游请求。
         </div>
       </div>
 
@@ -883,6 +906,12 @@
         <div class="wb-kv">
           <span class="wb-kv-label">余额刷新间隔</span>
           <span class="wb-kv-value">{{ schedState.balanceRefreshMinutes || 0 }} 分钟</span>
+        </div>
+        <div class="wb-kv">
+          <span class="wb-kv-label">补领清扫间隔</span>
+          <span class="wb-kv-value">
+            {{ schedState.taskSweepEnabled === false ? '已停用' : `${schedState.taskSweepMinutes || 0} 分钟` }}
+          </span>
         </div>
       </div>
 
@@ -1446,7 +1475,9 @@ const schedForm = ref({
   blackcatHours: '',
   growthEnabled: true,
   growthHours: '',
-  balanceRefreshMinutes: 0
+  balanceRefreshMinutes: 0,
+  taskSweepEnabled: true,
+  taskSweepMinutes: 15
 })
 // 排程保存中标记
 const schedSaving = ref(false)
@@ -2309,6 +2340,8 @@ async function loadScheduler() {
       form[t.hoursKey] = ((data.hours && data.hours[t.key]) || []).join(',')
     }
     form.balanceRefreshMinutes = data.balanceRefreshMinutes || 0
+    form.taskSweepEnabled = data.taskSweepEnabled !== false
+    form.taskSweepMinutes = data.taskSweepMinutes || 15
     schedForm.value = form
   } catch (err) {
     showToast('排程加载失败: ' + errText(err), 'error')
@@ -2552,7 +2585,9 @@ async function saveScheduler() {
       keepaliveHours: parseHours(form.keepaliveHours),
       blackcatHours: parseHours(form.blackcatHours),
       growthHours: parseHours(form.growthHours),
-      balanceRefreshMinutes: Number(form.balanceRefreshMinutes) || 0
+      balanceRefreshMinutes: Number(form.balanceRefreshMinutes) || 0,
+      taskSweepEnabled: !!form.taskSweepEnabled,
+      taskSweepMinutes: Number(form.taskSweepMinutes) || 0
     }
     await wbSchedulerUpdate(patch)
     showToast('排程已保存并热生效')

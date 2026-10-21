@@ -1463,7 +1463,8 @@ app.get('/api/workbuddy/scheduler', (req, res) => {
   res.json({ ok: true, ...workbuddy.schedulerState() })
 })
 
-// 手动触发单类定时任务（checkin / travel / activity / keepalive / blackcat / balance）
+// 手动触发单类定时任务（checkin / travel / activity / keepalive / blackcat /
+// growth / balance / taskSweep）
 app.post('/api/workbuddy/scheduler/run', async (req, res) => {
   if (!requireWorkbuddy(res)) return
   const task = String(req.body?.task || '')

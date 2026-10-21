@@ -6,6 +6,7 @@ const C = require('./constants')
 const headers = require('./headers')
 const errMod = require('./errors')
 const authMod = require('./auth')
+const tasksMod = require('./tasks')
 
 // ===== 本地常量（constants.js 未收录的路径与阈值）=====
 
@@ -154,7 +155,12 @@ function createScheduler(deps) {
     balanceRefreshMinutes:
       Number.isFinite(Number(sc0.balanceRefreshMinutes)) && Number(sc0.balanceRefreshMinutes) > 0
         ? Number(sc0.balanceRefreshMinutes)
-        : DEF.balanceRefreshMinutes
+        : DEF.balanceRefreshMinutes,
+    taskSweepEnabled: sc0.taskSweepEnabled !== false,
+    taskSweepMinutes:
+      Number.isFinite(Number(sc0.taskSweepMinutes)) && Number(sc0.taskSweepMinutes) > 0
+        ? Number(sc0.taskSweepMinutes)
+        : DEF.taskSweepMinutes
   }
 
   // 小时制任务表（tick 命中的判定依据）
@@ -172,6 +178,7 @@ function createScheduler(deps) {
   let timer = null // tick 定时器
   let stopped = false // 停机标志（长循环据此提前收尾）
   let lastBalanceAt = 0 // 上次余额刷新时刻
+  let lastSweepAt = 0 // 上次任务补领清扫时刻
   const fired = new Set() // 小时+任务去重键（本地日:任务:小时）
   const running = {} // 各类任务是否在执行中
   const adoptTried = {} // uid → 已判定领养门槛未达的 UTC+8 自然日
@@ -183,7 +190,8 @@ function createScheduler(deps) {
     keepalive: { at: 0, summary: '', running: false },
     blackcat: { at: 0, summary: '', running: false },
     growth: { at: 0, summary: '', running: false },
-    balance: { at: 0, summary: '', running: false }
+    balance: { at: 0, summary: '', running: false },
+    taskSweep: { at: 0, summary: '', running: false }
   }
 
   // ===== 通用工具（闭包内，需 deps）=====
@@ -760,6 +768,11 @@ function createScheduler(deps) {
   const isEnterpriseSessionAuth = a => authMod.isEnterpriseSession(a)
   const ENTERPRISE_SESSION_HINT = '企业切换会话（token_source=enterprise_switch）：上游行为上报静默丢弃，请在浏览器退出企业空间后重新登录授权'
 
+  // 成长任务「执行侧」门控（与 runtime.skipGrowthExecFor 同语义）：
+  // 国际版无成长体系；企业切换会话下行为上报被静默丢弃。补领清扫虽是 accept/claim
+  // 而非行为上报，但仍属成长体系端点，同样跳过以避免空发请求。
+  const skipGrowthExecFor = a => isGlobalAuth(a) || isEnterpriseSessionAuth(a)
+
   async function runCheckinAll() {
     let first = true
     let count = 0
@@ -1135,6 +1148,40 @@ function createScheduler(deps) {
     return `余额刷新 成功 ${ok} / 失败 ${fail}`
   }
 
+  // ===== 任务补领清扫 =====
+
+  // 全账号一轮补领清扫（分钟级、幂等，只 accept/claim，不跑行为链路）。
+  // 与成长队列分工：队列负责「点亮任务」（真实对话/事件上报，成本高，小时制），
+  // 清扫负责「把已达标的奖领掉」（两条幂等读改请求，分钟级负担可忽略）。
+  // 门控：国际版无成长体系、企业切换会话上报被丢弃 —— 二者零上游请求。
+  async function runTaskSweep() {
+    const hook = typeof deps.taskSweepHook === 'function' ? deps.taskSweepHook : null
+    if (hook) {
+      // 外部接管（runtime 注入，与账号池/区域 opts 同源）
+      try {
+        const st = await hook()
+        return (st && st.summary) || '补领清扫完成'
+      } catch (e) {
+        return `补领清扫失败: ${errMsg(e)}`
+      }
+    }
+    // 兜底：调度器自带的直接实现（未注入 hook 时仍可用，测试与独立调用走这条）
+    try {
+      const st = await tasksMod.sweepOnce({
+        client,
+        listAccounts: () => pool.list(),
+        authByUID: uid => pool.authByUID(uid),
+        skipAuth: skipGrowthExecFor,
+        optsFor: a => baseOpts(a),
+        concurrency: 2,
+        log
+      })
+      return tasksMod.sweepSummary(st)
+    } catch (e) {
+      return `补领清扫失败: ${errMsg(e)}`
+    }
+  }
+
   // ===== 成长任务队列（到点触发 hook）=====
 
   // 到点触发成长任务队列：hook 由 runtime 挂载（与「全账号入队执行」同管线），
@@ -1159,7 +1206,8 @@ function createScheduler(deps) {
     keepalive: runKeepaliveAll,
     blackcat: runBlackcatNow,
     growth: runGrowthQueue,
-    balance: runBalanceRefresh
+    balance: runBalanceRefresh,
+    taskSweep: runTaskSweep
   }
 
   // 执行单类任务（带重入保护，异常不影响调度器）
@@ -1237,6 +1285,13 @@ function createScheduler(deps) {
       lastBalanceAt = now
       void runTask('balance')
     }
+
+    // 任务补领清扫（分钟级、幂等）：把「已达标未领」的成长任务奖励领掉。
+    // 只做 accept/claim 两条读改请求，不跑任何行为链路，故分钟级成本可忽略。
+    if (cfg.taskSweepEnabled && cfg.taskSweepMinutes > 0 && now - lastSweepAt >= cfg.taskSweepMinutes * 60000) {
+      lastSweepAt = now
+      void runTask('taskSweep')
+    }
   }
 
   // ===== 对外接口 =====
@@ -1246,13 +1301,17 @@ function createScheduler(deps) {
     if (timer) return
     stopped = false
     lastBalanceAt = Date.now()
+    // 清扫不在启动瞬间跑：启动那次留给「进页面看余额」这类手动路径，
+    // 定时清扫从第一个完整间隔后才开始，避免与启动时的余额刷新叠加。
+    lastSweepAt = Date.now()
     timer = setInterval(tick, TICK_MS)
     if (timer.unref) timer.unref()
     log(
       `scheduler: 已启动 — 签到 ${hoursText(cfg.checkinHours)} 点 / 旅行 ${hoursText(cfg.travelHours)} 点 / ` +
         `活跃 ${hoursText(cfg.activityHours)} 点 / 保活 ${hoursText(cfg.keepaliveHours)} 点 / ` +
         `夜猫子 ${hoursText(cfg.blackcatHours)} 点 / 成长任务 ${hoursText(cfg.growthHours)} 点 / ` +
-        `余额每 ${cfg.balanceRefreshMinutes} 分钟`
+        `余额每 ${cfg.balanceRefreshMinutes} 分钟 / ` +
+        `补领清扫 ${cfg.taskSweepEnabled ? `每 ${cfg.taskSweepMinutes} 分钟` : '已关闭'}`
     )
     tick()
   }
@@ -1308,7 +1367,13 @@ function createScheduler(deps) {
 
   // 最近执行状态快照
   function getState() {
-    const out = { enabled: { ...pickEnabled() }, hours: { ...pickHours() }, balanceRefreshMinutes: cfg.balanceRefreshMinutes }
+    const out = {
+      enabled: { ...pickEnabled() },
+      hours: { ...pickHours() },
+      balanceRefreshMinutes: cfg.balanceRefreshMinutes,
+      taskSweepEnabled: cfg.taskSweepEnabled,
+      taskSweepMinutes: cfg.taskSweepMinutes
+    }
     for (const k of Object.keys(state)) out[k] = { ...state[k] }
     return out
   }
@@ -1357,9 +1422,20 @@ function createScheduler(deps) {
       const n = Number(patch.balanceRefreshMinutes)
       cfg.balanceRefreshMinutes = Number.isFinite(n) && n > 0 ? n : DEF.balanceRefreshMinutes
     }
+    if ('taskSweepEnabled' in patch) cfg.taskSweepEnabled = patch.taskSweepEnabled !== false
+    if ('taskSweepMinutes' in patch) {
+      const n = Number(patch.taskSweepMinutes)
+      cfg.taskSweepMinutes = Number.isFinite(n) && n > 0 ? n : DEF.taskSweepMinutes
+    }
     // 时点/开关变化后清空当日去重，使新时点在当前小时即可命中
     fired.clear()
-    return { enabled: { ...pickEnabled() }, hours: { ...pickHours() }, balanceRefreshMinutes: cfg.balanceRefreshMinutes }
+    return {
+      enabled: { ...pickEnabled() },
+      hours: { ...pickHours() },
+      balanceRefreshMinutes: cfg.balanceRefreshMinutes,
+      taskSweepEnabled: cfg.taskSweepEnabled,
+      taskSweepMinutes: cfg.taskSweepMinutes
+    }
   }
 
   return {
@@ -1372,6 +1448,8 @@ function createScheduler(deps) {
     runKeepaliveFor,
     runBlackcatNow,
     runGrowthNow: () => runTask('growth'),
+    // 任务补领清扫（手动触发；与定时 tick 同一条链路）
+    runTaskSweepNow: () => runTask('taskSweep'),
     // 官方补偿（可观测化）：状态查询 / 逐号领取 / 单号领取 / 汇总
     compensationStatusAll,
     compensationClaimAll,

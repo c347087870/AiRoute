@@ -178,7 +178,10 @@ function init(opts = {}) {
       rt.taskQueue.runQueueOnce().catch(err => {
         rt.pushLog('task', `成长任务队列触发失败：${err.message}`, 'error')
       })
-    }
+    },
+    // 到点补领「已达标未领」的成长任务奖励（分钟级、幂等，不跑行为链路）。
+    // 走 runtime 注入是为了拿到区域感知的 rtOpts（identity / 域名映射）与共享账号锁。
+    taskSweepHook: () => sweepGrowthTasks(rt)
   })
   rt.scheduler.start()
 
@@ -1781,6 +1784,36 @@ async function taskRun(uid, taskCode) {
 // 任务执行进度快照
 function taskProgress() {
   return ensure().taskRunner.getProgress()
+}
+
+// ===== 成长任务补领清扫 =====
+
+// 全账号一轮补领清扫：把「已达标未领」的任务奖励领掉（不做任何行为上报）。
+//
+// 现有三条链路都不负责这一环：执行队列只扫「有自动动作」的任务；队列路径要重跑
+// 行为动作且一天只跑一次；一键完成对达标任务直接跳过。于是经真实对话点亮的任务
+// 会长期卡在「达标未领」，积分再也上不去。
+//
+// 门控用 skipGrowthExecFor（国际版 + 企业切换会话），被门控账号零上游请求。
+// 账号锁与一键完成/执行队列共享（tasks.tryLockAccount）：正在跑动作的账号整轮
+// 跳过，不打断进行中的链路。并发 2 与任务中心扫描同口径。
+async function sweepGrowthTasks(r) {
+  const rt = r || ensure()
+  const st = await tasksMod.sweepOnce({
+    client,
+    listAccounts: () => rt.pool.list(),
+    authByUID: uid => rt.pool.authByUID(uid),
+    skipAuth: skipGrowthExecFor,
+    optsFor: a => rtOpts(rt, a),
+    concurrency: 2,
+    log: rt.taskLog
+  })
+  const summary = tasksMod.sweepSummary(st)
+  // 只在有实际动静时写日志：分钟级周期任务每次刷一条「无事发生」会淹没有效信息
+  if (st.claimed > 0 || st.accepted > 0 || st.errors > 0) {
+    rt.pushLog('task', `补领清扫：${summary}`, st.errors > 0 ? 'warn' : 'info')
+  }
+  return { ...st, summary }
 }
 
 // 全账号任务扫描（返回每账号未完成/可自动化任务）；国际版账号不参与扫描

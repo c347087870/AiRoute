@@ -3902,6 +3902,279 @@ async function main() {
     s.stop()
   })
 
+  // ---- 22.11 任务补领清扫：周期幂等补领「已达标未领」 ----
+
+  // 假 client：默认/mp 两个口径返回不同任务集，覆盖
+  // 达标未领 / 已领 / 未达标 / 未接受 / 锁定 / 首宠（无需领奖）/ mp 专属达标
+  function makeSweepClient(tasksByUid = {}, mpTasksByUid = {}) {
+    const calls = []
+    const claimed = new Set()
+    const client = {
+      calls,
+      claimed,
+      async growthOK(auth, method, pathName, data) {
+        calls.push({ auth: auth.uid, method, pathName, data })
+        if (method === 'GET' && pathName === constants.GROWTH_TASKS_PATH) {
+          return { tasks: (tasksByUid[auth.uid] || []).slice() }
+        }
+        return {}
+      },
+      // acceptTasksWith 走 growthCall（要 envelope 而不是 data）
+      async growthCall(auth, method, pathName, data) {
+        calls.push({ auth: auth.uid, method, pathName, data })
+        return { code: 0, msg: 'OK', data: {} }
+      },
+      async listTasksMP(auth) {
+        calls.push({ auth: auth.uid, method: 'GET', pathName: 'mp' })
+        const v = mpTasksByUid[auth.uid]
+        if (v === 'throw') throw new Error('mp list down')
+        return { tasks: (v || []).slice() }
+      },
+      async acceptTasksMP(auth, codes) {
+        calls.push({ auth: auth.uid, method: 'POST', pathName: 'mp-accept', codes: codes.slice() })
+        return {}
+      },
+      async claimReward(auth, code) {
+        calls.push({ auth: auth.uid, method: 'CLAIM', code, mp: false })
+        if (code === 'boom_task') throw new Error('claim boom')
+        if (claimed.has(`${auth.uid}|${code}`)) return { credit: 0, energy: 0, alreadyClaimed: true }
+        claimed.add(`${auth.uid}|${code}`)
+        return { credit: 100, energy: 5, alreadyClaimed: false }
+      },
+      async claimRewardMP(auth, code) {
+        calls.push({ auth: auth.uid, method: 'CLAIM', code, mp: true })
+        if (claimed.has(`${auth.uid}|${code}`)) return { credit: 0, energy: 0, alreadyClaimed: true }
+        claimed.add(`${auth.uid}|${code}`)
+        return { credit: 200, energy: 8, alreadyClaimed: false }
+      }
+    }
+    return client
+  }
+
+  // 一条任务（模拟上游 tasks[] 元素）
+  function taskOf(code, current, target, extra = {}) {
+    return {
+      task_code: code,
+      title: code,
+      accept_status: 'accepted',
+      reward_credit: 100,
+      reward_energy: 5,
+      has_reward: true,
+      progress: { current, target },
+      ...extra
+    }
+  }
+
+  await testAsync('sweepOnce：只领「已达标未领」，未达标/已领/未接受/无需领奖的一个都不碰', async () => {
+    const client = makeSweepClient({
+      s1: [
+        taskOf('chat_5', 5, 5), // 达标未领 → 领
+        taskOf('first_buddy', 1, 1), // 达标但无独立领奖 → 跳过
+        taskOf('template_5', 3, 1, { accept_status: 'claimed' }), // 已领 → 跳过
+        taskOf('Library_read', 0, 1), // 未达标 → 跳过
+        taskOf('automation_1', 0, 1, { accept_status: '' }) // 未接受 → 只 accept，不领
+      ]
+    })
+    const st = await tasksMod.sweepOnce({
+      client,
+      listAccounts: () => [{ uid: 's1', nickname: 'a', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    })
+    const claims = client.calls.filter(c => c.method === 'CLAIM').map(c => c.code)
+    assert.deepStrictEqual(claims, ['chat_5'], '只有 chat_5 达标未领该被领')
+    assert.strictEqual(st.claimed, 1)
+    assert.strictEqual(st.credits, 100)
+    assert.strictEqual(st.energy, 5)
+    // 未接受的任务只走 accept，不因「接受后可能达标」被误领
+    const accepts = client.calls.filter(c => c.method === 'POST' && c.pathName === constants.GROWTH_TASKS_ACCEPT_PATH)
+    assert.deepStrictEqual(accepts[0].data.task_codes, ['automation_1'])
+    assert.strictEqual(st.accepted, 1)
+  })
+
+  await testAsync('sweepOnce：两轮幂等——第二轮零次领奖请求', async () => {
+    const client = makeSweepClient({ s1: [taskOf('chat_5', 5, 5)] })
+    const deps = {
+      client,
+      listAccounts: () => [{ uid: 's1', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    }
+    const first = await tasksMod.sweepOnce(deps)
+    assert.strictEqual(first.claimed, 1)
+    // 上游第二轮把该任务标成已领（模拟真实回读），清扫不得再打领奖
+    client.calls.length = 0
+    const t = taskOf('chat_5', 5, 5, { accept_status: 'claimed' })
+    const client2 = makeSweepClient({ s1: [t] })
+    const second = await tasksMod.sweepOnce({ ...deps, client: client2 })
+    assert.strictEqual(second.claimed, 0, '已领任务不得再领')
+    assert.strictEqual(client2.calls.filter(c => c.method === 'CLAIM').length, 0)
+  })
+
+  await testAsync('sweepOnce：mp 专属任务按出处分流 accept/claim（不靠码常量判定）', async () => {
+    const client = makeSweepClient(
+      { s1: [taskOf('chat_5', 5, 5)] },
+      // mp_new_task 不在 MP_TASK_CODES 里：靠「只出现在 mp 列表」判定必须走 mp 端点
+      { s1: [{ task_code: 'mp_new_task', title: 'mp', accept_status: 'accepted', progress: { current: 2, target: 2 } }] }
+    )
+    const st = await tasksMod.sweepOnce({
+      client,
+      listAccounts: () => [{ uid: 's1', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    })
+    const claims = client.calls.filter(c => c.method === 'CLAIM')
+    const byCode = new Map(claims.map(c => [c.code, c.mp]))
+    assert.strictEqual(byCode.get('chat_5'), false, '默认口径任务走 Web 域领奖')
+    assert.strictEqual(byCode.get('mp_new_task'), true, '只出现在 mp 列表的任务必须走 mp 领奖端点')
+    assert.strictEqual(st.claimed, 2)
+    assert.strictEqual(st.credits, 300, '100（web）+ 200（mp）')
+  })
+
+  await testAsync('sweepOnce：国际版与企业切换会话零上游请求', async () => {
+    const client = makeSweepClient({ cn: [taskOf('chat_5', 5, 5)] })
+    // 企业切换会话：accessToken 的 JWT payload 带 token_source=enterprise_switch
+    const entToken = `x.${Buffer.from(JSON.stringify({ token_source: 'enterprise_switch' })).toString('base64url')}.y`
+    const st = await tasksMod.sweepOnce({
+      client,
+      listAccounts: () => [
+        { uid: 'cn', disabled: false },
+        { uid: 'g1', disabled: false },
+        { uid: 'e1', disabled: false },
+        { uid: 'off', disabled: true }
+      ],
+      authByUID: uid =>
+        makeAuth(uid, uid === 'g1' ? { realm: 'global' } : uid === 'e1' ? { accessToken: entToken } : {}),
+      skipAuth: a => a.realm === 'global' || authMod.isEnterpriseSession(a),
+      concurrency: 2
+    })
+    assert.strictEqual(st.gated, 2, '国际版 + 企业切换会话都被门控')
+    assert.strictEqual(st.accounts, 1, '只有国内普通号参与')
+    const touched = new Set(client.calls.map(c => c.auth))
+    assert.deepStrictEqual([...touched], ['cn'], '被门控账号不得发任何上游请求')
+    assert.strictEqual(st.claimed, 1)
+  })
+
+  await testAsync('sweepOnce：单项领奖失败不阻塞其余，且计入 errors', async () => {
+    const client = makeSweepClient({
+      s1: [taskOf('boom_task', 1, 1), taskOf('chat_5', 5, 5)]
+    })
+    const st = await tasksMod.sweepOnce({
+      client,
+      listAccounts: () => [{ uid: 's1', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    })
+    assert.strictEqual(st.errors, 1, '单项失败计一次错')
+    assert.strictEqual(st.claimed, 1, '后续任务仍要被领')
+    assert.deepStrictEqual(st.codes, ['chat_5'])
+    assert.strictEqual(st.credits, 100)
+  })
+
+  await testAsync('sweepOnce：账号被占用（正在跑动作）整轮跳过，解锁后自动补', async () => {
+    const client = makeSweepClient({ s1: [taskOf('chat_5', 5, 5)] })
+    const deps = {
+      client,
+      listAccounts: () => [{ uid: 's1', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    }
+    assert.strictEqual(tasksMod.tryLockAccount('s1'), true, '先模拟一键完成占用该账号')
+    const busy = await tasksMod.sweepOnce(deps)
+    assert.strictEqual(busy.skipped, 1, '被占用账号整轮跳过，不打断进行中的链路')
+    assert.strictEqual(busy.claimed, 0)
+    assert.strictEqual(client.calls.length, 0, '被占用账号不得发上游请求')
+    tasksMod.unlockAccount('s1')
+    const after = await tasksMod.sweepOnce(deps)
+    assert.strictEqual(after.claimed, 1, '解锁后下一轮自然补上')
+  })
+
+  await testAsync('sweepOnce：默认列表失败记 error 且不发领奖请求', async () => {
+    const calls = []
+    const client = {
+      calls,
+      async growthOK() {
+        throw new Error('list down')
+      },
+      async listTasksMP() {
+        calls.push('mp')
+        return { tasks: [] }
+      }
+    }
+    const st = await tasksMod.sweepOnce({
+      client,
+      listAccounts: () => [{ uid: 's1', disabled: false }],
+      authByUID: () => makeAuth('s1'),
+      skipAuth: () => false,
+      concurrency: 1
+    })
+    assert.strictEqual(st.errors, 1)
+    assert.strictEqual(st.claimed, 0)
+    assert.deepStrictEqual(calls, [], '默认列表失败即无法判定判据，不应继续拉 mp 列表')
+  })
+
+  await testAsync('sweepSummary：文案只在有动静时提数字，门控/占用各自显形', async () => {
+    assert.strictEqual(tasksMod.sweepSummary(null), '未执行')
+    assert.strictEqual(tasksMod.sweepSummary({ accounts: 2 }), '账号 2 个')
+    const text = tasksMod.sweepSummary({ accounts: 3, gated: 2, skipped: 1, accepted: 4, claimed: 2, credits: 300, energy: 13, errors: 1 })
+    assert.ok(text.includes('账号 3 个'))
+    assert.ok(text.includes('门控跳过 2'))
+    assert.ok(text.includes('占用跳过 1'))
+    assert.ok(text.includes('接受 4'))
+    assert.ok(text.includes('补领 2 项 +300 分 +13 能'))
+    assert.ok(text.includes('出错 1'))
+  })
+
+  await testAsync('调度器：补领清扫可开关、间隔可热改，且不进入小时制排程', async () => {
+    const { s } = makeSweepScheduler()
+    const st = s.getState()
+    assert.strictEqual(st.taskSweepEnabled, true, '缺省启用')
+    assert.strictEqual(st.taskSweepMinutes, 15, '缺省 15 分钟')
+    assert.ok(st.taskSweep, '状态快照必须有 taskSweep 项（前端展示最近执行）')
+    // 热改：关闭
+    const off = s.updateConfig({ taskSweepEnabled: false, taskSweepMinutes: 30 })
+    assert.strictEqual(off.taskSweepEnabled, false)
+    assert.strictEqual(off.taskSweepMinutes, 30)
+    // <=0 回落默认（不是停用；停用走开关）
+    const back = s.updateConfig({ taskSweepMinutes: 0 })
+    assert.strictEqual(back.taskSweepMinutes, 15, '非法间隔回落默认值，停用只由开关控制')
+    // 不在 HOUR_TASKS 里：改 hours 不影响清扫（清扫是间隔制）
+    assert.ok(!('taskSweepHours' in s.getState().hours))
+    s.stop()
+  })
+
+  await testAsync('调度器：runNow(taskSweep) 走同一条清扫链路并回写摘要', async () => {
+    const { s, client } = makeSweepScheduler()
+    const res = await s.runNow('taskSweep')
+    assert.strictEqual(res.ok, true)
+    assert.ok(res.summary.includes('账号 1 个'), `摘要应来自 sweepSummary，实际：${res.summary}`)
+    assert.ok(res.summary.includes('补领 1 项'), `应补领到达标任务，实际：${res.summary}`)
+    const claims = client.calls.filter(c => c.method === 'CLAIM')
+    assert.strictEqual(claims.length, 1)
+    assert.strictEqual(s.getState().taskSweep.summary, res.summary, '摘要须写回状态供面板展示')
+    s.stop()
+  })
+
+  function makeSweepScheduler() {
+    const pool = poolMod.createPool({})
+    pool.add(makeAuth('s1'))
+    const client = makeSweepClient({ s1: [taskOf('chat_5', 5, 5), taskOf('template_5', 0, 1)] })
+    const s = schedulerMod.createScheduler({
+      pool,
+      client,
+      authMod,
+      refreshTokenFor: async () => ({ ok: true }),
+      refreshBalanceFor: async () => ({ ok: true }),
+      log: () => {}
+    })
+    return { s, client, pool }
+  }
+
   // ==================== 汇总 ====================
   console.log(`\n${'='.repeat(52)}`)
   console.log(`通过 ${passed} 项，失败 ${failed} 项，共 ${passed + failed} 项`)
