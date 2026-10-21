@@ -391,6 +391,7 @@ import {
 } from '../api.js'
 import { useModel } from '../composables/useModel.js'
 import { showToast } from '../composables/useToast.js'
+import { useEscClose } from '../composables/useEscClose.js'
 import { listModels, buildModelGroups, resolveRefLabel } from '../utils/models.js'
 import { formatNumber, formatTime, toLocalDateKey } from '../utils/format.js'
 
@@ -442,6 +443,15 @@ const editingIndex = ref(-1) // 正在编辑的题目下标，-1 表示新增
 const form = ref(createEmptyForm()) // 编辑弹窗的表单数据
 const fileInput = ref(null) // 导入文件选择框元素引用
 const importDialog = ref({ visible: false, list: [] }) // 导入方式选择弹窗状态
+
+// 两个弹窗都支持 Esc 关闭：导入方式选择弹窗在上层，优先关闭它
+useEscClose(
+  () => importDialog.value.visible || showEditDialog.value,
+  () => {
+    if (importDialog.value.visible) importDialog.value = { visible: false, list: [] }
+    else showEditDialog.value = false
+  }
+)
 
 // 评测状态文案映射
 const STATUS_TEXT = { running: '进行中', completed: '已完成', failed: '失败', error: '失败', cancelled: '已取消' }

@@ -305,6 +305,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useModel } from '../composables/useModel.js'
 import { showToast } from '../composables/useToast.js'
+import { useEscClose } from '../composables/useEscClose.js'
 import {
   getProviderFull,
   addProvider,
@@ -518,6 +519,9 @@ function closeModal() {
   showKey.value = false
   resetForm()
 }
+
+// 新增与编辑共用同一个弹窗，Esc 关闭走 closeModal（含表单重置）
+useEscClose(() => showAdd.value || !!editingName.value, closeModal)
 
 function addModelRow() {
   form.value.models.push(emptyModel())

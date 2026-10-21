@@ -1147,6 +1147,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { showToast } from '../composables/useToast.js'
+import { useEscClose } from '../composables/useEscClose.js'
 import {
   wbAccounts,
   wbOauthStart,
@@ -1782,6 +1783,9 @@ function openDetail(acct) {
 function closeDetail() {
   detailUid.value = ''
 }
+
+// 详情弹窗支持 Esc 关闭
+useEscClose(() => !!detailAcct.value, closeDetail)
 
 // 人工禁用账号（二次确认；保留凭证，仅退出轮转）
 async function doDisable(acct) {
