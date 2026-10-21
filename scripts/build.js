@@ -228,7 +228,9 @@ buildRenderer.on('close', (code) => {
   killAppProcesses()
   cleanDir(buildOutputDir, 'dist-electron')
 
-  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', isMac ? '--mac' : '--win']
+  // --publish never：electron-builder 检测到在 tag 上构建会隐式 publish（默认 onTagOrDraft），
+  // CI 里没有 GH_TOKEN 会直接失败；发布统一交给 workflow 的 gh release，这里显式关掉
+  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', '--publish', 'never', isMac ? '--mac' : '--win']
   if (isMac) builderArgs.push('--arm64')
 
   const buildApp = spawn('npx', builderArgs, {
