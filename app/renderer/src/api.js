@@ -437,8 +437,9 @@ export function checkUpdate(force = false) {
 }
 
 // 启动应用内下载（tag + 保存路径），返回初始下载状态
-export function startUpdateDownload(tag, savePath) {
-  return api.post('/api/update/download', { tag, savePath }).then(r => r.data)
+// savePath 为空表示一键升级：下载到服务端托管目录并校验 SHA-256
+export function startUpdateDownload(tag, savePath = '') {
+  return api.post('/api/update/download', savePath ? { tag, savePath } : { tag }).then(r => r.data)
 }
 
 // 下载进度快照（前端轮询）
