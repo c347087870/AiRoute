@@ -3,6 +3,7 @@ const path = require('path')
 const net = require('net')
 const http = require('http')
 const { createTray, refreshTrayMenu } = require('./tray')
+const updater = require('./updater')
 
 // 单实例：重复启动时聚焦已有窗口并退出本次，避免多托盘实例与端口争用
 const gotTheLock = app.requestSingleInstanceLock()
@@ -121,6 +122,8 @@ app.whenReady().then(async () => {
   if (app.isPackaged) {
     const dataDir = path.join(app.getPath('userData'), 'data')
     process.env.AIROUTE_DATA_DIR = dataDir
+    // 一键升级的安装包托管目录：主进程替换安装与 server 下载共用同一路径
+    process.env.AIROUTE_UPDATE_DIR = path.join(app.getPath('userData'), 'updates')
     // 首次启动：从 ASAR 中拷贝初始配置文件到可写目录
     const fs = require('fs-extra')
     fs.ensureDirSync(dataDir)
@@ -158,6 +161,9 @@ app.whenReady().then(async () => {
     require(getServerEntry())
     console.log('[aiRoute] Server 已启动')
   }
+
+  // 更新状态初始化：恢复上次升级结果、清理旧包与安装包残留（必须在建窗前完成，界面首屏要读）
+  updater.init()
 
   createWindow()
 })
@@ -228,7 +234,16 @@ ipcMain.handle('set-auto-launch', (_, enabled) => {
   return true
 })
 
-// 更新功能：选择新版本安装包的保存位置（默认落到系统下载目录）
+// 更新功能：一键升级（下载 → SHA-256 → 备份 → 原子替换 → 回读 → 重启由主进程串起来）
+ipcMain.handle('update-install', (_, payload) => updater.startInstall(payload))
+
+// 一键升级进度快照（渲染进程轮询：阶段 / 错误 / 是否已回滚 / 可用备份）
+ipcMain.handle('update-install-status', () => updater.getStatus())
+
+// 回滚到上一版本（新版本启动异常时的人工兜底）
+ipcMain.handle('update-rollback', () => updater.startRollback())
+
+// 更新功能：手动下载时选择安装包的保存位置（默认落到系统下载目录，Windows 与兜底路径使用）
 ipcMain.handle('save-file-dialog', async (_, defaultName) => {
   const isMac = process.platform === 'darwin'
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'

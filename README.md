@@ -68,7 +68,7 @@
 
 然后把任意客户端指向 `http://localhost:3000`（见「接入客户端」）。
 
-> **更新**：启动后会静默检查 GitHub Releases，有新版本时侧边栏会提示，可在应用内直接下载新版安装包；也可在「设置 → 关于与更新」手动检查。
+> **更新**：启动后会静默检查 GitHub Releases，有新版本时侧边栏会提示。macOS 支持**一键升级**：下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 自动重启，任一步失败自动回滚到上一版本（要求应用位于「应用程序」且目录可写）。Windows 仍为「设置 → 关于与更新 → 手动下载安装包」后替换 exe。
 
 ### 方式二：源码运行
 
@@ -297,7 +297,7 @@ AiRoute 只转发「当前激活模型」，客户端里填的模型名仅是占
 pnpm dev        # 开发模式（Electron 应用）
 pnpm dev:web    # 只启动服务与前端（浏览器访问 http://localhost:5173）
 pnpm build      # 按当前平台打包，一次出 x64 + arm64：Windows → AiRoute-<版本>-{x64,arm64}.exe；macOS → AiRoute-<版本>-{arm64,x64}.dmg
-pnpm test       # WorkBuddy 模块离线测试
+pnpm test       # WorkBuddy 模块 + 一键升级（校验 / 替换 / 回滚）离线测试
 pnpm test:e2e   # 端到端冒烟测试（本地 mock 上游，覆盖三条协议链路）
 ```
 
