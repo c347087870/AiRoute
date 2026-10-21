@@ -5,6 +5,7 @@ const crypto = require('crypto')
 const C = require('./constants')
 const headers = require('./headers')
 const errMod = require('./errors')
+const authMod = require('./auth')
 
 // ===== 本地常量（constants.js 未收录的路径与阈值）=====
 
@@ -12,6 +13,8 @@ const HEATMAP_PATH = '/activity/growth/heatmap' // 补签热力图（growth 域�
 const MAKEUP_USE_PATH = '/activity/growth/makeup-cards/use' // 使用补签卡（growth 域）
 const CLAIM_GIFT_PATH = '/billing/meter/claim-gift' // 新手礼包（billing 域）
 const CLAIM_COMPENSATION_PATH = '/billing/meter/claim-compensation' // 活动补偿（billing 域）
+const COMPENSATION_STATUS_PATH = '/billing/meter/compensation-status' // 补偿活动状态（billing 域）
+const COMP_STATUS_CONCURRENCY = 3 // 补偿状态并发查询上限（与余额刷新同量级）
 
 const ACCOUNT_DELAY_MS = 800 // 账号间限速（签到/旅行/活跃/夜猫子同口径）
 const ADOPT_REPORT_GAP_MS = 1050 // 领养前置上报后的等待
@@ -320,10 +323,204 @@ function createScheduler(deps) {
     return Number(data && data.credit) || 0
   }
 
-  // 活动补偿（billing 域）
+  // 活动补偿状态（billing 域）：先查后领所缺的那一半
+  //
+  // 上游口径（实测 2026-10-16，cn 域 CLI 侧与 Web 侧一致）：
+  //   {"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":500,
+  //     "validity_period":1,"end_time":"2026-10-22 23:59:59"}}
+  // active=false 是「当前无补偿活动」的正常 200，不是错误——只有传输失败 / 非 2xx /
+  // 业务 code 非 0 才算 error。
+  async function compensationStatus(a) {
+    const data = await billingPost(a, COMPENSATION_STATUS_PATH, {})
+    const d = data && typeof data === 'object' ? data : {}
+    return {
+      active: !!d.active,
+      claimed: !!d.claimed,
+      creditNum: Number(d.credit_num) || 0,
+      validityPeriod: Number(d.validity_period) || 0,
+      endTime: typeof d.end_time === 'string' ? d.end_time : ''
+    }
+  }
+
+  // 补偿活动是否「可领且未领」：active && !claimed && credit > 0
+  // 三种不领形态归为「无需领取」：无活动 / 已领完 / 活动在但额度为 0
+  function compensationPending(st) {
+    return !!(st && st.active && !st.claimed && st.creditNum > 0)
+  }
+
+  // 活动补偿实际领取（billing 域）
   async function claimCompensation(a) {
     const data = await billingPost(a, CLAIM_COMPENSATION_PATH, {})
     return Number(data && data.credit) || 0
+  }
+
+  // 单账号「查状态 → 待领才领」全部分支与日志（签到排程与面板按钮共用，避免漂移）
+  // 返回 { uid, nickname, status, claimed, credit, skip, skipMsg, error }
+  async function compensationClaimOne(a) {
+    const r = { uid: a.uid, nickname: a.nickname || '', status: null, claimed: false, credit: 0, skip: '', skipMsg: '', error: '' }
+    let st
+    try {
+      st = await compensationStatus(a)
+    } catch (e) {
+      // 查状态失败是真问题（传输/鉴权/上游），必须显式记录——旧盲领写法会把这类
+      // 失败静默吞成「无事发生」
+      r.error = errMsg(e)
+      log(`compensation ${label(a.uid, a.nickname)}: 查状态失败: ${r.error}`)
+      return r
+    }
+    r.status = st
+    if (!compensationPending(st)) {
+      if (!st.active) {
+        r.skip = 'no_active'
+        r.skipMsg = '当前无生效补偿'
+      } else if (st.claimed) {
+        r.skip = 'claimed'
+        r.skipMsg = '本次活动已领取'
+      } else {
+        r.skip = 'zero_credit'
+        r.skipMsg = '活动在但额度为 0'
+      }
+      return r
+    }
+    let credit
+    try {
+      credit = await claimCompensation(a)
+    } catch (e) {
+      r.error = errMsg(e)
+      log(`compensation ${label(a.uid, a.nickname)}: 待领 ${st.creditNum}c 但领取失败: ${r.error}`)
+      return r
+    }
+    r.claimed = true
+    r.credit = credit
+    log(`compensation ${label(a.uid, a.nickname)}: 🎊 补偿领取 +${credit}c（截止 ${st.endTime || '未知'}）`)
+    return r
+  }
+
+  // 补偿目标的跳过原因（面板据此渲染，勿随意改字面量）
+  // 注意没有「paused」：暂停选号不跳过补偿——补偿是纯领奖 RPC，与「让位防风控」
+  // 的选号语义无关（旅行/成长任务亦然）。
+  function compensationTargets() {
+    const out = []
+    for (const st of pool.list()) {
+      const t = { uid: st.uid, nickname: st.nickname || '', a: null, skip: '', skipMsg: '', disabled: !!st.disabled }
+      if (st.disabled) {
+        t.skip = 'disabled'
+        t.skipMsg = '账号已禁用'
+        out.push(t)
+        continue
+      }
+      const a = pool.authByUID(st.uid)
+      if (!a || !a.accessToken) {
+        t.skip = 'no_auth'
+        t.skipMsg = '无凭证'
+        out.push(t)
+        continue
+      }
+      if (isGlobalAuth(a)) {
+        t.skip = 'global'
+        t.skipMsg = '国际版无国内补偿体系'
+        out.push(t)
+        continue
+      }
+      if (authMod.isEnterprise(a)) {
+        t.skip = 'enterprise'
+        t.skipMsg = '企业版无补偿体系'
+        out.push(t)
+        continue
+      }
+      t.a = a
+      out.push(t)
+    }
+    return out
+  }
+
+  // 并发查全部账号补偿状态（只读，不领取）。输出与池顺序一致：
+  // 先按 targets 预分配等长数组，每个 worker 只写自己那一个下标——避免
+  // 「完成顺序 = 返回顺序」导致的行序漂移（面板逐行对齐依赖稳定行序）。
+  async function compensationStatusAll() {
+    const targets = compensationTargets()
+    const rows = new Array(targets.length)
+    const queue = []
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]
+      if (!t.a) {
+        rows[i] = { uid: t.uid, nickname: t.nickname, status: null, skip: t.skip, skipMsg: t.skipMsg, error: '' }
+        continue
+      }
+      queue.push(i)
+    }
+    const workers = []
+    const workerCount = Math.min(COMP_STATUS_CONCURRENCY, queue.length)
+    for (let w = 0; w < workerCount; w++) {
+      workers.push(
+        (async () => {
+          while (queue.length) {
+            if (stopped) return
+            const i = queue.shift()
+            const t = targets[i]
+            const row = { uid: t.uid, nickname: t.nickname, status: null, skip: '', skipMsg: '', error: '' }
+            try {
+              row.status = await compensationStatus(t.a)
+            } catch (e) {
+              row.error = errMsg(e)
+            }
+            rows[i] = row
+          }
+        })()
+      )
+    }
+    await Promise.all(workers)
+    // 停机导致未跑到的下标回填成空行（保持长度与顺序，不出现 undefined）
+    for (let i = 0; i < rows.length; i++) {
+      if (!rows[i]) rows[i] = { uid: targets[i].uid, nickname: targets[i].nickname, status: null, skip: '', skipMsg: '', error: '查询被中断' }
+    }
+    return rows
+  }
+
+  // 逐号「查状态 → 待领则领」（面板手动入口与签到排程共用的串行版本）。
+  // 刻意串行：同一活动每号仅能领一次（重复领会拿到业务错误），串行让前一个失败
+  // 不影响后一个的判定；账号量是个位数，无需并发。
+  async function compensationClaimAll() {
+    const targets = compensationTargets()
+    const out = []
+    for (const t of targets) {
+      if (!t.a) {
+        out.push({ uid: t.uid, nickname: t.nickname, status: null, claimed: false, credit: 0, skip: t.skip, skipMsg: t.skipMsg, error: '' })
+        continue
+      }
+      if (stopped) break
+      out.push(await compensationClaimOne(t.a))
+    }
+    return out
+  }
+
+  // 批量领取汇总。单独统计 errored 是为了让调用方能区分「没有可领」与「一个都没
+  // 查成」：上游故障或 token 全过期时每个账号都走 error 分支，若只按 claimed 计数，
+  // 面板会把「全部查询失败」渲染成「当前没有待领补偿」——正是要消灭的静默失败。
+  // 调用方必须先看 errored 再看 claimed。
+  function summarizeCompensation(results) {
+    const s = { total: results.length, claimed: 0, skipped: 0, errored: 0, credit: 0 }
+    for (const r of results) {
+      if (r.error) s.errored++
+      else if (r.claimed) {
+        s.claimed++
+        s.credit += Number(r.credit) || 0
+      } else s.skipped++
+    }
+    return s
+  }
+
+  // 单号领取补偿（面板单号按钮）；账号不在池返回 error
+  async function compensationClaimFor(uid) {
+    const st = pool.list().find(x => String(x.uid) === String(uid))
+    if (!st) return { error: 'account not found' }
+    const skip = (reason, msg) => ({ uid: st.uid, nickname: st.nickname || '', status: null, claimed: false, credit: 0, skip: reason, skipMsg: msg, error: '' })
+    if (st.disabled) return skip('disabled', '账号已禁用')
+    const a = pool.authByUID(st.uid)
+    if (!a || !a.accessToken) return skip('no_auth', '无凭证')
+    if (isGlobalAuth(a)) return skip('global', '国际版无国内补偿体系')
+    if (authMod.isEnterprise(a)) return skip('enterprise', '企业版无补偿体系')
+    return compensationClaimOne(a)
   }
 
   // 昨日是否漏签（heatmap cell.score === 0）
@@ -472,12 +669,10 @@ function createScheduler(deps) {
     } catch {
       /* 无礼包/已领：静默 */
     }
-    try {
-      const credit = await claimCompensation(a)
-      log(`streak-bonus ${lb}: 🎊 补偿领取 +${credit}c`)
-    } catch {
-      /* 无补偿：静默 */
-    }
+    // 补偿改为「先查状态 → 待领才领」：旧写法盲领，让「没有补偿」「已经领过」
+    // 「真的领取失败」三种情形在日志里完全同构，且补偿带截止日，排程停摆就会
+    // 静默过期。无待领时不记日志（避免每日刷屏），真实失败一律显形（见 claimOne）
+    await compensationClaimOne(a)
 
     let full
     try {
@@ -560,6 +755,11 @@ function createScheduler(deps) {
   // **活跃上报与 token 保活两域都支持**，不跳过。
   const isGlobalAuth = a => !!(a && a.realm === 'global')
 
+  // 企业切换会话（token_source=enterprise_switch，或真企业版）：行为事件上报会被
+  // 上游静默丢弃（返回 200 但不记账），跑这些任务纯属白耗对话配额。判定见 auth.js。
+  const isEnterpriseSessionAuth = a => authMod.isEnterpriseSession(a)
+  const ENTERPRISE_SESSION_HINT = '企业切换会话（token_source=enterprise_switch）：上游行为上报静默丢弃，请在浏览器退出企业空间后重新登录授权'
+
   async function runCheckinAll() {
     let first = true
     let count = 0
@@ -588,7 +788,7 @@ function createScheduler(deps) {
     return `签到 ${ok}/${count}${tail}，连登管家已跑`
   }
 
-  // 全量连登管家（国际版跳过）
+  // 全量连登管家（国际版跳过；企业切换会话跳过——行为上报静默丢弃）
   async function runStreakBonusAll() {
     for (const st of pool.list()) {
       if (stopped) break
@@ -596,6 +796,10 @@ function createScheduler(deps) {
       const a = pool.authByUID(st.uid)
       if (!a || !a.accessToken) continue
       if (isGlobalAuth(a)) continue // 国际版无连登体系
+      if (isEnterpriseSessionAuth(a)) {
+        log(`streak ${label(a.uid, a.nickname)}: skip — ${ENTERPRISE_SESSION_HINT}`)
+        continue
+      }
       await streakBonusOne(a)
     }
   }
@@ -633,16 +837,22 @@ function createScheduler(deps) {
     return { ok: true, message: '上报成功' }
   }
 
-  // 全量活跃上报
+  // 全量活跃上报（企业切换会话跳过——行为上报静默丢弃）
   async function runActivityAll() {
     let first = true
     let count = 0
     let ok = 0
+    let skippedEnt = 0
     for (const st of pool.list()) {
       if (stopped) break
       if (st.disabled) continue
       const a = pool.authByUID(st.uid)
       if (!a || !a.accessToken) continue
+      if (isEnterpriseSessionAuth(a)) {
+        skippedEnt++
+        log(`activity ${label(a.uid, a.nickname)}: skip — ${ENTERPRISE_SESSION_HINT}`)
+        continue
+      }
       if (!first) {
         await sleep(ACCOUNT_DELAY_MS)
         if (stopped) break
@@ -652,7 +862,8 @@ function createScheduler(deps) {
       count++
       if (r.ok) ok++
     }
-    return `上报 ${ok}/${count}`
+    const tail = skippedEnt > 0 ? `（跳过 ${skippedEnt} 个企业切换会话账号）` : ''
+    return `上报 ${ok}/${count}${tail}`
   }
 
   // ===== 猫猫旅行 =====
@@ -752,11 +963,12 @@ function createScheduler(deps) {
     }
   }
 
-  // 全量旅行巡检（国际版跳过：无成长体系）
+  // 全量旅行巡检（国际版跳过：无成长体系；企业切换会话跳过：行为上报静默丢弃）
   async function runTravelAll() {
     let first = true
     let count = 0
     let skippedGlobal = 0
+    let skippedEnt = 0
     for (const st of pool.list()) {
       if (stopped) break
       if (st.disabled) continue
@@ -764,6 +976,11 @@ function createScheduler(deps) {
       if (!a || !a.refreshToken) continue
       if (isGlobalAuth(a)) {
         skippedGlobal++
+        continue
+      }
+      if (isEnterpriseSessionAuth(a)) {
+        skippedEnt++
+        log(`travel ${label(a.uid, a.nickname)}: skip — ${ENTERPRISE_SESSION_HINT}`)
         continue
       }
       if (!first) {
@@ -774,7 +991,10 @@ function createScheduler(deps) {
       await travelOne(a)
       count++
     }
-    const tail = skippedGlobal > 0 ? `（跳过 ${skippedGlobal} 个国际版账号）` : ''
+    const parts = []
+    if (skippedGlobal > 0) parts.push(`跳过 ${skippedGlobal} 个国际版账号`)
+    if (skippedEnt > 0) parts.push(`跳过 ${skippedEnt} 个企业切换会话账号`)
+    const tail = parts.length ? `（${parts.join('，')}）` : ''
     return `巡检 ${count} 个账号${tail}`
   }
 
@@ -854,6 +1074,10 @@ function createScheduler(deps) {
       const a = pool.authByUID(st.uid)
       if (!a || !a.accessToken) continue
       if (isGlobalAuth(a)) continue // 国际版无夜猫子任务
+      if (isEnterpriseSessionAuth(a)) {
+        log(`blackcat ${label(st.uid, st.nickname)}: skip — ${ENTERPRISE_SESSION_HINT}`)
+        continue
+      }
       const lb = label(st.uid, st.nickname)
       let need
       try {
@@ -1148,6 +1372,11 @@ function createScheduler(deps) {
     runKeepaliveFor,
     runBlackcatNow,
     runGrowthNow: () => runTask('growth'),
+    // 官方补偿（可观测化）：状态查询 / 逐号领取 / 单号领取 / 汇总
+    compensationStatusAll,
+    compensationClaimAll,
+    compensationClaimFor,
+    summarizeCompensation,
     getState,
     updateConfig
   }

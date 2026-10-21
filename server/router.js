@@ -479,12 +479,18 @@ async function handleRequest(req, res) {
     }
   }
 
+  // 状态码：优先用运行时给出的 status（模型不可用 400、池中无号 503 等），
+  // 否则 500。此前一律 500，把「换个模型就行」说成了网关故障。
+  const finalStatus = lastError?.status || 500
   if (clientIsAnthropic) {
-    return res.status(500).json(wbAnthropic.errorBody(lastError?.message || 'All providers failed', lastError?.gatewayHint))
+    return res.status(finalStatus).json(wbAnthropic.errorBody(lastError?.message || 'All providers failed', lastError?.gatewayHint))
   }
-  res.status(500).json({
+  res.status(finalStatus).json({
     error: 'All providers failed',
     detail: lastError?.message,
+    // 错误分类与网关侧错误码（排障用；无则不带字段）
+    ...(lastError?.kind ? { kind: lastError.kind } : {}),
+    ...(lastError?.code ? { code: lastError.code } : {}),
     // 网关补充说明（gateway_hint；无提示时不带字段）
     ...(lastError?.gatewayHint ? { gateway_hint: lastError.gatewayHint } : {})
   })
@@ -1466,6 +1472,47 @@ app.post('/api/workbuddy/scheduler/run', async (req, res) => {
     res.json(result)
   } catch (err) {
     res.status(400).json({ error: err.message })
+  }
+})
+
+// 官方补偿活动状态（只读，不领取）
+// 取数与呈现分离：补偿状态没有 overview 快照可吃，挂进轮询就是定期轰炸上游，
+// 故仅供进页面与手动点击时取一次，倒计时靠前端本地重渲染。
+app.get('/api/workbuddy/compensation', async (req, res) => {
+  if (!requireWorkbuddy(res)) return
+  try {
+    const rows = await workbuddy.compensationStatusAll()
+    res.json({ ok: true, rows })
+  } catch (err) {
+    // 全量查询失败必须显形：不能返回空数组让前端说「当前没有待领补偿」
+    res.status(500).json({ ok: false, error: err.message || '补偿状态查询失败', rows: [] })
+  }
+})
+
+// 逐号领取补偿（先查状态 → 待领才领）。
+// 返回 summary 里 errored 与 claimed 分开计：上游全挂时每个账号都走 error 分支，
+// 只看 claimed 会把「全部查询失败」说成「当前没有待领补偿」——比不说更糟。
+app.post('/api/workbuddy/compensation/claim_all', async (req, res) => {
+  if (!requireWorkbuddy(res)) return
+  try {
+    const result = await workbuddy.compensationClaimAll()
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || '补偿领取失败' })
+  }
+})
+
+// 单号领取补偿
+app.post('/api/workbuddy/accounts/:uid/compensation', async (req, res) => {
+  if (!requireWorkbuddy(res)) return
+  try {
+    const result = await workbuddy.compensationClaimFor(req.params.uid)
+    if (result && result.error === 'account not found') {
+      return res.status(404).json({ ok: false, error: '账号不存在' })
+    }
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || '补偿领取失败' })
   }
 })
 

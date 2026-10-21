@@ -179,11 +179,17 @@ function commonHeaders(account, opts = {}) {
   return headers
 }
 
-// 会话头族（消息级 32 hex ID + 轮级聚合 ID）
+// 会话头族（消息级 32 hex ID + 轮级聚合 ID + 会话 ID）
+// X-Conversation-ID **始终发送**：国际端点收紧了通道校验，缺该头会直接
+// 400 / 11-128（conversation id missing）。caller 没给会话 ID（Anthropic /
+// Claude Code 入站不带 conversation_id）时按 32 hex 现场生成——
+// 上游要的是「像一个官方客户端的多轮会话链路」，不是特定值。
 function conversationHeaders(meta = {}) {
   const messageID = newMessageID()
   const convReqID = meta.conversationRequestId || newMessageID()
+  const conversationID = meta.conversationId || newMessageID()
   const headers = {
+    'X-Conversation-ID': conversationID,
     'X-Conversation-Request-ID': convReqID,
     'X-Conversation-Message-ID': messageID,
     'X-Request-ID': messageID,
@@ -193,7 +199,6 @@ function conversationHeaders(meta = {}) {
     'X-B3-SpanId': messageID.slice(0, 16),
     'X-B3-Sampled': '1'
   }
-  if (meta.conversationId) headers['X-Conversation-ID'] = meta.conversationId
   return headers
 }
 

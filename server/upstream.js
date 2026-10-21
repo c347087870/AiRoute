@@ -110,6 +110,24 @@ function usageTotalOrNull(usage) {
   return keys.reduce((sum, k) => sum + (Number(usage?.[k]) || 0), 0)
 }
 
+// 从 OpenAI 形态 usage 取缓存命中数。
+//
+// 反向推导（对称补齐）：上游在接近全命中时可能回 hit=0 + miss=3（prompt 数万的
+// 矛盾组合）——只做「hit→miss 单向推导」会把命中率 99.99% 的请求算成整段未命中，
+// 用量统计与缓存告警因此假阳性。当 miss 显式存在、hit 为 0/缺失、且 prompt > miss
+// 时按 prompt - miss 反推 hit；prompt <= miss 保持 0（真实的整段未命中）。
+function cachedTokensOf(usage) {
+  const cached = toNumOrNull(usage?.prompt_tokens_details?.cached_tokens) ??
+    toNumOrNull(usage?.prompt_cache_hit_tokens) ??
+    toNumOrNull(usage?.cache_read_input_tokens)
+  if (cached !== null && cached > 0) return cached
+
+  const miss = toNumOrNull(usage?.prompt_cache_miss_tokens)
+  const prompt = toNumOrNull(usage?.prompt_tokens)
+  if (miss === null || miss <= 0 || prompt === null || prompt <= miss) return cached
+  return prompt - miss
+}
+
 // 非流式响应中提取用量
 // Anthropic 的 input_tokens 不含缓存部分；OpenAI 的 prompt_tokens 包含缓存，需扣除后才是未缓存输入
 function extractUsage(data, isAnthropic) {
@@ -124,7 +142,7 @@ function extractUsage(data, isAnthropic) {
     }
   }
 
-  const cached = toNumOrNull(data.usage.prompt_tokens_details?.cached_tokens)
+  const cached = cachedTokensOf(data.usage)
   const prompt = toNumOrNull(data.usage.prompt_tokens)
   return {
     // 未缓存输入 = prompt - cached；prompt 未提供时记 null（不假装 0）
@@ -181,7 +199,7 @@ function parseUsageLine(line, isAnthropic) {
         }
       }
     } else if (data.usage) {
-      const cached = toNumOrNull(data.usage.prompt_tokens_details?.cached_tokens)
+      const cached = cachedTokensOf(data.usage)
       const prompt = toNumOrNull(data.usage.prompt_tokens)
       return {
         input: prompt === null ? null : Math.max(0, prompt - (cached || 0)),

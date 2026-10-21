@@ -5,6 +5,11 @@ const dsmlMod = require('./dsml')
 const FRAME_TOP_FIELDS = ['id', 'object', 'created', 'model', 'system_fingerprint', 'service_tier']
 
 // usage 缓存别名候选序列（取第一个 > 0 的值作为 best）
+//
+// 反向推导（对称补齐）：上游在接近全命中时可能回 hit=0 + miss=3（prompt 数万的
+// 矛盾组合）——只做「hit→miss 单向推导」会把命中率 99.99% 的请求算成「整段未命中」，
+// 用量统计与缓存告警因此假阳性。当 miss 显式存在、hit 为 0/缺失、且 prompt > miss
+// 时按 prompt - miss 反推 hit；prompt <= miss 保持 hit=0（真实的整段未命中）。
 function normalizeUsageCacheAliases(usage) {
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return usage
 
@@ -23,6 +28,7 @@ function normalizeUsageCacheAliases(usage) {
       break
     }
   }
+  if (best <= 0) best = deriveHitFromMiss(usage)
   if (best <= 0) return usage
 
   const out = { ...usage }
@@ -34,6 +40,15 @@ function normalizeUsageCacheAliases(usage) {
     out.input_tokens_details = { ...out.input_tokens_details, cached_tokens: best }
   }
   return out
+}
+
+// 由 prompt - miss 反推命中数。miss 未显式提供 / prompt 未提供 / prompt <= miss 时返回 0
+function deriveHitFromMiss(usage) {
+  const miss = Number(usage.prompt_cache_miss_tokens)
+  const prompt = Number(usage.prompt_tokens)
+  if (!Number.isFinite(miss) || miss <= 0) return 0
+  if (!Number.isFinite(prompt) || prompt <= miss) return 0
+  return prompt - miss
 }
 
 // 补 total_tokens（缺失且 prompt/completion 均为数字时）

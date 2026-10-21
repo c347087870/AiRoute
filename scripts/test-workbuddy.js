@@ -30,6 +30,7 @@ const catalogMod = require(path.join(wbDir, 'catalog.js'))
 const modelsdevMod = require(path.join(wbDir, 'modelsdev.js'))
 const usageMod = require(path.join(wbDir, 'usage.js'))
 const credithistMod = require(path.join(wbDir, 'credithist.js'))
+const upstreamMod = require(path.join(__dirname, '..', 'server', 'upstream.js'))
 
 // ===== 迷你测试框架 =====
 let passed = 0
@@ -3460,6 +3461,445 @@ async function main() {
     assert.ok(arches.includes('x64') && arches.includes('arm64'), 'win 与 mac 都应同时出 x64 + arm64')
     assert.strictEqual(section.artifactName, 'AiRoute-${version}-${arch}.${ext}', '产物名模板决定 Release 资产名')
     assert.strictEqual(targets.artifactName('1.7.0-beta.2', 'arm64'), `AiRoute-1.7.0-beta.2-arm64.${targets.ext}`)
+  })
+
+  // ==================== 22. P0/P1 协议缺陷回归 ====================
+  group('22. P0/P1 协议缺陷回归（静默丢收益 / 误判罚号）')
+
+  // ---- 22.1 错误分类：request illegal 按业务码分流 ----
+  // 实测与参考实现 3c4eb88 同口径：11-128 与 11140 的 msg 完全一样，只能靠业务码
+  // 分辨「通道校验失败（账号健康）」与「账号被上游限制（该罚号）」。
+
+  test('11-128 request illegal → channel_refused（不罚号）', () => {
+    assert.strictEqual(errors.classify(400, '{"code":11-128,"msg":"request illegal"}'), K.CHANNEL_REFUSED)
+    assert.strictEqual(errors.classify(400, '{"code":"11-128","msg":"request illegal"}'), K.CHANNEL_REFUSED)
+  })
+
+  test('11140 request illegal → account_fault（该罚号）', () => {
+    assert.strictEqual(errors.classify(400, '{"code":11140,"msg":"request illegal"}'), K.ACCOUNT_FAULT)
+    assert.strictEqual(errors.classify(429, '{"code":11140,"msg":"request illegal"}'), K.ACCOUNT_FAULT)
+  })
+
+  test('只有 msg 没有业务码时不做罚号判定（防误伤）', () => {
+    // 旧实现把裸 'request illegal' 当成账号故障标记 → 通道校验失败会禁用整池账号
+    assert.notStrictEqual(errors.classify(400, '{"msg":"request illegal"}'), K.ACCOUNT_FAULT)
+    assert.strictEqual(errors.classify(400, '{"code":11140,"msg":"some other"}'), K.CLIENT, '11140 只在 msg 匹配时才算账号限制')
+  })
+
+  test('11-128 / 11140 都先于 429 兜底（不会被当成软限流冷却）', () => {
+    assert.strictEqual(errors.classify(429, '{"code":11-128,"msg":"request illegal"}'), K.CHANNEL_REFUSED)
+  })
+
+  test('两类新增错误的 gateway_hint 明确「不是账号问题」', () => {
+    assert.ok(errors.gatewayHint(K.CHANNEL_REFUSED, '').includes('healthy'))
+    assert.ok(errors.gatewayHint(K.UPSTREAM_BUSY, '').includes('not an account problem'))
+  })
+
+  // ---- 22.2 11158 模型无权限：与 11102 同走模型级负缓存 ----
+
+  test('11158 is not allowed for user type → MODEL_BLOCKED（400/404）', () => {
+    const body = '{"code":11158,"msg":"glm-5.2 is not allowed for user type"}'
+    assert.strictEqual(errors.classify(400, body), K.MODEL_BLOCKED)
+    assert.strictEqual(errors.classify(404, body), K.MODEL_BLOCKED)
+    assert.strictEqual(errors.modelBlockReasonFor(body), '11158 model not allowed for account type')
+  })
+
+  test('11158 在 403 上不判模型级拒绝（那是账号/风控层）', () => {
+    const body = '{"code":11158,"msg":"glm-5.2 is not allowed for user type"}'
+    assert.notStrictEqual(errors.classify(403, body), K.MODEL_BLOCKED)
+  })
+
+  test('11102 文案仍判模型级拒绝，两类 reason 前缀可区分', () => {
+    assert.strictEqual(errors.classify(400, '{"code":11102,"msg":"service info not found"}'), K.MODEL_BLOCKED)
+    assert.strictEqual(errors.modelBlockReasonFor('{"code":11102,"msg":"service info not found"}'), '11102 model not available')
+  })
+
+  // ---- 22.3 6021 队列满载：渠道事件，不是限流 ----
+
+  test('6021 queue.full → upstream_busy（不逐号软冷却）', () => {
+    assert.strictEqual(errors.classify(429, '{"code":6021,"msg":"queue.full.title"}'), K.UPSTREAM_BUSY)
+    assert.strictEqual(errors.classify(400, '{"code":"6021"}'), K.UPSTREAM_BUSY)
+    assert.strictEqual(errors.classify(200, '{"code":0,"msg":"request illegal"}'), K.NONE, '正常响应不误判')
+  })
+
+  test('isUpstreamBusy 只认 6021 结构码（"queue full" 自然语言不误命中）', () => {
+    assert.strictEqual(errors.isUpstreamBusy('{"code":6021}'), true)
+    assert.strictEqual(errors.isUpstreamBusy('{"msg":"Queue is Full"}'), false)
+    assert.strictEqual(errors.isUpstreamBusy('{"msg":"queue.full.title"}'), true, 'queue.full 结构文案为外卡')
+  })
+
+  // ---- 22.4 会话头：X-Conversation-ID 必须在场 ----
+
+  test('conversationHeaders：无 conversationId 时也下发 X-Conversation-ID', () => {
+    const h = headersMod.conversationHeaders({})
+    assert.ok(typeof h['X-Conversation-ID'] === 'string' && /^[0-9a-f]{32}$/.test(h['X-Conversation-ID']), '应回落为 32 位十六进制')
+    // 六个上游校验的 id 头齐全，且各自非空
+    for (const k of [
+      'X-Conversation-Request-ID',
+      'X-Conversation-Message-ID',
+      'X-Request-ID',
+      'X-Root-Request-ID',
+      'X-Trace-ID'
+    ]) {
+      assert.ok(typeof h[k] === 'string' && h[k].length > 0, `缺少 ${k}`)
+    }
+  })
+
+  test('conversationHeaders：传入 conversationId 时原样透传', () => {
+    const h = headersMod.conversationHeaders({ conversationId: 'conv-abc' })
+    assert.strictEqual(h['X-Conversation-ID'], 'conv-abc')
+  })
+
+  // ---- 22.5 payload：reasoning_text 剔除 + 空 function.name 清理 ----
+
+  test('prepareBody 剔除 reasoning_text / reasoning 片段（上游 400 code=11101）', () => {
+    const body = {
+      model: 'm',
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning_text', text: 'think' },
+            { type: 'text', text: '最终答案' }
+          ]
+        }
+      ]
+    }
+    const out = JSON.parse(payload.prepareBody(JSON.stringify(body), {}))
+    assert.deepStrictEqual(out.messages[0].content, [{ type: 'text', text: '最终答案' }], '只留白名单类型')
+  })
+
+  test('prepareBody：思考片段占满 content 且无 tool_calls 时整条消息删除', () => {
+    const body = {
+      model: 'm',
+      messages: [{ role: 'user', content: 'x' }, { role: 'assistant', content: [{ type: 'reasoning', text: 'r' }] }]
+    }
+    const out = JSON.parse(payload.prepareBody(JSON.stringify(body), {}))
+    assert.strictEqual(out.messages.length, 1, '空 content 消息会被上游以「空消息」拒绝，应整条删掉')
+    assert.strictEqual(out.messages[0].role, 'user')
+  })
+
+  test('prepareBody：有 tool_calls 时保留消息只清 content', () => {
+    const body = {
+      model: 'm',
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'reasoning_text', text: 'r' }],
+          tool_calls: [{ id: 'c1', type: 'function', function: { name: 'A', arguments: '{}' } }]
+        },
+        { role: 'tool', tool_call_id: 'c1', content: 'ok' }
+      ]
+    }
+    const out = JSON.parse(payload.prepareBody(JSON.stringify(body), {}))
+    assert.strictEqual(out.messages.length, 2)
+    assert.ok(!out.messages[0].content, 'content 只剩思考片段时应清空')
+    assert.strictEqual(out.messages[0].tool_calls.length, 1, '调用本身要保住，否则成孤儿结果')
+  })
+
+  test('空 function.name 的脏 tool_call 连同结果一起剔除（否则整条会话恒 400）', () => {
+    const body = {
+      model: 'm',
+      messages: [
+        { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function', function: { name: '', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+        { role: 'assistant', tool_calls: [{ id: 'c2', type: 'function', function: { name: 'B', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'c2', content: 'ok' }
+      ]
+    }
+    const out = JSON.parse(payload.prepareBody(JSON.stringify(body), {}))
+    const ids = out.messages.filter(m => Array.isArray(m.tool_calls)).flatMap(m => m.tool_calls.map(c => c.id))
+    assert.deepStrictEqual(ids, ['c2'], '空 name 的调用必须剔除')
+    const results = out.messages.filter(m => m.role === 'tool').map(m => m.tool_call_id)
+    assert.deepStrictEqual(results, ['c2'], '配对结果必须同步剔除，不留孤儿')
+  })
+
+  test('缺 function / name 字段的占位条目不动（不扩大打击面）', () => {
+    const body = {
+      model: 'm',
+      messages: [
+        { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function' }] },
+        { role: 'tool', tool_call_id: 'c1', content: 'ok' }
+      ]
+    }
+    const out = JSON.parse(payload.prepareBody(JSON.stringify(body), {}))
+    const calls = out.messages.filter(m => Array.isArray(m.tool_calls))
+    assert.strictEqual(calls.length, 1, '无 function 对象的条目上游不拒，不应被删')
+    assert.strictEqual(calls[0].tool_calls[0].id, 'c1')
+  })
+
+  // ---- 22.6 缓存命中推导：hit=0 + miss>0 + 大 prompt 的矛盾形态 ----
+  // 参考实现 329c09e（issue #170）：上游只报 miss、hit 恒 0，导致缓存收益被算成 0。
+
+  test('sse.normalizeUsageCacheAliases：hit=0 + miss=3 + prompt=52703 → hit 52700', () => {
+    const out = sse.normalizeUsageCacheAliases({
+      prompt_tokens: 52703,
+      prompt_cache_hit_tokens: 0,
+      prompt_cache_miss_tokens: 3
+    })
+    assert.strictEqual(out.prompt_cache_hit_tokens, 52700)
+    assert.strictEqual(out.cached_tokens, 52700)
+    assert.strictEqual(out.cache_read_input_tokens, 52700)
+    assert.strictEqual(out.prompt_tokens_details.cached_tokens, 52700)
+  })
+
+  test('sse：只有 miss 字段时同样推导（prompt 8500 / miss 100 → 8400）', () => {
+    const out = sse.normalizeUsageCacheAliases({ prompt_tokens: 8500, prompt_cache_miss_tokens: 100 })
+    assert.strictEqual(out.cached_tokens, 8400)
+  })
+
+  test('sse：prompt == miss（全新上下文）时 hit 保持 0', () => {
+    const out = sse.normalizeUsageCacheAliases({ prompt_tokens: 100, prompt_cache_miss_tokens: 100 })
+    assert.ok(!out.cached_tokens, '不能凭空造出缓存命中')
+  })
+
+  test('sse：无缓存字段 / 无 prompt 时不做推导', () => {
+    assert.ok(!sse.normalizeUsageCacheAliases({ prompt_tokens: 100 }).cached_tokens)
+    assert.ok(!sse.normalizeUsageCacheAliases({ prompt_cache_miss_tokens: 3 }).cached_tokens)
+    assert.ok(!sse.normalizeUsageCacheAliases({}).cached_tokens)
+  })
+
+  test('sse：已有的真实 hit 值不被推导覆盖', () => {
+    const out = sse.normalizeUsageCacheAliases({ prompt_tokens: 1000, prompt_cache_hit_tokens: 900, prompt_cache_miss_tokens: 100 })
+    assert.strictEqual(out.prompt_cache_hit_tokens, 900)
+    assert.strictEqual(out.cached_tokens, 900)
+  })
+
+  test('upstreamMod.extractUsage：cacheRead 走同一套推导口径', () => {
+    const a = upstreamMod.extractUsage({ usage: { prompt_tokens: 52703, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 3 } })
+    assert.strictEqual(a.cacheRead, 52700)
+    assert.strictEqual(a.input, 3)
+    const b = upstreamMod.extractUsage({ usage: { prompt_tokens: 8500, prompt_cache_miss_tokens: 100 } })
+    assert.strictEqual(b.cacheRead, 8400)
+    // 常规形态（含 prompt_tokens_details）不受影响
+    const c = upstreamMod.extractUsage({ usage: { prompt_tokens: 1000, prompt_tokens_details: { cached_tokens: 400 } } })
+    assert.strictEqual(c.cacheRead, 400)
+    // miss 与 prompt 相等 / 无 miss → 不推导（保持「没有缓存命中」语义）
+    assert.ok(!upstreamMod.extractUsage({ usage: { prompt_tokens: 100, prompt_cache_miss_tokens: 100 } }).cacheRead)
+    assert.ok(!upstreamMod.extractUsage({ usage: { prompt_tokens: 100 } }).cacheRead)
+  })
+
+  // ---- 22.7 pool：模型级负缓存的两类 kind 与清除 ----
+
+  test('11158 也归入 model_unavailable（面板显示「该后端无此模型/无权限」）', () => {
+    const pool = poolMod.createPool({})
+    pool.add(makeAuth('m58'))
+    pool.blockModelBackoff('m58', 'glm-5.2', '11158 model not allowed for account type')
+    const st = pool.status('m58')
+    assert.strictEqual(st.rateLimitedModels.length, 1)
+    assert.strictEqual(st.rateLimitedModels[0].kind, 'model_unavailable')
+  })
+
+  test('blockModelClear 同时清 11102 与 11158，但不碰 6004 限流', () => {
+    const pool = poolMod.createPool({})
+    pool.add(makeAuth('mc1'))
+    pool.blockModelBackoff('mc1', 'm-a', '11102 model not available')
+    pool.blockModelBackoff('mc1', 'm-b', '11158 model not allowed for account type')
+    // 6004 带重置墙钟 → 走模型级冷却（与负缓存同表，靠 reason 前缀区分）
+    pool.cooldownSoftForModel('mc1', 600000, Date.now() + 3600000, 'm-c', '6004 model rate limit')
+    pool.blockModelClear('mc1', 'm-a')
+    pool.blockModelClear('mc1', 'm-b')
+    pool.blockModelClear('mc1', 'm-c')
+    const models = pool.status('mc1').rateLimitedModels.map(x => x.model)
+    assert.deepStrictEqual(models, ['m-c'], '11102/11158 该清，6004 属限流不该清')
+    assert.strictEqual(pool.status('mc1').rateLimitedModels[0].kind, 'rate_limit')
+  })
+
+  await testAsync('冷却到期后 reason 不再透出（避免把健康号标成「限流中」）', async () => {
+    const pool = poolMod.createPool({ softRateMs: 30, softRateMaxMs: 30 })
+    pool.add(makeAuth('cr1'))
+    pool.cooldownSoftRate('cr1', 30, 0, '429 upstream said rate limited')
+    assert.ok(pool.status('cr1').reason.includes('rate limited'), '冷却期内应透出原因')
+    await new Promise(r => setTimeout(r, 60))
+    const after = pool.status('cr1')
+    assert.strictEqual(after.cooling, false)
+    assert.strictEqual(after.reason, '', '冷却结束后 e.reason 仍在内存，但不该再透出')
+  })
+
+  // ---- 22.8 auth：企业切换会话识别 ----
+
+  test('jwtTokenSource 解析 token_source（非法输入返回空串，不抛错）', () => {
+    const tok = p => `h.${Buffer.from(JSON.stringify(p)).toString('base64url')}.s`
+    assert.strictEqual(authMod.jwtTokenSource(tok({ token_source: 'enterprise_switch' })), 'enterprise_switch')
+    assert.strictEqual(authMod.jwtTokenSource(tok({ token_source: 'wechat' })), 'wechat')
+    assert.strictEqual(authMod.jwtTokenSource(tok({})), '')
+    assert.strictEqual(authMod.jwtTokenSource('garbage'), '')
+    assert.strictEqual(authMod.jwtTokenSource(''), '')
+    assert.strictEqual(authMod.jwtTokenSource(undefined), '')
+  })
+
+  test('isEnterpriseSession 与 isEnterprise 隔离：账单域语义不得混用', () => {
+    const tok = p => `h.${Buffer.from(JSON.stringify(p)).toString('base64url')}.s`
+    const switchAuth = { enterpriseId: '', accessToken: tok({ token_source: 'enterprise_switch' }) }
+    const plainAuth = { enterpriseId: '', accessToken: tok({ token_source: 'wechat' }) }
+    const entAuth = { enterpriseId: 'e9', accessToken: '' }
+    assert.strictEqual(authMod.isEnterpriseSession(switchAuth), true)
+    assert.strictEqual(authMod.isEnterprise(switchAuth), false, 'token_source 不代表企业账单域')
+    assert.strictEqual(authMod.isEnterpriseSession(plainAuth), false)
+    assert.strictEqual(authMod.isEnterpriseSession(entAuth), true)
+    assert.strictEqual(authMod.isEnterprise(entAuth), true)
+  })
+
+  // ---- 22.9 runtime：执行侧门控（读不门控、执行门控）----
+
+  test('skipGrowthExecFor：国际版 + 企业切换会话都跳过执行', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const tok = p => `h.${Buffer.from(JSON.stringify(p)).toString('base64url')}.s`
+    assert.strictEqual(runtimeMod.skipGrowthExecFor(makeAuth('r1')), false, '普通国内号应放行')
+    assert.strictEqual(runtimeMod.skipGrowthExecFor(makeAuth('r2', { realm: 'global' })), true)
+    assert.strictEqual(runtimeMod.skipGrowthExecFor(makeAuth('r3', { accessToken: tok({ token_source: 'enterprise_switch' }) })), true)
+    assert.strictEqual(runtimeMod.skipGrowthExecFor(null), false)
+    // 读取侧只认国际版：企业切换会话的读端点实测正常，门控会误伤
+    assert.strictEqual(runtimeMod.skipGrowthFor(makeAuth('r4', { accessToken: tok({ token_source: 'enterprise_switch' }) })), false)
+  })
+
+  test('执行拒绝错误：422 + 重登指引，且与国际版错误可区分', () => {
+    const runtimeMod = require(path.join(wbDir, 'runtime.js'))
+    const tok = p => `h.${Buffer.from(JSON.stringify(p)).toString('base64url')}.s`
+    const entErr = runtimeMod.growthExecBlockedError(makeAuth('e1', { accessToken: tok({ token_source: 'enterprise_switch' }) }))
+    assert.strictEqual(entErr.status, 422)
+    assert.strictEqual(entErr.code, 'enterprise_session_relogin')
+    assert.ok(entErr.message.includes('token_source=enterprise_switch'))
+    assert.ok(entErr.message.includes('重新登录'), '必须给出用户可执行的处置')
+    const intlErr = runtimeMod.growthExecBlockedError(makeAuth('e2', { realm: 'global' }))
+    assert.strictEqual(intlErr.status, 422)
+    assert.strictEqual(intlErr.code, 'growth_unsupported_realm')
+    assert.notStrictEqual(intlErr.message, entErr.message)
+  })
+
+  // ---- 22.10 官方补偿：先查后领（不再盲领）----
+
+  // 假 client：按 X-User-Id 返回不同补偿状态，覆盖「待领 / 无活动 / 已领 / 额度 0 / 查询失败」
+  function makeCompClient() {
+    const calls = []
+    const statusByUid = {
+      c1: { active: true, claimed: false, credit_num: 500, validity_period: 1, end_time: '2026-10-22 23:59:59' },
+      c2: { active: false, claimed: false, credit_num: 0 },
+      c3: { active: true, claimed: true, credit_num: 500 },
+      c4: { active: true, claimed: false, credit_num: 0 }
+    }
+    const client = {
+      calls,
+      // 签到排程整条链需要的其它端点（只为了让 runNow('checkin') 跑到连登管家那一步）
+      async dailyCheckin() {
+        return { ok: true, message: '' }
+      },
+      async userResource() {
+        return { ok: true, credits: 1000, total: 1000 }
+      },
+      async growthOK(auth, method, pathName) {
+        if (pathName === constants.GROWTH_STREAK_PATH) return { redemption_status: { tiers: [] } }
+        if (pathName === constants.LOTTERY_SUMMARY_PATH) return { chances: 0 }
+        if (pathName === '/activity/growth/heatmap') return { cells: [] } // 无漏签记录 → 不补签
+        return {}
+      },
+      async send(cfg) {
+        calls.push(cfg)
+        const uid = (cfg.headers && cfg.headers['X-User-Id']) || ''
+        const url = String(cfg.url)
+        if (url.includes('compensation-status')) {
+          if (uid === 'c5') throw new Error('transport boom')
+          return { status: 200, text: JSON.stringify({ code: 0, msg: 'OK', data: statusByUid[uid] }) }
+        }
+        if (url.includes('claim-compensation')) {
+          return { status: 200, text: JSON.stringify({ code: 0, msg: 'OK', data: { credit: 500 } }) }
+        }
+        // 新手礼包：业务码非 0 = 没有礼包（调用方静默）
+        if (url.includes('claim-gift')) {
+          return { status: 200, text: JSON.stringify({ code: 10001, msg: 'no gift' }) }
+        }
+        return { status: 404, text: 'nope' }
+      }
+    }
+    return client
+  }
+
+  function makeCompScheduler(extraAccounts = []) {
+    const pool = poolMod.createPool({})
+    for (const uid of ['c1', 'c2', 'c3', 'c4', 'c5']) pool.add(makeAuth(uid))
+    for (const a of extraAccounts) pool.add(a)
+    const client = makeCompClient()
+    const s = schedulerMod.createScheduler({
+      pool,
+      client,
+      auth: {},
+      refreshTokenFor: async () => ({ ok: true }),
+      refreshBalanceFor: async () => ({ ok: true }),
+      log: () => {}
+    })
+    return { s, client, pool }
+  }
+
+  await testAsync('compensationStatusAll：行序与池顺序一致，查询失败单独标记', async () => {
+    const { s, pool } = makeCompScheduler([makeAuth('g1', { realm: 'global' }), makeAuth('e1', { enterpriseId: 'e9' })])
+    const rows = await s.compensationStatusAll()
+    assert.deepStrictEqual(
+      rows.map(r => r.uid),
+      pool.list().map(x => x.uid),
+      '并发查询不得让行序按完成顺序漂移（面板逐行对齐依赖稳定行序）'
+    )
+    const by = new Map(rows.map(r => [r.uid, r]))
+    assert.strictEqual(by.get('g1').skip, 'global', '国际版无国内补偿体系')
+    assert.strictEqual(by.get('e1').skip, 'enterprise', '企业版无补偿体系')
+    assert.strictEqual(by.get('c1').status.creditNum, 500)
+    assert.strictEqual(by.get('c1').status.endTime, '2026-10-22 23:59:59')
+    assert.strictEqual(by.get('c5').error, 'transport boom', '查询失败必须显形，不能渲染成「无活动」')
+    s.stop()
+  })
+
+  await testAsync('compensationClaimAll：无活动 / 已领 / 额度 0 都不调领取接口', async () => {
+    const { s, client } = makeCompScheduler()
+    const results = await s.compensationClaimAll()
+    const claimCalls = client.calls.filter(c => String(c.url).includes('claim-compensation'))
+    assert.strictEqual(claimCalls.length, 1, '只有 c1 该真的领一次（盲领会把四个账号都打一次）')
+    const by = new Map(results.map(r => [r.uid, r]))
+    assert.strictEqual(by.get('c1').claimed, true)
+    assert.strictEqual(by.get('c1').credit, 500)
+    assert.strictEqual(by.get('c2').skip, 'no_active')
+    assert.strictEqual(by.get('c3').skip, 'claimed')
+    assert.strictEqual(by.get('c4').skip, 'zero_credit')
+    assert.strictEqual(by.get('c5').error, 'transport boom')
+    s.stop()
+  })
+
+  await testAsync('summarizeCompensation：errored 与 claimed 分开计（全失败不能被说成「没有待领」）', async () => {
+    const { s } = makeCompScheduler()
+    const results = await s.compensationClaimAll()
+    const sum = s.summarizeCompensation(results)
+    assert.deepStrictEqual(sum, { total: 5, claimed: 1, skipped: 3, errored: 1, credit: 500 })
+    // 极端情形：全部查询失败
+    const allFail = [{ uid: 'x', error: 'boom' }, { uid: 'y', error: 'boom' }]
+    const s2 = s.summarizeCompensation(allFail)
+    assert.strictEqual(s2.errored, 2)
+    assert.strictEqual(s2.claimed, 0, 'claimed=0 但 errored=2，调用方必须先看 errored')
+    s.stop()
+  })
+
+  await testAsync('compensationClaimFor：未知账号返回 error，国际版/企业版走 skip', async () => {
+    const { s } = makeCompScheduler([makeAuth('g1', { realm: 'global' })])
+    const missing = await s.compensationClaimFor('nope')
+    assert.strictEqual(missing.error, 'account not found')
+    const g = await s.compensationClaimFor('g1')
+    assert.strictEqual(g.skip, 'global')
+    const one = await s.compensationClaimFor('c1')
+    assert.strictEqual(one.claimed, true)
+    assert.strictEqual(one.credit, 500)
+    s.stop()
+  })
+
+  await testAsync('签到排程的连登管家走「先查后领」（日志里无补偿不再刷屏）', async () => {
+    const { s, client } = makeCompScheduler()
+    await s.runNow('checkin')
+    // checkin 本体只打签到 + 余额，连登管家（含补偿）由 runCheckinAll 末尾接续；
+    // 这里钉住「补偿那一跳必须先查状态再决定是否领取」，且只有待领账号真的调领取
+    const urls = client.calls.map(c => String(c.url))
+    const statusIdx = urls.findIndex(u => u.includes('compensation-status'))
+    const claimIdx = urls.findIndex(u => u.includes('claim-compensation'))
+    assert.ok(statusIdx >= 0, '连登管家必须查补偿状态（旧实现是直接盲领）')
+    assert.ok(claimIdx > statusIdx, '必须先查后领')
+    const claimCalls = urls.filter(u => u.includes('claim-compensation'))
+    assert.strictEqual(claimCalls.length, 1, '只有 c1 待领，其余四个账号不该被打领取接口')
+    s.stop()
   })
 
   // ==================== 汇总 ====================

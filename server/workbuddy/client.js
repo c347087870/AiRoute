@@ -1,10 +1,12 @@
 // WorkBuddy 上游 HTTP 客户端：OAuth、token 刷新、聊天转发、签到/余额/模型/成长域调用
 
 const axios = require('axios')
+const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const { StringDecoder } = require('string_decoder')
 const C = require('./constants')
+const authMod = require('./auth')
 const headersMod = require('./headers')
 const errMod = require('./errors')
 const catalog = require('./catalog')
@@ -154,8 +156,62 @@ async function oauthFetchAccount(state, accessToken, opts = {}) {
 
 // ===== token 刷新 =====
 
+// 同账号 refresh 单飞表（uid → 在途 Promise）。
+// 上游对 refreshToken 反重放：同一 RT 被消费后再用会回 12153 并把整条 RT 链作废，
+// 账号从此恒 401、只能人工重登。而调度器 keepalive、临近过期刷新、手动保活都会
+// 并发触发同一账号的 refresh，所以单飞在这里是保号手段，不只是省流量。
+const refreshInFlight = new Map()
+
 // 刷新 access token；失败返回 { ok: false, error, kind }
+// 单飞：同 uid 的并发调用等待并复用首个结果（不同账号仍并行，不拖慢全量保活）
 async function refreshToken(auth, opts = {}) {
+  const key = auth && typeof auth.uid === 'string' ? auth.uid : ''
+  if (!key) return refreshTokenOnce(auth, opts)
+
+  const inflight = refreshInFlight.get(key)
+  if (inflight) return inflight
+
+  const task = (async () => {
+    let res = await refreshTokenOnce(auth, opts)
+    // 12153 兜底：磁盘凭证可能已被另一进程（旧版本残留 / 手工换号）rotate 过，
+    // 进程内单飞挡不住跨进程竞态 → 采纳磁盘 token 重试一次
+    if (!res.ok && res.kind === errMod.ERR_KIND.SESSION_DEAD && adoptNewerTokensFromDisk(auth)) {
+      res = await refreshTokenOnce(auth, opts)
+    }
+    return res
+  })()
+
+  refreshInFlight.set(key, task)
+  try {
+    return await task
+  } finally {
+    // 仅当表里还是本次任务时删除（极端情况下 key 可能已被后一轮覆盖）
+    if (refreshInFlight.get(key) === task) refreshInFlight.delete(key)
+  }
+}
+
+// 从磁盘凭证文件采纳更新的 token（另一进程已刷新并写回时自救）。
+// 磁盘 RT 与内存一致 / 读取或解析失败 → false（不改内存状态，保持失败语义）
+function adoptNewerTokensFromDisk(auth) {
+  const filePath = String((auth && auth.filePath) || '')
+  if (!filePath) return false
+  let disk
+  try {
+    disk = authMod.parseAuth(fs.readFileSync(filePath, 'utf8'))
+  } catch {
+    return false
+  }
+  if (!disk || !disk.refreshToken || disk.refreshToken === auth.refreshToken) return false
+
+  auth.accessToken = disk.accessToken
+  auth.refreshToken = disk.refreshToken
+  if (disk.expiresAt > 0) auth.expiresAt = disk.expiresAt
+  if (disk.domain) auth.domain = disk.domain
+  return true
+}
+
+// 单次刷新本体（调用方 refreshToken 已保证同账号串行）
+async function refreshTokenOnce(auth, opts = {}) {
   const rt = String(auth?.refreshToken || '').trim()
   if (!rt) return { ok: false, error: 'no refreshToken' }
 

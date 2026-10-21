@@ -413,6 +413,21 @@ export function wbSchedulerUpdate(patch) {
   return api.put('/api/workbuddy/scheduler', patch).then(r => r.data)
 }
 
+// 官方补偿活动状态（只读，不领取）。补偿带领取截止日，先查后领才看得见「可领未领」
+export function wbCompensation() {
+  return api.get('/api/workbuddy/compensation', { timeout: 60000 }).then(r => r.data)
+}
+
+// 逐号领取补偿（先查状态 → 待领才领）；返回 summary{claimed,skipped,errored,credit}
+export function wbCompensationClaimAll() {
+  return api.post('/api/workbuddy/compensation/claim_all', {}, { timeout: 600000 }).then(r => r.data)
+}
+
+// 单号领取补偿
+export function wbCompensationClaim(uid) {
+  return api.post(`/api/workbuddy/accounts/${encodeURIComponent(uid)}/compensation`, {}, { timeout: 120000 }).then(r => r.data)
+}
+
 // ==================== 更新检查 ====================
 
 // 查询最新版本；force 为 true 时跳过服务端 30 分钟缓存（手动检查用）
