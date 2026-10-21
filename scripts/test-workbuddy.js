@@ -3429,6 +3429,39 @@ async function main() {
     }
   })
 
+  // ==================== 21. 更新资产命名（update / targets）====================
+  group('21. 更新资产命名（update / targets）')
+
+  test('assetCandidates：按运行时平台/架构拼资产名，Windows 追加旧名兜底', () => {
+    const updatePath = path.join(__dirname, '..', 'server', 'update.js')
+    delete require.cache[require.resolve(updatePath)]
+    const update = require(updatePath)
+
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
+    const ext = process.platform === 'darwin' ? 'dmg' : 'exe'
+    const names = update.assetCandidates('v1.7.0-beta.2')
+
+    assert.strictEqual(names[0], `AiRoute-1.7.0-beta.2-${arch}.${ext}`, '首个候选应是带版本+架构的新命名资产')
+    if (process.platform === 'darwin') {
+      assert.strictEqual(names.length, 1, 'macOS 没有历史命名需要兼容')
+    } else {
+      assert.strictEqual(names[1], 'AiRoute.exe', 'Windows 需保留 ≤ v1.7.0-beta.1 的旧名兜底')
+      assert.strictEqual(names.length, 2)
+    }
+  })
+
+  test('scripts/targets 与 electron-builder.json 的架构、产物命名一致', () => {
+    const targets = require(path.join(__dirname, 'targets.js'))
+    const config = require(path.join(__dirname, '..', 'electron-builder.json'))
+    const section = config[targets.platform]
+    const arches = section.target.flatMap(t => t.arch)
+
+    assert.deepStrictEqual(targets.configuredArches(), arches, '脚本应直接读配置里的架构列表，不另写一份')
+    assert.ok(arches.includes('x64') && arches.includes('arm64'), 'win 与 mac 都应同时出 x64 + arm64')
+    assert.strictEqual(section.artifactName, 'AiRoute-${version}-${arch}.${ext}', '产物名模板决定 Release 资产名')
+    assert.strictEqual(targets.artifactName('1.7.0-beta.2', 'arm64'), `AiRoute-1.7.0-beta.2-arm64.${targets.ext}`)
+  })
+
   // ==================== 汇总 ====================
   console.log(`\n${'='.repeat(52)}`)
   console.log(`通过 ${passed} 项，失败 ${failed} 项，共 ${passed + failed} 项`)

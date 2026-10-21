@@ -77,7 +77,9 @@ async function startDownload() {
   const ext = isMacPlatform() ? 'dmg' : 'exe'
   let savePath = ''
   try {
-    savePath = window.electronAPI ? await window.electronAPI.saveFileDialog(`AiRoute-v${info.value.latest}.${ext}`) : ''
+    // 服务端已按平台/架构解析出实际资产名，优先用它，保证另存为的默认文件名与 Release 一致
+    const defaultName = info.value.assetName || `AiRoute-v${info.value.latest}.${ext}`
+    savePath = window.electronAPI ? await window.electronAPI.saveFileDialog(defaultName) : ''
   } catch {
     savePath = ''
   }

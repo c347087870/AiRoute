@@ -68,7 +68,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14 起 GitHub 的 macOS runner 是 arm64，与当前只出 arm64 dmg 一致
+          # electron-builder.json 里 mac / win 都配了 x64 + arm64，一个 job 出全部架构：
+          # macOS runner 是 arm64，交叉打 x64 dmg 没问题；Windows runner 是 x64，同样能交叉打 arm64
           - os: macos-14
             platform: mac
             buildArg: --mac
@@ -114,12 +115,11 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').version")
           mkdir -p dist-assets
+          # 一次出两个架构：AiRoute-<版本>-{x64,arm64}.{exe,dmg}（架构列表见 electron-builder.json）
           if [ "${{ matrix.platform }}" = "mac" ]; then
-            cp "app/release/AiRoute-${version}-arm64.dmg" dist-assets/
+            cp "app/release/AiRoute-${version}-"*.dmg dist-assets/
           else
-            # 保持 AiRoute.exe：server/update.js 的 assetNameFor 写死了这个文件名来拼下载地址，
-            # 改名会让应用内更新 404（历史 Release v1.6.x 也都是 AiRoute.exe）
-            cp app/release/AiRoute.exe dist-assets/
+            cp "app/release/AiRoute-${version}-"*.exe dist-assets/
           fi
           ls -lh dist-assets
 
@@ -144,6 +144,18 @@ jobs:
         with:
           path: dist-assets
           merge-multiple: true
+
+      # 旧客户端（≤ v1.7.0-beta.1）的应用内更新把文件名写死成 AiRoute.exe，
+      # 额外发一份 x64 副本做兼容；确认没有旧客户端再拉这个文件后可以删掉这一步
+      - name: 生成旧命名的兼容副本
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ -f "dist-assets/AiRoute-${version}-x64.exe" ]; then
+            cp "dist-assets/AiRoute-${version}-x64.exe" dist-assets/AiRoute.exe
+            ls -lh dist-assets
+          else
+            echo "::warning::未找到 AiRoute-${version}-x64.exe，跳过 AiRoute.exe 兼容副本"
+          fi
 
       - name: 生成 SHA256 校验文件
         run: |

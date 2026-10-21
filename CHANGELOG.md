@@ -2,6 +2,15 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.7.0-beta.2] - 2026-10-21
+
+### 变更
+
+- **产物名带版本与架构**：Windows 由写死的 `AiRoute.exe` 改为 `AiRoute-<版本>-<架构>.exe`，macOS 同为 `AiRoute-<版本>-<架构>.dmg`（模板见 `electron-builder.json` 的 `artifactName`）
+- **Windows 增加 arm64**：`win.target` 配 `x64` + `arm64`，一次构建出两个便携版；macOS 由只出 arm64 扩到 `arm64` + `x64`，Intel Mac 可装
+- **应用内更新按架构取包**：`server/update.js` 按 `process.arch` 拼 `x64` / `arm64` 资产名，Windows 保留旧名 `AiRoute.exe` 作回落；Release 额外上传一份 `AiRoute.exe`（x64 副本），兼容 ≤ v1.7.0-beta.1 老客户端的应用内更新
+- **自检覆盖多架构**：新增 `scripts/targets.js` 作为平台 / 架构 / 产物命名的单一来源（架构读自 `electron-builder.json`），`scripts/build.js` 与 `scripts/verify-release.js` 逐架构校验 asar 版本、exe 元数据或 Info.plist + ad-hoc 签名、产物体积与 SHA256，任一架构缺失直接中断
+
 ## [1.7.0-beta.1] - 2026-10-21
 
 ### 新增
