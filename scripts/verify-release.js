@@ -1,17 +1,16 @@
 // 上传前版本检查：校验 package.json / asar / 平台产物元数据 / CHANGELOG 版本一致
 // 用法：node scripts/verify-release.js（退出码 0 = 全部通过；非 0 = 存在失败项）
-//   Windows：校验 exe 元数据（powershell）
-//   macOS  ：校验 Info.plist 版本、ad-hoc 签名、dmg 产物
+//   Windows：校验每个架构 exe 的元数据（powershell）
+//   macOS  ：校验每个架构 Info.plist 版本、ad-hoc 签名、dmg 产物
+// 架构列表与产物命名取自 scripts/targets.js（源头是 electron-builder.json 的 target.arch）
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { execSync } = require('child_process')
+const { root, isMac, targetArches, artifactName, asarPath, unpackedDirs } = require('./targets')
 
-const root = path.join(__dirname, '..')
 const version = require(path.join(root, 'package.json')).version
-const isMac = process.platform === 'darwin'
-const macAppRel = 'app/dist-electron/mac-arm64/AiRoute.app'
-const macAssetName = `AiRoute-${version}-arm64.dmg`
+const arches = targetArches()
 const results = []
 
 function check(name, ok, detail) {
@@ -39,7 +38,7 @@ function readMacMeta(rel) {
   }
 }
 
-// macOS：ad-hoc 签名必须存在且有效（缺失会导致 Apple Silicon 上无法启动）
+// macOS：ad-hoc 签名必须存在且有效（缺失会导致 Apple Silicon / Intel 上都无法启动）
 function checkMacSignature(rel) {
   const appPath = path.join(root, rel)
   try {
@@ -51,24 +50,37 @@ function checkMacSignature(rel) {
   }
 }
 
-// ① asar 内应用 package.json 版本
-const asarRel = isMac ? `${macAppRel}/Contents/Resources/app.asar` : path.join('app', 'dist-electron', 'win-unpacked', 'resources', 'app.asar')
-try {
-  const raw = fs.readFileSync(path.join(root, asarRel)).toString('latin1')
-  const m = raw.match(/"name":\s*"aiRoute",\s*"version":\s*"([^"]+)"/)
-  check('asar 内 package.json 版本', !!m && m[1] === version, m ? m[1] : '未找到')
-} catch (err) {
-  check('asar 内 package.json 版本', false, err.message)
+// ① asar 内应用 package.json 版本（打包输出 + release 同步目录，逐架构）
+for (const outDir of ['app/dist-electron', 'app/release']) {
+  const dirs = unpackedDirs(path.join(root, outDir))
+  check(`${outDir} 解包目录数量`, dirs.length > 0, dirs.length ? dirs.map(d => path.basename(d)).join(' / ') : '未找到')
+  for (const dir of dirs) {
+    const rel = path.relative(root, dir)
+    try {
+      const raw = fs.readFileSync(asarPath(dir)).toString('latin1')
+      const m = raw.match(/"name":\s*"aiRoute",\s*"version":\s*"([^"]+)"/)
+      check(`${rel}/app.asar 内版本`, !!m && m[1] === version, m ? m[1] : '未找到')
+    } catch (err) {
+      check(`${rel}/app.asar 内版本`, false, err.message.split('\n')[0])
+    }
+  }
 }
 
-// ② 平台产物元数据（打包输出 + release 同步目录）
+// ② 平台产物元数据（打包输出 + release 同步目录），逐架构
 if (isMac) {
-  readMacMeta(macAppRel)
-  readMacMeta('app/release/mac-arm64/AiRoute.app')
-  checkMacSignature(macAppRel)
+  for (const outDir of ['app/dist-electron', 'app/release']) {
+    for (const dir of unpackedDirs(path.join(root, outDir))) {
+      const rel = path.join(path.relative(root, dir), 'AiRoute.app')
+      readMacMeta(rel)
+      checkMacSignature(rel)
+    }
+  }
 } else {
-  readMeta(path.join('app', 'dist-electron', 'AiRoute.exe'))
-  readMeta(path.join('app', 'release', 'AiRoute.exe'))
+  for (const arch of arches) {
+    for (const outDir of ['app/dist-electron', 'app/release']) {
+      readMeta(path.join(outDir, artifactName(version, arch)))
+    }
+  }
 }
 
 // ③ CHANGELOG 顶部版本段落
@@ -79,26 +91,29 @@ try {
   check('CHANGELOG 顶部版本', false, err.message)
 }
 
-// ④ release 产物大小与 SHA256（发布说明中需与上传资产一致）
+// ④ release 产物大小与 SHA256（发布说明中需与上传资产一致），逐架构
 // 用 node 自带 crypto 计算：Windows 上 powershell 的 Get-FileHash 会因模块未自动加载而失败
-const assetName = isMac ? macAssetName : 'AiRoute.exe'
-const assetPath = path.join(root, 'app', 'release', assetName)
-let sha = ''
-try {
-  const size = fs.statSync(assetPath).size
-  const minSize = isMac ? 10 * 1024 * 1024 : 1024 * 1024
-  check(`release/${assetName} 大小`, size > minSize, `${(size / 1024 / 1024).toFixed(1)} MB`)
-  sha = crypto.createHash('sha256').update(fs.readFileSync(assetPath)).digest('hex')
-} catch (err) {
-  check(`release/${assetName} 大小`, false, err.message.split('\n')[0])
+const minSize = isMac ? 10 * 1024 * 1024 : 1024 * 1024
+const shas = []
+for (const arch of arches) {
+  const name = artifactName(version, arch)
+  const assetPath = path.join(root, 'app', 'release', name)
+  try {
+    const size = fs.statSync(assetPath).size
+    check(`release/${name} 大小`, size > minSize, `${(size / 1024 / 1024).toFixed(1)} MB`)
+    const sha = crypto.createHash('sha256').update(fs.readFileSync(assetPath)).digest('hex')
+    shas.push(`${sha}  ${name}`)
+  } catch (err) {
+    check(`release/${name} 大小`, false, err.message.split('\n')[0])
+  }
 }
 
 let failed = 0
-console.log(`基线版本（package.json）: ${version}（平台 ${isMac ? 'macOS/arm64' : 'Windows'}）\n`)
+console.log(`基线版本（package.json）: ${version}（平台 ${isMac ? 'macOS' : 'Windows'}，架构 ${arches.join(' / ')}）\n`)
 for (const r of results) {
   console.log(`${r.ok ? '✔' : '✖'} ${r.name}: ${r.detail}`)
   if (!r.ok) failed++
 }
-if (sha) console.log(`\nSHA256: ${sha}`)
+if (shas.length) console.log(`\nSHA256:\n${shas.join('\n')}`)
 console.log(failed ? `\n共 ${failed} 项未通过，禁止上传` : '\n全部通过，可以上传')
 process.exit(failed ? 1 : 0)

@@ -7,18 +7,23 @@ const path = require('path')
 const REPO = 'c347087870/AiRoute'
 const CACHE_TTL = 30 * 60 * 1000
 
-// 发布资产名：Windows 是便携版单文件 exe；macOS 是带版本 + 架构的 dmg
-// （与 electron-builder.json 的 mac.artifactName 模板一致）
+// 发布资产名：AiRoute-<version>-<arch>.<ext>（与 electron-builder.json 的 artifactName 模板一致）
+// 架构取运行时的 process.arch：Apple Silicon / Windows on ARM 上 Electron 原生报 arm64，其余按 x64
 const IS_MAC = process.platform === 'darwin'
-const MAC_ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
+const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
+const EXT = IS_MAC ? 'dmg' : 'exe'
 
-function assetNameFor(version) {
-  if (!IS_MAC) return 'AiRoute.exe'
-  return `AiRoute-${String(version).replace(/^v/i, '')}-${MAC_ARCH}.dmg`
+// 候选资产名，按优先级排列：Windows 早期版本（≤ v1.7.0-beta.1）发的是不带版本/架构的
+// AiRoute.exe，留作兜底，否则旧安装包的应用内更新会 404（新版本 Release 仍会额外上传这个命名的 x64 副本）
+function assetCandidates(version) {
+  const v = String(version).replace(/^v/i, '')
+  const names = [`AiRoute-${v}-${ARCH}.${EXT}`]
+  if (!IS_MAC) names.push('AiRoute.exe')
+  return names
 }
 
 let cached = null // 检查结果缓存 { at, data }
-let downloadState = { status: 'idle', tag: '', savePath: '', received: 0, total: 0, error: '' } // 下载状态
+let downloadState = { status: 'idle', tag: '', assetName: '', savePath: '', received: 0, total: 0, error: '' } // 下载状态
 
 // 读取本地版本号，兼容开发（server/../package.json）与打包（app/server/../../package.json）两种目录结构
 function getLocalVersion() {
@@ -52,12 +57,14 @@ async function fetchByApi() {
   })
   const data = res.data || {}
   if (!data.tag_name) throw new Error('API 返回缺少 tag_name')
-  const asset = (data.assets || []).find(a => a.name === assetNameFor(data.tag_name))
+  const names = assetCandidates(data.tag_name)
+  const asset = names.map(name => (data.assets || []).find(a => a.name === name)).find(Boolean)
   return {
     tag: data.tag_name,
     notes: data.body || '',
     publishedAt: data.published_at || '',
     size: asset ? asset.size : 0,
+    assetName: asset ? asset.name : '',
     pageUrl: data.html_url || `https://github.com/${REPO}/releases/tag/${data.tag_name}`
   }
 }
@@ -73,7 +80,7 @@ async function fetchByRedirect() {
   const location = (res.headers && res.headers.location) || ''
   const matched = location.match(/\/releases\/tag\/([^/?#]+)/)
   if (!matched) throw new Error('无法解析最新版本号')
-  return { tag: matched[1], notes: '', publishedAt: '', size: 0, pageUrl: `https://github.com/${REPO}/releases/tag/${matched[1]}` }
+  return { tag: matched[1], notes: '', publishedAt: '', size: 0, assetName: '', pageUrl: `https://github.com/${REPO}/releases/tag/${matched[1]}` }
 }
 
 // 检查更新：force=true 跳过 30 分钟缓存（设置页手动检查用）
@@ -89,6 +96,7 @@ async function checkUpdate(force) {
   }
   const current = getLocalVersion()
   const latest = info.tag.replace(/^v/i, '')
+  const assetName = info.assetName || assetCandidates(info.tag)[0]
   const data = {
     current,
     latest,
@@ -100,7 +108,9 @@ async function checkUpdate(force) {
     publishedAt: info.publishedAt,
     size: info.size,
     platform: IS_MAC ? 'mac' : 'win',
-    downloadUrl: `https://github.com/${REPO}/releases/download/${info.tag}/${assetNameFor(info.tag)}`
+    arch: ARCH,
+    assetName,
+    downloadUrl: `https://github.com/${REPO}/releases/download/${info.tag}/${assetName}`
   }
   cached = { at: Date.now(), data }
   return data
@@ -118,38 +128,59 @@ function getDownloadState() {
 function startDownload(tag, savePath) {
   if (downloadState.status === 'downloading') throw new Error('已有下载任务进行中')
   if (!tag || !savePath) throw new Error('缺少版本号或保存路径')
-  downloadState = { status: 'downloading', tag, savePath, received: 0, total: 0, error: '' }
+  downloadState = { status: 'downloading', tag, assetName: '', savePath, received: 0, total: 0, error: '' }
   runDownload(tag, savePath)
   return getDownloadState()
 }
 
-// 实际执行下载：流式写盘，完成后按 Content-Length 校验大小，异常写入错误状态
-async function runDownload(tag, savePath) {
-  try {
-    fs.ensureDirSync(path.dirname(savePath))
-    const url = `https://github.com/${REPO}/releases/download/${tag}/${assetNameFor(tag)}`
-    const res = await axios.get(url, {
-      responseType: 'stream',
-      timeout: 30000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    })
-    downloadState.total = Number(res.headers['content-length'] || 0)
-    await new Promise((resolve, reject) => {
-      const ws = fs.createWriteStream(savePath)
-      res.data.on('data', chunk => { downloadState.received += chunk.length })
-      res.data.on('error', reject)
-      ws.on('error', reject)
-      ws.on('finish', resolve)
-      res.data.pipe(ws)
-    })
-    if (downloadState.total && downloadState.received !== downloadState.total) {
-      throw new Error('文件大小校验失败，请重试')
-    }
-    downloadState.status = 'done'
-  } catch (e) {
-    downloadState.status = 'error'
-    downloadState.error = e.message || '下载失败'
+// 单个资产的流式下载：完成后按 Content-Length 校验大小，异常抛错交给候选循环
+async function downloadAsset(tag, assetName, savePath) {
+  const url = `https://github.com/${REPO}/releases/download/${tag}/${assetName}`
+  const res = await axios.get(url, {
+    responseType: 'stream',
+    timeout: 30000,
+    headers: { 'User-Agent': 'Mozilla/5.0' }
+  })
+  downloadState.received = 0
+  downloadState.total = Number(res.headers['content-length'] || 0)
+  await new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(savePath)
+    res.data.on('data', chunk => { downloadState.received += chunk.length })
+    res.data.on('error', reject)
+    ws.on('error', reject)
+    ws.on('finish', resolve)
+    res.data.pipe(ws)
+  })
+  if (downloadState.total && downloadState.received !== downloadState.total) {
+    throw new Error('文件大小校验失败，请重试')
   }
 }
 
-module.exports = { checkUpdate, startDownload, getDownloadState, getLocalVersion }
+// 实际执行下载：按候选资产名依次尝试（新命名优先，Windows 回落到旧名 AiRoute.exe），
+// 失败的分支会清掉半截文件，全部失败才置为 error 并汇总原因
+async function runDownload(tag, savePath) {
+  try {
+    fs.ensureDirSync(path.dirname(savePath))
+  } catch (e) {
+    downloadState.status = 'error'
+    downloadState.error = e.message || '下载失败'
+    return
+  }
+  const errors = []
+  for (const assetName of assetCandidates(tag)) {
+    try {
+      await downloadAsset(tag, assetName, savePath)
+      downloadState.assetName = assetName
+      downloadState.status = 'done'
+      return
+    } catch (e) {
+      errors.push(`${assetName}: ${e.message || '下载失败'}`)
+      try { fs.removeSync(savePath) } catch {}
+    }
+  }
+  downloadState.status = 'error'
+  downloadState.error = errors.join('；')
+}
+
+// assetCandidates 一并导出：离线测试用来锁死「构建产物名 ↔ 应用内更新拼出的下载名」这条约定
+module.exports = { checkUpdate, startDownload, getDownloadState, getLocalVersion, assetCandidates }

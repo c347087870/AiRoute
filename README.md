@@ -53,7 +53,10 @@
 
 ### 方式一：下载即用（推荐）
 
-到 [Releases](https://github.com/c347087870/AiRoute/releases) 下载对应的安装包，无需安装任何依赖：Windows 用 `AiRoute.exe`（便携版）；macOS（仅 Apple Silicon）用 `AiRoute-<版本>-arm64.dmg`，打开后把 AiRoute 拖入「应用程序」。
+到 [Releases](https://github.com/c347087870/AiRoute/releases) 下载对应的安装包，无需安装任何依赖。文件名里的 `<架构>` 按机器选 `x64`（Intel / AMD）或 `arm64`（Apple Silicon / Windows on ARM）：
+
+- **Windows**：`AiRoute-<版本>-x64.exe` 或 `AiRoute-<版本>-arm64.exe`，便携版，双击即用
+- **macOS**：`AiRoute-<版本>-arm64.dmg`（Apple Silicon）或 `AiRoute-<版本>-x64.dmg`（Intel），打开后把 AiRoute 拖入「应用程序」
 
 > macOS 包未公证，首次打开若被 Gatekeeper 拦下：右键 `AiRoute.app` → 打开，或执行 `xattr -cr /Applications/AiRoute.app`。
 
@@ -293,12 +296,13 @@ AiRoute 只转发「当前激活模型」，客户端里填的模型名仅是占
 ```bash
 pnpm dev        # 开发模式（Electron 应用）
 pnpm dev:web    # 只启动服务与前端（浏览器访问 http://localhost:5173）
-pnpm build      # 按当前平台打包（Windows → AiRoute.exe；macOS → AiRoute-<版本>-arm64.dmg）
+pnpm build      # 按当前平台打包，一次出 x64 + arm64：Windows → AiRoute-<版本>-{x64,arm64}.exe；macOS → AiRoute-<版本>-{arm64,x64}.dmg
 pnpm test       # WorkBuddy 模块离线测试
 pnpm test:e2e   # 端到端冒烟测试（本地 mock 上游，覆盖三条协议链路）
 ```
 
-> 产物在 `app/dist-electron/`。exe 只能在 Windows 上构建、dmg 只能在 macOS 上构建。
+> 产物在 `app/dist-electron/`。exe 只能在 Windows 上构建、dmg 只能在 macOS 上构建（交叉架构可以，跨系统不行）。
+> 架构列表与产物命名以 `electron-builder.json` 的 `target.arch` / `artifactName` 为准，`scripts/targets.js` 读取它，构建与发布自检不在脚本里另写一份。
 > 打包脚本会自动排除 API Key、WorkBuddy 凭证、个人配置（`state.json` / `server-config.json` 等）与运行数据，产物可放心分发。
 > 打完后跑 `node scripts/verify-release.js` 自检（版本一致性、平台元数据、签名、产物大小与 SHA256）。
 > macOS 包为 ad-hoc 签名（`electron-builder.json` 的 `mac.identity`），未公证；换 Developer ID + 公证需把 `identity` 改为证书名、`hardenedRuntime` 改回 `true`，并补 `APPLE_*` 环境变量。

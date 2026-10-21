@@ -1,6 +1,7 @@
 const { spawn, execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs-extra')
+const { targetArches, artifactName, asarPath, unpackedDirs } = require('./targets')
 
 // 二进制下载源：默认 npmmirror（国内快），可被 AIROUTE_ELECTRON_SOURCE 覆盖：
 //   official      -> 清掉镜像变量，走 GitHub 官方源（CI / 海外环境用）
@@ -42,13 +43,8 @@ if (!isMac && targetPlatform !== 'win32') {
   process.exit(1)
 }
 
-// macOS 产物命名（与 electron-builder.json 的 mac.artifactName 模板一致；当前只出 arm64）
-const macDmgName = (version) => `AiRoute-${version}-arm64.dmg`
-const macAppDir = path.join(buildOutputDir, 'mac-arm64', 'AiRoute.app')
-const macInfoPlist = path.join(macAppDir, 'Contents', 'Info.plist')
-const macAsarPath = path.join(macAppDir, 'Contents', 'Resources', 'app.asar')
-const winExePath = path.join(buildOutputDir, 'AiRoute.exe')
-const winAsarPath = path.join(buildOutputDir, 'win-unpacked', 'resources', 'app.asar')
+// 目标架构：electron-builder.json 的 target.arch（x64 + arm64），脚本不另写一份
+const arches = targetArches()
 
 // 复制 server 文件到 app/server/ 供打包
 // 排除：API Key、依赖、日志，以及 WorkBuddy 凭证与个人运行数据（避免随公开发布泄露）
@@ -143,51 +139,67 @@ function syncToRelease() {
   }
 }
 
-// 打包后版本自检：asar 内应用 package.json 与平台产物元数据必须与根 package.json 一致，
-// 不一致直接失败，避免版本错误的产物被同步到 release
+// 打包后版本自检：每个架构的 asar 内应用 package.json 与平台产物元数据必须与根 package.json 一致，
+// 任一架构缺失或版本不一致直接失败，避免版本错误的产物被同步到 release
 function verifyBuild(version) {
   const errors = []
-  const asarPath = isMac ? macAsarPath : winAsarPath
+  const dirs = unpackedDirs(buildOutputDir)
 
-  try {
-    const raw = fs.readFileSync(asarPath).toString('latin1')
-    const m = raw.match(/"name":\s*"aiRoute",\s*"version":\s*"([^"]+)"/)
-    if (!m) errors.push('asar 内未找到应用 package.json 的版本号')
-    else if (m[1] !== version) errors.push(`asar 内版本 ${m[1]} != package.json 的 ${version}`)
-  } catch (err) {
-    errors.push(`读取 asar 失败: ${err.message}`)
+  if (!dirs.length) errors.push('未找到解包目录（没有任何目录包含 app.asar）')
+
+  for (const dir of dirs) {
+    const label = path.basename(dir)
+    try {
+      const raw = fs.readFileSync(asarPath(dir)).toString('latin1')
+      const m = raw.match(/"name":\s*"aiRoute",\s*"version":\s*"([^"]+)"/)
+      if (!m) errors.push(`${label}: asar 内未找到应用 package.json 的版本号`)
+      else if (m[1] !== version) errors.push(`${label}: asar 内版本 ${m[1]} != package.json 的 ${version}`)
+    } catch (err) {
+      errors.push(`${label}: 读取 asar 失败: ${err.message.split('\n')[0]}`)
+    }
   }
 
   if (isMac) {
-    try {
-      const meta = execSync(`plutil -extract CFBundleShortVersionString raw -o - "${macInfoPlist}"`, { encoding: 'utf8' }).trim()
-      if (meta !== version) errors.push(`Info.plist 版本 ${meta} != package.json 的 ${version}`)
-    } catch (err) {
-      errors.push(`读取 Info.plist 版本失败: ${err.message.split('\n')[0]}`)
+    for (const dir of dirs) {
+      const label = path.basename(dir)
+      const appDir = path.join(dir, 'AiRoute.app')
+      const plist = path.join(appDir, 'Contents', 'Info.plist')
+
+      try {
+        const meta = execSync(`plutil -extract CFBundleShortVersionString raw -o - "${plist}"`, { encoding: 'utf8' }).trim()
+        if (meta !== version) errors.push(`${label}: Info.plist 版本 ${meta} != package.json 的 ${version}`)
+      } catch (err) {
+        errors.push(`${label}: 读取 Info.plist 版本失败: ${err.message.split('\n')[0]}`)
+      }
+
+      // 未公证包至少要有 ad-hoc 签名，签名缺失/失效会导致用户侧直接无法启动
+      try {
+        execSync(`codesign --verify --deep --strict "${appDir}"`, { stdio: 'pipe' })
+        const info = execSync(`codesign -dv --verbose=2 "${appDir}" 2>&1`, { encoding: 'utf8' })
+        if (!/Signature=adhoc/.test(info)) errors.push(`${label}: 未检测到 ad-hoc 签名（预期 identity: "-"）`)
+      } catch (err) {
+        errors.push(`${label}: 签名校验失败（app 将无法启动）: ${err.message.split('\n')[0]}`)
+      }
     }
 
-    // arm64 强制要求至少 ad-hoc 签名，签名缺失/失效会导致用户侧直接无法启动
-    try {
-      execSync(`codesign --verify --deep --strict "${macAppDir}"`, { stdio: 'pipe' })
-      const info = execSync(`codesign -dv --verbose=2 "${macAppDir}" 2>&1`, { encoding: 'utf8' })
-      if (!/Signature=adhoc/.test(info)) errors.push('未检测到 ad-hoc 签名（预期 identity: "-"）')
-    } catch (err) {
-      errors.push(`签名校验失败（app 将无法在 Apple Silicon 上启动）: ${err.message.split('\n')[0]}`)
-    }
-
-    const dmg = path.join(buildOutputDir, macDmgName(version))
-    try {
-      const size = fs.statSync(dmg).size
-      if (size < 10 * 1024 * 1024) errors.push(`dmg 体积异常: ${(size / 1024 / 1024).toFixed(1)} MB`)
-    } catch (err) {
-      errors.push(`未找到 dmg 产物 ${macDmgName(version)}: ${err.message.split('\n')[0]}`)
+    for (const arch of arches) {
+      const dmg = path.join(buildOutputDir, artifactName(version, arch))
+      try {
+        const size = fs.statSync(dmg).size
+        if (size < 10 * 1024 * 1024) errors.push(`${artifactName(version, arch)} 体积异常: ${(size / 1024 / 1024).toFixed(1)} MB`)
+      } catch (err) {
+        errors.push(`未找到 dmg 产物 ${artifactName(version, arch)}: ${err.message.split('\n')[0]}`)
+      }
     }
   } else {
-    try {
-      const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${winExePath}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
-      if (meta !== version) errors.push(`exe 元数据版本 ${meta} != package.json 的 ${version}`)
-    } catch (err) {
-      errors.push(`读取 exe 元数据失败: ${err.message.split('\n')[0]}`)
+    for (const arch of arches) {
+      const exe = path.join(buildOutputDir, artifactName(version, arch))
+      try {
+        const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${exe}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
+        if (meta !== version) errors.push(`${artifactName(version, arch)}: exe 元数据版本 ${meta} != package.json 的 ${version}`)
+      } catch (err) {
+        errors.push(`${artifactName(version, arch)}: 读取 exe 元数据失败或产物缺失: ${err.message.split('\n')[0]}`)
+      }
     }
   }
 
@@ -196,12 +208,12 @@ function verifyBuild(version) {
     for (const e of errors) console.error(`  - ${e}`)
     process.exit(1)
   }
-  console.log(`[aiRoute] ✔ 版本自检通过：${isMac ? 'asar / Info.plist / ad-hoc 签名' : 'asar / exe 元数据'}均为 ${version}`)
+  console.log(`[aiRoute] ✔ 版本自检通过：${arches.join(' / ')} 的 ${isMac ? 'asar / Info.plist / ad-hoc 签名 / dmg' : 'asar / exe 元数据'}均为 ${version}`)
 }
 
 // === 构建流程 ===
 
-console.log(`[aiRoute] 正在清理构建环境...（目标平台: ${targetPlatform}）`)
+console.log(`[aiRoute] 正在清理构建环境...（目标平台: ${targetPlatform}，架构: ${arches.join(' / ')}）`)
 killAppProcesses()
 cleanDir(buildOutputDir, 'dist-electron')
 
@@ -230,8 +242,8 @@ buildRenderer.on('close', (code) => {
 
   // --publish never：electron-builder 检测到在 tag 上构建会隐式 publish（默认 onTagOrDraft），
   // CI 里没有 GH_TOKEN 会直接失败；发布统一交给 workflow 的 gh release，这里显式关掉
-  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', '--publish', 'never', isMac ? '--mac' : '--win']
-  if (isMac) builderArgs.push('--arm64')
+  // 架构显式传给 electron-builder：多架构时产物名里的 ${arch} 才能各自展开成独立文件
+  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', '--publish', 'never', isMac ? '--mac' : '--win', ...arches.map(arch => `--${arch}`)]
 
   const buildApp = spawn('npx', builderArgs, {
     cwd: root,
@@ -249,7 +261,7 @@ buildRenderer.on('close', (code) => {
     }
     const version = require(path.join(root, 'package.json')).version
     console.log('[aiRoute] 打包完成！')
-    console.log(isMac ? `[aiRoute] 输出: app/dist-electron/${macDmgName(version)}` : '[aiRoute] 输出: app/dist-electron/AiRoute.exe')
+    console.log(`[aiRoute] 输出: ${arches.map(arch => `app/dist-electron/${artifactName(version, arch)}`).join('、')}`)
     verifyBuild(version)
     syncToRelease()
   })

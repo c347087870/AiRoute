@@ -142,7 +142,7 @@ const { info, checking, downloading, percent, savedPath, error, runCheck, startD
 // 安装方式提示：macOS 是 dmg 拖拽覆盖，Windows 是替换 exe 文件（平台取自服务端更新接口，见 useUpdate）
 const installHint = computed(() => info.value?.platform === 'mac'
   ? '下载完成后打开 dmg，把 AiRoute 拖到「应用程序」覆盖旧版本（不会自动替换）'
-  : '下载完成后请退出 AiRoute，用新文件替换当前 AiRoute.exe（不会自动替换）')
+  : '下载完成后请退出 AiRoute，用新文件替换当前的 AiRoute-*.exe（不会自动替换）')
 
 // 统一提取接口错误信息用于提示
 function errorText(err) {

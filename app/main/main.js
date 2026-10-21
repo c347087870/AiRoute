@@ -221,9 +221,12 @@ ipcMain.handle('set-auto-launch', (_, enabled) => {
 // 更新功能：选择新版本安装包的保存位置（默认落到系统下载目录）
 ipcMain.handle('save-file-dialog', async (_, defaultName) => {
   const isMac = process.platform === 'darwin'
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
+  // 与 Release 资产命名一致：AiRoute-<版本>-<架构>.<ext>（渲染进程一般会传入服务端解析出的 assetName）
+  const fallbackName = `AiRoute-${app.getVersion()}-${arch}.${isMac ? 'dmg' : 'exe'}`
   const options = {
     title: '保存新版本安装包',
-    defaultPath: path.join(app.getPath('downloads'), defaultName || (isMac ? 'AiRoute.dmg' : 'AiRoute.exe')),
+    defaultPath: path.join(app.getPath('downloads'), defaultName || fallbackName),
     filters: [isMac ? { name: '磁盘映像', extensions: ['dmg'] } : { name: '可执行文件', extensions: ['exe'] }]
   }
   const result = mainWindow && mainWindow.isVisible()
