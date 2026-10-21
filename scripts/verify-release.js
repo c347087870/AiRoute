@@ -1,16 +1,17 @@
 // 上传前版本检查：校验 package.json / asar / 平台产物元数据 / CHANGELOG 版本一致
 // 用法：node scripts/verify-release.js（退出码 0 = 全部通过；非 0 = 存在失败项）
-//   Windows：校验每个架构 exe 的元数据（powershell）
+//   Windows：校验每个架构的安装版（-setup.exe）与便携版 exe 元数据（powershell）
 //   macOS  ：校验每个架构 Info.plist 版本、ad-hoc 签名、dmg 产物
-// 架构列表与产物命名取自 scripts/targets.js（源头是 electron-builder.json 的 target.arch）
+// 目标与产物命名取自 scripts/targets.js（源头是 electron-builder.json 的 target / artifactName）
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { execSync } = require('child_process')
-const { root, isMac, targetArches, artifactName, asarPath, unpackedDirs } = require('./targets')
+const { root, isMac, targetArches, artifacts, asarPath, unpackedDirs } = require('./targets')
 
 const version = require(path.join(root, 'package.json')).version
 const arches = targetArches()
+const builds = artifacts(version)
 const results = []
 
 function check(name, ok, detail) {
@@ -76,9 +77,9 @@ if (isMac) {
     }
   }
 } else {
-  for (const arch of arches) {
+  for (const { name } of builds) {
     for (const outDir of ['app/dist-electron', 'app/release']) {
-      readMeta(path.join(outDir, artifactName(version, arch)))
+      readMeta(path.join(outDir, name))
     }
   }
 }
@@ -91,12 +92,11 @@ try {
   check('CHANGELOG 顶部版本', false, err.message)
 }
 
-// ④ release 产物大小与 SHA256（发布说明中需与上传资产一致），逐架构
+// ④ release 产物大小与 SHA256（发布说明中需与上传资产一致），逐个产物
 // 用 node 自带 crypto 计算：Windows 上 powershell 的 Get-FileHash 会因模块未自动加载而失败
 const minSize = isMac ? 10 * 1024 * 1024 : 1024 * 1024
 const shas = []
-for (const arch of arches) {
-  const name = artifactName(version, arch)
+for (const { name } of builds) {
   const assetPath = path.join(root, 'app', 'release', name)
   try {
     const size = fs.statSync(assetPath).size
@@ -109,7 +109,7 @@ for (const arch of arches) {
 }
 
 let failed = 0
-console.log(`基线版本（package.json）: ${version}（平台 ${isMac ? 'macOS' : 'Windows'}，架构 ${arches.join(' / ')}）\n`)
+console.log(`基线版本（package.json）: ${version}（平台 ${isMac ? 'macOS' : 'Windows'}，架构 ${arches.join(' / ')}，产物 ${builds.map(b => b.target).join(' / ')}）\n`)
 for (const r of results) {
   console.log(`${r.ok ? '✔' : '✖'} ${r.name}: ${r.detail}`)
   if (!r.ok) failed++

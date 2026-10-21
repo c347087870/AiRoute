@@ -4,6 +4,7 @@ const net = require('net')
 const http = require('http')
 const { createTray, refreshTrayMenu } = require('./tray')
 const updater = require('./updater')
+const installKind = require('./install-kind')
 
 // 单实例：重复启动时聚焦已有窗口并退出本次，避免多托盘实例与端口争用
 const gotTheLock = app.requestSingleInstanceLock()
@@ -124,6 +125,9 @@ app.whenReady().then(async () => {
     process.env.AIROUTE_DATA_DIR = dataDir
     // 一键升级的安装包托管目录：主进程替换安装与 server 下载共用同一路径
     process.env.AIROUTE_UPDATE_DIR = path.join(app.getPath('userData'), 'updates')
+    // 运行形态（安装版 / 便携版）：server 据此选择下载哪个安装包，主进程据此判断能否一键升级。
+    // 判定依赖 electron-builder 的 portable 目标注入的环境变量，必须在启动 server 前完成
+    process.env.AIROUTE_INSTALL_KIND = installKind.detectInstallKind()
     // 首次启动：从 ASAR 中拷贝初始配置文件到可写目录
     const fs = require('fs-extra')
     fs.ensureDirSync(dataDir)
@@ -247,8 +251,10 @@ ipcMain.handle('update-rollback', () => updater.startRollback())
 ipcMain.handle('save-file-dialog', async (_, defaultName) => {
   const isMac = process.platform === 'darwin'
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
-  // 与 Release 资产命名一致：AiRoute-<版本>-<架构>.<ext>（渲染进程一般会传入服务端解析出的 assetName）
-  const fallbackName = `AiRoute-${app.getVersion()}-${arch}.${isMac ? 'dmg' : 'exe'}`
+  // 与 Release 资产命名一致（渲染进程一般会传入服务端解析出的 assetName）：
+  // macOS → AiRoute-<版本>-<架构>.dmg；Windows 安装版 → ...-setup.exe，便携版 → ...-portable.exe
+  const winSuffix = installKind.detectInstallKind() === installKind.KIND.PORTABLE ? '-portable' : '-setup'
+  const fallbackName = `AiRoute-${app.getVersion()}-${arch}${isMac ? '' : winSuffix}.${isMac ? 'dmg' : 'exe'}`
   const options = {
     title: '保存新版本安装包',
     defaultPath: path.join(app.getPath('downloads'), defaultName || fallbackName),

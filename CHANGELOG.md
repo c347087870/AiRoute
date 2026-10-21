@@ -2,6 +2,28 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.9.0] - 2026-10-21
+
+Windows 从「只有一个免安装 exe」扩成两种分发形态：便携版继续免安装，另外新增可一键升级的安装版。
+
+### 新增
+
+- **Windows 安装版（NSIS 向导式）**：`oneClick: false` + `perMachine: false` + `allowElevation: false`，安装向导可选安装目录、建桌面 / 开始菜单快捷方式，装到当前用户目录，**全程不弹 UAC**——这是「一键升级能静默跑完」的前提
+- **安装版应用内一键升级**：Windows 无法在运行中替换自身 exe，改为「独立助手进程等主进程退出 → 静默运行安装包 → 拉起新版本」。主流程：安装包 SHA-256 落盘后再校验一次 → 以 `ELECTRON_RUN_AS_NODE` detached 拉起 `app/main/win-update-helper.js` → 主进程退出 → 助手轮询主进程 PID 消失后执行 `安装包 /S --updated` → 启动安装后的应用（安装失败或等待超时则拉起旧版本，避免用户面前一个窗口都没有）。升级状态写入 journal（`installing` / `installed` / `error`），下次启动据此提示结果；Windows 无备份 / 回读 / 自动回滚（macOS 流程不变）
+- **运行形态判定** `app/main/install-kind.js`：只认 electron-builder portable 目标注入的 `PORTABLE_EXECUTABLE_FILE` / `PORTABLE_EXECUTABLE_DIR`（便携版解包后的目录结构与安装版完全一致，靠文件特征区分不了），主进程把结果写进 `AIROUTE_INSTALL_KIND` 供 server 复用
+
+### 变更
+
+- **Windows 产物由 2 个变 4 个**（每个架构各出两份）：安装版 `AiRoute-<版本>-<arch>-setup.exe`、便携版 `AiRoute-<版本>-<arch>-portable.exe`（两类一眼可辨，不必靠「没有 -setup」反推）。`nsis` / `portable` 均设 `buildUniversalInstaller: false`，否则 electron-builder 会额外合成一个丢掉 `${arch}` 的 `AiRoute-<版本>-setup.exe`，与更新拼名规则对不上。便携版改名的旧名兼容由 Release 上的 `AiRoute.exe`（x64 便携副本，workflow 生成）承担：≤ v1.8.1 客户端手动下载只拼旧名，会回落到它
+- **一键升级只接受安装版安装包**：Windows 上便携包带 `/S` 运行只会解包并启动自己（等于开了第二个实例），`installAssetCandidates` 在安装版形态下过滤掉便携包，主进程 `startInstall` 与 `updater-core.isWindowsSetupArtifact` 也会拒绝非 `-setup.exe`
+- **便携版不支持一键升级**：`server/update.js` 的 `canOneClick()` 判定 + 检查更新返回 `installKind` / `oneClick`；设置页与侧边栏按形态给出「立即升级」或「手动下载」，手动保存对话框的默认文件名也按形态区分（`-setup.exe` / `-portable.exe`）
+- **构建 / 发布自检改为按产物逐个校验**：`scripts/targets.js` 不再手写产物名，改为从 `electron-builder.json` 的 target + `artifactName` 模板推导（`artifacts()` / `artifactsFor()`），`build.js` 与 `verify-release.js` 对 4 个产物逐个校验 exe 元数据版本与体积
+
+### 测试
+
+- `scripts/test-update.js` 由 13 项扩到 25 项：新增「安装版一键升级（Windows）」4 项（校验通过才拉起助手 / SHA-256 不匹配不拉起 / 便携包拒绝 / 托管目录外拒绝）与「安装助手」7 项（参数解析、轮询等待与超时、`/S --updated` 调用、成功路径、安装失败拉起旧版本、等待超时、缺安装包）；测试框架改为同步 + 异步用例统一排队
+- `test-workbuddy.js` 第 21 组重写为「构建产物名 ↔ 一键升级资产名一致」：从 `electron-builder.json` 推出产物名，再断言 `server/update.js` 拼出的资产名能命中，改命名时两侧不会各说各话
+
 ## [1.8.1] - 2026-10-21
 
 对照参考实现 `linguo2625469/workbuddy2api-panel`（已停更，截至 `73a7560`）的近期提交，逐条重写在本项目技术栈（Node + Vue 3）上，集中修复「协议缺陷」与「静默丢收益」两类问题。
