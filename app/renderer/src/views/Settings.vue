@@ -188,7 +188,8 @@ const clearing = ref(false) // 清空缓存进行中
 const {
   info, checking, stage, stageText, percent, error, installError, rolledBack, savedPath,
   downloading, busy, supported, unsupportedReason, backup, lastResult,
-  runCheck, oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus
+  runCheck, oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus,
+  isMacPlatform, isWinInstaller
 } = useUpdate()
 
 // 一键升级按钮文案：按阶段展示当前动作，失败后变成重试
@@ -197,7 +198,7 @@ const primaryLabel = computed(() => {
     case 'downloading': return `下载中 ${percent.value}%`
     case 'verifying': return '校验安装包…'
     case 'backing-up': return '备份中…'
-    case 'replacing': return '替换中…'
+    case 'replacing': return '安装中…'
     case 'readback': return '回读校验…'
     case 'restarting': return '正在重启…'
     case 'error': return `重试升级到 v${info.value?.latest || ''}`
@@ -205,10 +206,13 @@ const primaryLabel = computed(() => {
   }
 })
 
-// 安装方式提示：macOS 自动替换失败时才需要手动拖拽；Windows 仍为手动替换
-const installHint = computed(() => info.value?.platform === 'mac'
-  ? '一键升级会下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启；任一步失败自动回滚'
-  : '下载完成后请退出 AiRoute，用新文件替换当前的 AiRoute-*.exe（不会自动替换）')
+// 安装方式提示：macOS 走原子替换 + 自动回滚；Windows 安装版走静默安装（无自动回滚）；
+// Windows 便携版不支持一键升级，只能手动下载替换
+const installHint = computed(() => {
+  if (isMacPlatform()) return '一键升级会下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启；任一步失败自动回滚'
+  if (isWinInstaller()) return '一键升级会下载安装包 → SHA-256 校验 → 退出应用 → 静默安装 → 自动重启；安装失败会重新启动当前版本（无自动回滚）'
+  return '便携版不支持一键升级：下载安装包后手动替换 exe。改用安装版（文件名带 -setup，便携版是 -portable）即可一键升级'
+})
 
 // 统一提取接口错误信息用于提示
 function errorText(err) {

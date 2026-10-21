@@ -19,10 +19,11 @@ const backup = ref(null)        // 可回滚的备份 { version, path }
 const lastResult = ref(null)    // 上次升级结果（启动时从主进程 journal 恢复）
 
 // 各阶段的展示文案；下载阶段额外带百分比
+// replacing 在 macOS 是「原子替换 .app」，在 Windows 安装版是「运行安装包」，用中性文案覆盖两者
 const STAGE_TEXT = {
   verifying: '校验 SHA-256…',
   'backing-up': '备份当前版本…',
-  replacing: '原子替换应用…',
+  replacing: '正在安装新版本…',
   readback: '回读校验新版本…',
   restarting: '升级完成，正在重启…'
 }
@@ -45,6 +46,11 @@ let pollTimer = null      // 下载 / 安装进度轮询定时器
 // 前端只按它决定扩展名与安装提示，避免两处各判一次
 function isMacPlatform() {
   return info.value?.platform === 'mac'
+}
+
+// Windows 安装版（NSIS）：唯一能在 Windows 上一键升级的形态；便携版只能手动下载替换
+function isWinInstaller() {
+  return info.value?.platform === 'win' && info.value?.installKind !== 'portable'
 }
 
 // 检查更新：silent=true（启动自动检查）失败不打扰；手动检查成功/失败均有提示
@@ -214,11 +220,13 @@ async function oneClickUpdate() {
     return false
   }
   const target = `v${info.value.latest}`
-  const confirmed = window.confirm(
-    `一键升级到 ${target}：\n\n` +
-    '自动下载 → SHA-256 校验 → 备份当前版本 → 原子替换 → 回读校验 → 重启应用。\n' +
-    '任一步失败会自动回滚到当前版本。升级期间请勿退出应用，进行中的请求会中断。\n\n继续？'
-  )
+  const steps = isWinInstaller()
+    ? '自动下载安装包 → SHA-256 校验 → 退出应用 → 静默安装 → 自动重启。\n' +
+      '安装失败时会重新启动当前版本（Windows 不做自动回滚），可再用手动下载安装包重试。\n' +
+      '升级期间请勿手动关闭安装程序，进行中的请求会中断。'
+    : '自动下载 → SHA-256 校验 → 备份当前版本 → 原子替换 → 回读校验 → 重启应用。\n' +
+      '任一步失败会自动回滚到当前版本。升级期间请勿退出应用，进行中的请求会中断。'
+  const confirmed = window.confirm(`一键升级到 ${target}：\n\n${steps}\n\n继续？`)
   if (!confirmed) return false
 
   installError.value = ''
@@ -281,7 +289,9 @@ async function manualDownload() {
   if (!state) return false
   savedPath.value = state.savePath || savePath
   stage.value = 'idle'
-  showToast(isMacPlatform() ? '安装包已下载完成，可双击 dmg 手动安装' : '安装包已下载完成，可退出 AiRoute 后替换程序')
+  if (isMacPlatform()) showToast('安装包已下载完成，可双击 dmg 手动安装')
+  else if (isWinInstaller()) showToast('安装包已下载完成，双击安装即可（安装版支持一键升级）')
+  else showToast('安装包已下载完成，可退出 AiRoute 后替换程序（安装版支持一键升级）')
   return true
 }
 
@@ -365,6 +375,7 @@ export function useUpdate() {
     openReleasePage,
     initUpdate,
     refreshInstallStatus,
-    isMacPlatform
+    isMacPlatform,
+    isWinInstaller
   }
 }

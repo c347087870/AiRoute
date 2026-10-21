@@ -73,19 +73,21 @@ const navItems = [
 ]
 
 // 更新功能共享状态（发现新版本时底部显示一键升级提示条）
-const { info, busy, stageText, installError, initUpdate, oneClickUpdate } = useUpdate()
+const { info, busy, stageText, installError, supported, initUpdate, oneClickUpdate } = useUpdate()
 
 // 是否显示更新提示条（仅在发现新版本时可见）
 const showUpdate = computed(() => !!info.value?.hasUpdate)
 
-// 提示条文案：升级中显示当前阶段，失败可点击重试，空闲时提示一键升级
+// 提示条文案：升级中显示当前阶段，失败可点击重试；
+// 不支持一键升级（便携版 / 浏览器模式）时只提示新版本，点击会给出原因与手动下载指引
 const updateText = computed(() => {
   if (busy.value) return stageText.value || '升级中…'
   if (installError.value) return '升级失败，点击重试'
+  if (!supported.value) return `发现新版本 v${info.value.latest} · 手动下载`
   return `发现新版本 v${info.value.latest} · 一键升级`
 })
 
-// 点击提示条：直接走一键升级（下载 → 校验 → 备份 → 替换 → 回读 → 重启）
+// 点击提示条：直接走一键升级（下载 → 校验 → 备份 / 安装 → 重启）
 function onUpdateClick() {
   if (busy.value) return
   oneClickUpdate()

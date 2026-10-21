@@ -55,7 +55,8 @@
 
 到 [Releases](https://github.com/c347087870/AiRoute/releases) 下载对应的安装包，无需安装任何依赖。文件名里的 `<架构>` 按机器选 `x64`（Intel / AMD）或 `arm64`（Apple Silicon / Windows on ARM）：
 
-- **Windows**：`AiRoute-<版本>-x64.exe` 或 `AiRoute-<版本>-arm64.exe`，便携版，双击即用
+- **Windows（安装版，推荐）**：`AiRoute-<版本>-x64-setup.exe` 或 `AiRoute-<版本>-arm64-setup.exe`，双击安装（默认装到当前用户，无需管理员权限），**支持应用内一键升级**
+- **Windows（便携版）**：`AiRoute-<版本>-x64-portable.exe` 或 `AiRoute-<版本>-arm64-portable.exe`，双击即用，**不支持一键升级**，新版本需手动下载后替换 exe
 - **macOS**：`AiRoute-<版本>-arm64.dmg`（Apple Silicon）或 `AiRoute-<版本>-x64.dmg`（Intel），打开后把 AiRoute 拖入「应用程序」
 
 > macOS 包未公证，首次打开若被 Gatekeeper 拦下：右键 `AiRoute.app` → 打开，或执行 `xattr -cr /Applications/AiRoute.app`。
@@ -68,7 +69,11 @@
 
 然后把任意客户端指向 `http://localhost:3000`（见「接入客户端」）。
 
-> **更新**：启动后会静默检查 GitHub Releases，有新版本时侧边栏会提示。macOS 支持**一键升级**：下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 自动重启，任一步失败自动回滚到上一版本（要求应用位于「应用程序」且目录可写）。Windows 仍为「设置 → 关于与更新 → 手动下载安装包」后替换 exe。
+> **更新**：启动后会静默检查 GitHub Releases，有新版本时侧边栏会提示。**macOS** 与 **Windows 安装版**支持**一键升级**：
+> - macOS：下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 自动重启，任一步失败自动回滚到上一版本（要求应用位于「应用程序」且目录可写）
+> - Windows 安装版：下载 → SHA-256 校验 → 退出应用 → 静默安装 → 自动重启；失败时会重新启动当前版本（Windows 无自动回滚）
+>
+> **Windows 便携版不支持一键升级**：在「设置 → 关于与更新」里手动下载安装包，退出 AiRoute 后替换 exe（想用一键升级请改装安装版）。两类产物看文件名即可区分：安装版 `-setup.exe`，便携版 `-portable.exe`。
 
 ### 方式二：源码运行
 
@@ -296,15 +301,16 @@ AiRoute 只转发「当前激活模型」，客户端里填的模型名仅是占
 ```bash
 pnpm dev        # 开发模式（Electron 应用）
 pnpm dev:web    # 只启动服务与前端（浏览器访问 http://localhost:5173）
-pnpm build      # 按当前平台打包，一次出 x64 + arm64：Windows → AiRoute-<版本>-{x64,arm64}.exe；macOS → AiRoute-<版本>-{arm64,x64}.dmg
-pnpm test       # WorkBuddy 模块 + 一键升级（校验 / 替换 / 回滚）离线测试
+pnpm build      # 按当前平台打包，一次出 x64 + arm64：Windows → AiRoute-<版本>-{x64,arm64}-setup.exe（安装版）+ AiRoute-<版本>-{x64,arm64}-portable.exe（便携版）；macOS → AiRoute-<版本>-{arm64,x64}.dmg
+pnpm test       # WorkBuddy 模块 + 一键升级（校验 / 替换 / 回滚 / Windows 静默安装助手）离线测试
 pnpm test:e2e   # 端到端冒烟测试（本地 mock 上游，覆盖三条协议链路）
 ```
 
 > 产物在 `app/dist-electron/`。exe 只能在 Windows 上构建、dmg 只能在 macOS 上构建（交叉架构可以，跨系统不行）。
-> 架构列表与产物命名以 `electron-builder.json` 的 `target.arch` / `artifactName` 为准，`scripts/targets.js` 读取它，构建与发布自检不在脚本里另写一份。
+> 架构列表与产物命名以 `electron-builder.json` 的 `target` / `artifactName`（安装版见 `nsis.artifactName`）为准，`scripts/targets.js` 读取它，构建与发布自检不在脚本里另写一份。
 > 打包脚本会自动排除 API Key、WorkBuddy 凭证、个人配置（`state.json` / `server-config.json` 等）与运行数据，产物可放心分发。
 > 打完后跑 `node scripts/verify-release.js` 自检（版本一致性、平台元数据、签名、产物大小与 SHA256）。
+> 打包会结束「从 `app/dist-electron` / `app/release` 启动」的实例（构建要覆盖这些文件），但**不会**动你自己安装或拷到别处运行的 AiRoute；想完全不动任何进程，加 `--no-kill`（如 `pnpm build -- --no-kill`）。
 > macOS 包为 ad-hoc 签名（`electron-builder.json` 的 `mac.identity`），未公证；换 Developer ID + 公证需把 `identity` 改为证书名、`hardenedRuntime` 改回 `true`，并补 `APPLE_*` 环境变量。
 > 国内网络安装依赖较慢时，可改用镜像：`pnpm config set registry https://registry.npmmirror.com`
 

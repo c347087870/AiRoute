@@ -1,7 +1,7 @@
 const { spawn, execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs-extra')
-const { targetArches, artifactName, asarPath, unpackedDirs } = require('./targets')
+const { targetArches, artifacts, asarPath, unpackedDirs } = require('./targets')
 
 // 二进制下载源：默认 npmmirror（国内快），可被 AIROUTE_ELECTRON_SOURCE 覆盖：
 //   official      -> 清掉镜像变量，走 GitHub 官方源（CI / 海外环境用）
@@ -72,20 +72,48 @@ function cleanServerDir() {
   try { fs.removeSync(serverBldDir) } catch {}
 }
 
-// 强制终止所有残留的 Electron/AiRoute 进程
-function killProcesses(names) {
-  for (const name of names) {
-    try { execSync(`taskkill /F /IM ${name} /T`, { stdio: 'pipe' }) } catch {}
+// 结束「从构建输出目录启动」的实例：构建要覆盖 dist-electron / release 里的文件，
+// 被占用的 exe 会让 electron-builder 报 EBUSY/EPERM。
+// 只按可执行文件路径匹配，绝不按进程名全局杀——用户自己安装的 AiRoute（%LOCALAPPDATA%\Programs、
+// Program Files、或拷到别处跑的副本）不在构建范围里，构建不该把它顶掉。
+// 想彻底不碰任何进程：加 --no-kill（CI 里目录是干净的，通常也无需杀）
+function killBuildOutputProcesses() {
+  if (process.argv.includes('--no-kill') || process.env.AIROUTE_BUILD_NO_KILL === '1') {
+    console.log('[aiRoute] 已跳过结束残留进程（--no-kill）')
+    return
   }
-}
-
-// 按平台结束残留进程：macOS 只匹配 app bundle 里的可执行文件，避免误杀构建进程本身
-function killAppProcesses() {
+  const dirs = [buildOutputDir, releaseDir]
   if (isMac) {
-    try { execSync(`pkill -f "AiRoute.app/Contents/MacOS/"`, { stdio: 'pipe' }) } catch {}
-  } else {
-    killProcesses(['electron.exe', 'AiRoute.exe', 'aiRoute.exe'])
+    for (const dir of dirs) {
+      // pkill -f 用 ERE 匹配完整命令行，路径里的正则元字符需转义
+      const pattern = `${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/.*AiRoute\\.app/Contents/MacOS/`
+      try { execSync(`pkill -f "${pattern}"`, { stdio: 'pipe' }) } catch {}
+    }
+    return
   }
+  // Windows：用 CIM 查可执行文件路径（Get-Process 读 .Path 对部分进程会抛访问拒绝）
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$dirs = [Environment]::GetEnvironmentVariable('AIROUTE_BUILD_OUT_DIRS').Split('|')",
+    "Get-CimInstance Win32_Process -Filter \"Name='AiRoute.exe' OR Name='aiRoute.exe'\" | ForEach-Object {",
+    '  $exe = $_.ExecutablePath',
+    '  if (-not $exe) { return }',
+    '  foreach ($dir in $dirs) {',
+    '    if ($exe.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    "      Stop-Process -Id $_.ProcessId -Force",
+    "      Write-Output ('[aiRoute] 已结束占用构建产物的实例: ' + $exe)",
+    '      break',
+    '    }',
+    '  }',
+    '}'
+  ].join('\n')
+  try {
+    execSync('powershell -NoProfile -Command -', {
+      input: script,
+      stdio: ['pipe', 'inherit', 'pipe'],
+      env: { ...process.env, AIROUTE_BUILD_OUT_DIRS: dirs.join('|') }
+    })
+  } catch {}
 }
 
 // 独立安装生产依赖到 .build-node_modules（解决 pnpm 符号链接导致打包缺依赖）
@@ -140,10 +168,12 @@ function syncToRelease() {
 }
 
 // 打包后版本自检：每个架构的 asar 内应用 package.json 与平台产物元数据必须与根 package.json 一致，
-// 任一架构缺失或版本不一致直接失败，避免版本错误的产物被同步到 release
+// 任一产物缺失或版本不一致直接失败，避免版本错误的产物被同步到 release。
+// Windows 每个架构有两类产物（安装版 -setup.exe + 便携版），两类都要校验
 function verifyBuild(version) {
   const errors = []
   const dirs = unpackedDirs(buildOutputDir)
+  const builds = artifacts(version)
 
   if (!dirs.length) errors.push('未找到解包目录（没有任何目录包含 app.asar）')
 
@@ -182,23 +212,23 @@ function verifyBuild(version) {
       }
     }
 
-    for (const arch of arches) {
-      const dmg = path.join(buildOutputDir, artifactName(version, arch))
+    for (const { name } of builds) {
+      const artifact = path.join(buildOutputDir, name)
       try {
-        const size = fs.statSync(dmg).size
-        if (size < 10 * 1024 * 1024) errors.push(`${artifactName(version, arch)} 体积异常: ${(size / 1024 / 1024).toFixed(1)} MB`)
+        const size = fs.statSync(artifact).size
+        if (size < 10 * 1024 * 1024) errors.push(`${name} 体积异常: ${(size / 1024 / 1024).toFixed(1)} MB`)
       } catch (err) {
-        errors.push(`未找到 dmg 产物 ${artifactName(version, arch)}: ${err.message.split('\n')[0]}`)
+        errors.push(`未找到 dmg 产物 ${name}: ${err.message.split('\n')[0]}`)
       }
     }
   } else {
-    for (const arch of arches) {
-      const exe = path.join(buildOutputDir, artifactName(version, arch))
+    for (const { name } of builds) {
+      const exe = path.join(buildOutputDir, name)
       try {
         const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${exe}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
-        if (meta !== version) errors.push(`${artifactName(version, arch)}: exe 元数据版本 ${meta} != package.json 的 ${version}`)
+        if (meta !== version) errors.push(`${name}: exe 元数据版本 ${meta} != package.json 的 ${version}`)
       } catch (err) {
-        errors.push(`${artifactName(version, arch)}: 读取 exe 元数据失败或产物缺失: ${err.message.split('\n')[0]}`)
+        errors.push(`${name}: 读取 exe 元数据失败或产物缺失: ${err.message.split('\n')[0]}`)
       }
     }
   }
@@ -208,13 +238,13 @@ function verifyBuild(version) {
     for (const e of errors) console.error(`  - ${e}`)
     process.exit(1)
   }
-  console.log(`[aiRoute] ✔ 版本自检通过：${arches.join(' / ')} 的 ${isMac ? 'asar / Info.plist / ad-hoc 签名 / dmg' : 'asar / exe 元数据'}均为 ${version}`)
+  console.log(`[aiRoute] ✔ 版本自检通过：${arches.join(' / ')} 的 ${isMac ? 'asar / Info.plist / ad-hoc 签名 / dmg' : 'asar / exe 元数据（安装版与便携版）'}均为 ${version}`)
 }
 
 // === 构建流程 ===
 
 console.log(`[aiRoute] 正在清理构建环境...（目标平台: ${targetPlatform}，架构: ${arches.join(' / ')}）`)
-killAppProcesses()
+killBuildOutputProcesses()
 cleanDir(buildOutputDir, 'dist-electron')
 
 console.log('[aiRoute] 正在构建渲染进程...')
@@ -237,7 +267,7 @@ buildRenderer.on('close', (code) => {
   copyServerFiles()
   installProductionDeps()
 
-  killAppProcesses()
+  killBuildOutputProcesses()
   cleanDir(buildOutputDir, 'dist-electron')
 
   // --publish never：electron-builder 检测到在 tag 上构建会隐式 publish（默认 onTagOrDraft），
@@ -261,7 +291,7 @@ buildRenderer.on('close', (code) => {
     }
     const version = require(path.join(root, 'package.json')).version
     console.log('[aiRoute] 打包完成！')
-    console.log(`[aiRoute] 输出: ${arches.map(arch => `app/dist-electron/${artifactName(version, arch)}`).join('、')}`)
+    console.log(`[aiRoute] 输出: ${artifacts(version).map(a => `app/dist-electron/${a.name}`).join('、')}`)
     verifyBuild(version)
     syncToRelease()
   })

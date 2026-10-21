@@ -1,10 +1,14 @@
 // macOS 一键升级的安装引擎：校验 → 备份 → 原子替换 → 回读 → 失败回滚
 // 只做文件系统与系统命令（hdiutil / ditto / plutil / codesign）操作，不依赖 Electron，
 // 便于用假命令在临时目录里离线单测；重启应用、journal 与 IPC 由 app/main/updater.js 负责
+//
+// Windows 安装版的流程不同（见文件末尾 applyWindowsUpdate）：exe 无法在运行中被替换，
+// 由独立助手进程等本进程退出后再静默运行安装包，因此只有「校验安装包 → 拉起助手」两步，
+// 没有备份 / 回读 / 回滚（失败时助手会把旧版本重新拉起）
 const fs = require('fs-extra')
 const path = require('path')
 const crypto = require('crypto')
-const { execFile } = require('child_process')
+const { execFile, spawn } = require('child_process')
 
 // 安装阶段（与渲染进程的阶段文案一一对应）
 const STAGE = {
@@ -276,6 +280,75 @@ async function rollbackToBackup(options) {
   return { target, trash, version: backupVersion }
 }
 
+// ===== Windows 安装版（NSIS）一键升级 =====
+
+// 只接受安装版安装包：便携版 exe 带 /S 运行时只会解包并启动自己，不会覆盖已安装的文件
+function isWindowsSetupArtifact(name) {
+  const base = path.basename(String(name || ''))
+  return /-setup\.exe$/i.test(base)
+}
+
+// 助手进程参数（单独导出便于离线测试断言「传给助手的安装包 / 日志路径」）
+function helperArgs({ pid, artifactPath, exePath, journalPath }) {
+  return [
+    path.join(__dirname, 'win-update-helper.js'),
+    '--pid', String(pid),
+    '--installer', artifactPath,
+    '--exe', exePath,
+    '--journal', journalPath
+  ]
+}
+
+// 默认 spawn：以 ELECTRON_RUN_AS_NODE 方式拉起打包后的 Electron 可执行文件跑助手脚本。
+// detached + unref：本进程随后退出，助手继续运行（这是替换 exe 的前提）
+function defaultSpawnHelper(args) {
+  return spawn(process.execPath, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+  })
+}
+
+// 一键升级（Windows）：校验安装包 SHA-256 → 拉起助手进程，由助手等本进程退出后静默安装并重启应用。
+// 返回 { helperPid }；调用方拿到结果后负责退出应用。
+async function applyWindowsUpdate(options) {
+  const {
+    target,
+    artifactPath,
+    sha256,
+    updateDir,
+    journalPath,
+    pid = process.pid,
+    spawnHelper = defaultSpawnHelper,
+    onStage = () => {},
+    log = () => {}
+  } = options
+
+  const expected = normalizeSha(sha256)
+  if (!expected) throw new Error('缺少 SHA-256 校验值，已停止升级')
+  if (!isInside(updateDir, artifactPath)) throw new Error('安装包路径非法')
+  if (!fs.existsSync(artifactPath)) throw new Error('安装包不存在，请重新下载')
+  if (!isWindowsSetupArtifact(artifactPath)) throw new Error('安装包不是安装版（-setup.exe），无法一键升级')
+  if (!target || !fs.existsSync(target)) throw new Error('未找到当前程序文件：' + (target || ''))
+
+  // ① 安装包 SHA-256 校验：下载阶段已校验一次，交给安装程序前再读盘校验，防止落盘后被改动
+  onStage(STAGE.VERIFY)
+  const actual = await sha256File(artifactPath)
+  if (actual !== expected) throw new Error('安装包 SHA-256 校验失败')
+  log(`安装包校验通过 ${expected.slice(0, 12)}…`)
+
+  // ② 拉起助手：助手会等本进程 PID 消失后再运行安装包，避免安装时 exe 被占用
+  onStage(STAGE.REPLACE)
+  const args = helperArgs({ pid, artifactPath, exePath: target, journalPath })
+  const child = spawnHelper(args)
+  if (!child || typeof child.pid !== 'number') throw new Error('无法启动安装助手进程')
+  if (typeof child.unref === 'function') child.unref()
+  log(`已启动安装助手 pid=${child.pid}`)
+
+  return { helperPid: child.pid, artifactPath }
+}
+
 module.exports = {
   STAGE,
   APP_NAME,
@@ -290,5 +363,8 @@ module.exports = {
   verifyBundle,
   defaultRun,
   applyUpdate,
-  rollbackToBackup
+  rollbackToBackup,
+  isWindowsSetupArtifact,
+  helperArgs,
+  applyWindowsUpdate
 }

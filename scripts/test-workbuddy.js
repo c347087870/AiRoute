@@ -3517,34 +3517,73 @@ async function main() {
   // ==================== 21. 更新资产命名（update / targets）====================
   group('21. 更新资产命名（update / targets）')
 
-  test('assetCandidates：按运行时平台/架构拼资产名，Windows 追加旧名兜底', () => {
+  test('assetCandidates：按平台与运行形态拼资产名，Windows 追加旧名兜底', () => {
     const updatePath = path.join(__dirname, '..', 'server', 'update.js')
     delete require.cache[require.resolve(updatePath)]
     const update = require(updatePath)
 
     const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
-    const ext = process.platform === 'darwin' ? 'dmg' : 'exe'
     const names = update.assetCandidates('v1.7.0-beta.2')
-
-    assert.strictEqual(names[0], `AiRoute-1.7.0-beta.2-${arch}.${ext}`, '首个候选应是带版本+架构的新命名资产')
     if (process.platform === 'darwin') {
-      assert.strictEqual(names.length, 1, 'macOS 没有历史命名需要兼容')
-    } else {
-      assert.strictEqual(names[1], 'AiRoute.exe', 'Windows 需保留 ≤ v1.7.0-beta.1 的旧名兜底')
-      assert.strictEqual(names.length, 2)
+      assert.deepStrictEqual(names, [`AiRoute-1.7.0-beta.2-${arch}.dmg`], 'macOS 只有 dmg，没有历史命名需要兼容')
+      return
     }
+
+    // 安装版：安装包优先，可一键升级；便携包排在后面，仅用于手动下载回退
+    const installer = update.assetCandidates('v1.7.0-beta.2', 'installer')
+    assert.strictEqual(installer[0], `AiRoute-1.7.0-beta.2-${arch}-setup.exe`, '安装版首选安装包')
+    assert.strictEqual(installer[1], `AiRoute-1.7.0-beta.2-${arch}-portable.exe`, '安装包缺失时回退到便携包')
+    assert.strictEqual(installer[2], 'AiRoute.exe', 'Windows 需保留 ≤ v1.7.0-beta.1 的旧名兜底')
+
+    const portable = update.assetCandidates('v1.7.0-beta.2', 'portable')
+    assert.strictEqual(portable[0], `AiRoute-1.7.0-beta.2-${arch}-portable.exe`, '便携版首选便携包')
+    assert.strictEqual(portable[1], `AiRoute-1.7.0-beta.2-${arch}-setup.exe`, '便携包缺失时回退到安装包')
+
+    // 一键升级只认安装版安装包：便携包跑起来只会解包并启动一个新实例，不能拿来「升级」
+    assert.deepStrictEqual(
+      update.installAssetCandidates('v1.7.0-beta.2', 'installer'),
+      [`AiRoute-1.7.0-beta.2-${arch}-setup.exe`]
+    )
   })
 
   test('scripts/targets 与 electron-builder.json 的架构、产物命名一致', () => {
     const targets = require(path.join(__dirname, 'targets.js'))
     const config = require(path.join(__dirname, '..', 'electron-builder.json'))
     const section = config[targets.platform]
-    const arches = section.target.flatMap(t => t.arch)
+    const arches = [...new Set(section.target.flatMap(t => t.arch))]
 
     assert.deepStrictEqual(targets.configuredArches(), arches, '脚本应直接读配置里的架构列表，不另写一份')
     assert.ok(arches.includes('x64') && arches.includes('arm64'), 'win 与 mac 都应同时出 x64 + arm64')
-    assert.strictEqual(section.artifactName, 'AiRoute-${version}-${arch}.${ext}', '产物名模板决定 Release 资产名')
-    assert.strictEqual(targets.artifactName('1.7.0-beta.2', 'arm64'), `AiRoute-1.7.0-beta.2-arm64.${targets.ext}`)
+
+    const builds = targets.artifacts('1.7.0-beta.2')
+    if (targets.isMac) {
+      assert.deepStrictEqual(
+        builds.map(b => b.name),
+        ['AiRoute-1.7.0-beta.2-arm64.dmg', 'AiRoute-1.7.0-beta.2-x64.dmg']
+      )
+      return
+    }
+
+    // Windows 每个架构两类产物：安装版（-setup.exe，支持一键升级）+ 便携版（-portable.exe）
+    for (const arch of ['x64', 'arm64']) {
+      const names = builds.filter(b => b.arch === arch).map(b => b.name).sort()
+      assert.deepStrictEqual(names, [`AiRoute-1.7.0-beta.2-${arch}-setup.exe`, `AiRoute-1.7.0-beta.2-${arch}-portable.exe`].sort())
+    }
+    assert.strictEqual(section.artifactName, 'AiRoute-${version}-${arch}.${ext}', 'win 段的默认模板（安装版 / 便携版各自覆盖）')
+    assert.strictEqual(config.portable.artifactName, 'AiRoute-${version}-${arch}-portable.${ext}', '便携版用 -portable 后缀，两类产物一眼可辨')
+    assert.strictEqual(config.nsis.artifactName, 'AiRoute-${version}-${arch}-setup.${ext}', '安装版用 -setup 后缀区分')
+    assert.strictEqual(config.nsis.oneClick, false, '安装版为可选目录的向导式安装（静默升级依赖 /S + --updated）')
+
+    // 构建产物名 ↔ 应用内更新拼出的安装包名必须是同一个，否则一键升级 / 手动下载会 404
+    const update = require(path.join(__dirname, '..', 'server', 'update.js'))
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
+    const setup = builds.find(b => b.target === 'nsis' && b.arch === arch)
+    const portable = builds.find(b => b.target === 'portable' && b.arch === arch)
+    assert.ok(setup, `应存在 nsis 产物（${arch}）`)
+    assert.ok(portable, `应存在 portable 产物（${arch}）`)
+    assert.ok(update.installAssetCandidates('v1.7.0-beta.2', 'installer').includes(setup.name))
+    assert.strictEqual(update.assetCandidates('v1.7.0-beta.2', 'portable')[0], portable.name)
+    assert.strictEqual(update.assetCandidates('v1.7.0-beta.2', 'installer')[1], portable.name)
   })
 
   // ==================== 22. P0/P1 协议缺陷回归 ====================

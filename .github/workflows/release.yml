@@ -115,7 +115,10 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').version")
           mkdir -p dist-assets
-          # 一次出两个架构：AiRoute-<版本>-{x64,arm64}.{exe,dmg}（架构列表见 electron-builder.json）
+          # 一次出两个架构，Windows 每个架构两类产物（命名见 electron-builder.json）：
+          #   AiRoute-<版本>-{x64,arm64}-setup.exe（安装版，支持一键升级）
+          #   AiRoute-<版本>-{x64,arm64}-portable.exe（便携版，不支持一键升级）
+          # macOS：AiRoute-<版本>-{arm64,x64}.dmg
           if [ "${{ matrix.platform }}" = "mac" ]; then
             cp "app/release/AiRoute-${version}-"*.dmg dist-assets/
           else
@@ -145,16 +148,18 @@ jobs:
           path: dist-assets
           merge-multiple: true
 
-      # 旧客户端（≤ v1.7.0-beta.1）的应用内更新把文件名写死成 AiRoute.exe，
-      # 额外发一份 x64 副本做兼容；确认没有旧客户端再拉这个文件后可以删掉这一步
+      # 旧客户端（≤ v1.8.1）应用内更新只会拼 AiRoute-<版本>-<架构>.exe 与 AiRoute.exe：
+      # 前者已改名为 -portable.exe，这里用 x64 便携版生成旧名副本兜底（arm64 旧客户端会回落到它，
+      # Windows on ARM 可模拟运行 x64 包）。≤ v1.7.0-beta.1 的客户端把文件名写死成 AiRoute.exe，同一份即可满足。
+      # 确认没有旧客户端再拉这个文件后可以删掉这一步
       - name: 生成旧命名的兼容副本
         run: |
           version=$(node -p "require('./package.json').version")
-          if [ -f "dist-assets/AiRoute-${version}-x64.exe" ]; then
-            cp "dist-assets/AiRoute-${version}-x64.exe" dist-assets/AiRoute.exe
+          if [ -f "dist-assets/AiRoute-${version}-x64-portable.exe" ]; then
+            cp "dist-assets/AiRoute-${version}-x64-portable.exe" dist-assets/AiRoute.exe
             ls -lh dist-assets
           else
-            echo "::warning::未找到 AiRoute-${version}-x64.exe，跳过 AiRoute.exe 兼容副本"
+            echo "::warning::未找到 AiRoute-${version}-x64-portable.exe，跳过 AiRoute.exe 兼容副本"
           fi
 
       - name: 生成 SHA256 校验文件

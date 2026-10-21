@@ -17,12 +17,33 @@
   "win": {
     "target": [
       {
+        "target": "nsis",
+        "arch": ["x64", "arm64"]
+      },
+      {
         "target": "portable",
         "arch": ["x64", "arm64"]
       }
     ],
     "icon": "app/renderer/public/icon.ico",
     "artifactName": "AiRoute-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "artifactName": "AiRoute-${version}-${arch}-setup.${ext}",
+    "buildUniversalInstaller": false,
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "AiRoute",
+    "deleteAppDataOnUninstall": false,
+    "runAfterFinish": true
+  },
+  "portable": {
+    "artifactName": "AiRoute-${version}-${arch}-portable.${ext}",
+    "buildUniversalInstaller": false
   },
   "mac": {
     "target": [

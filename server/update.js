@@ -1,7 +1,8 @@
 // 更新检查与下载：双通道获取 GitHub 最新版本（API 优先，限速/不可达时退回 302 解析），
 // 支持两种下载方式：
 //   1. 一键升级：下载到托管目录并用 SHA-256 校验，供 Electron 主进程替换安装（见 app/main/updater.js）
-//   2. 手动下载：另存为到用户指定路径（Windows / 无法自动替换时的兜底）
+//      macOS 用 dmg；Windows 只有安装版（-setup.exe）可用，便携版不支持
+//   2. 手动下载：另存为到用户指定路径（Windows 便携版 / 无法自动替换时的兜底）
 // 替换、备份、回滚与重启由主进程负责，本模块只做网络与文件校验
 const axios = require('axios')
 const crypto = require('crypto')
@@ -18,19 +19,51 @@ const CHECKSUM_ASSET = 'SHA256SUMS.txt'
 const IS_MAC = process.platform === 'darwin'
 const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
 const EXT = IS_MAC ? 'dmg' : 'exe'
+// Windows 两类产物的后缀（见 electron-builder.json 的 nsis.artifactName / portable.artifactName）
+const SETUP_SUFFIX = '-setup'
+const PORTABLE_SUFFIX = '-portable'
+
+// 运行形态决定下载哪个资产：安装版优先取 -setup.exe（可一键升级），便携版优先取 -portable.exe。
+// 由主进程启动时注入 AIROUTE_INSTALL_KIND（判定逻辑见 app/main/install-kind.js）；
+// 独立运行 server（开发模式）时没有注入，按安装版处理（发布的主力形态）
+function normalizeInstallKind(value, platform = process.platform) {
+  if (platform === 'darwin') return 'mac'
+  return String(value || '').toLowerCase() === 'portable' ? 'portable' : 'installer'
+}
+const INSTALL_KIND = normalizeInstallKind(process.env.AIROUTE_INSTALL_KIND)
+
+// 一键升级能力：macOS 原子替换；Windows 只有安装版能静默运行安装包
+function canOneClick(kind = INSTALL_KIND) {
+  return kind === 'mac' || kind === 'installer'
+}
+
+// 候选资产名，按优先级排列：
+// - Windows 安装版：AiRoute-<版本>-<架构>-setup.exe → 便携版 -portable.exe → 旧命名 AiRoute.exe
+// - Windows 便携版：AiRoute-<版本>-<架构>-portable.exe → 安装版 -setup.exe → 旧命名 AiRoute.exe
+// - macOS：AiRoute-<版本>-<架构>.dmg
+// 旧命名兜底是为 Windows 早期版本（≤ v1.7.0-beta.1）发的 AiRoute.exe 准备的；
+// ≤ v1.8.1 的客户端只认 AiRoute-<版本>-<架构>.exe，也靠这个 x64 副本兜底
+function assetCandidates(version, kind = INSTALL_KIND) {
+  const v = String(version).replace(/^v/i, '')
+  if (kind === 'mac') return [`AiRoute-${v}-${ARCH}.dmg`]
+  const setup = `AiRoute-${v}-${ARCH}${SETUP_SUFFIX}.exe`
+  const portable = `AiRoute-${v}-${ARCH}${PORTABLE_SUFFIX}.exe`
+  const names = kind === 'portable' ? [portable, setup] : [setup, portable]
+  names.push('AiRoute.exe')
+  return names
+}
+
+// 一键升级的候选资产：Windows 只接受安装版安装包。便携包跑起来只会解包并启动自己，
+// 拿来「升级」等于开了第二个实例，所以即便安装版资产缺失也不回落到它
+function installAssetCandidates(version, kind = INSTALL_KIND) {
+  const names = assetCandidates(version, kind)
+  if (kind !== 'installer') return names
+  return names.filter(name => name.endsWith(`${SETUP_SUFFIX}.exe`))
+}
 
 // 一键升级的托管下载目录：生产模式由主进程注入 AIROUTE_UPDATE_DIR（userData/updates），
 // 开发模式落到系统临时目录，避免把上百 MB 安装包写进仓库
 const UPDATE_DIR = process.env.AIROUTE_UPDATE_DIR || path.join(os.tmpdir(), 'airoute-updates')
-
-// 候选资产名，按优先级排列：Windows 早期版本（≤ v1.7.0-beta.1）发的是不带版本/架构的
-// AiRoute.exe，留作兜底，否则旧安装包的应用内更新会 404（新版本 Release 仍会额外上传这个命名的 x64 副本）
-function assetCandidates(version) {
-  const v = String(version).replace(/^v/i, '')
-  const names = [`AiRoute-${v}-${ARCH}.${EXT}`]
-  if (!IS_MAC) names.push('AiRoute.exe')
-  return names
-}
 
 // 版本校验文件固定跟着 tag 走；API 通道优先用资产里的 browser_download_url，302 通道按约定拼
 function checksumsUrl(tag) {
@@ -142,6 +175,9 @@ async function checkUpdate(force) {
     size: info.size,
     platform: IS_MAC ? 'mac' : 'win',
     arch: ARCH,
+    // 运行形态：installer 安装版（可一键升级）/ portable 便携版（只能手动下载）
+    installKind: INSTALL_KIND,
+    oneClick: canOneClick(),
     assetName,
     // GitHub API 对资产直接给出的 SHA-256（部分版本才有），没有时由 SHA256SUMS.txt 兜底
     sha256: info.assetName === assetName ? normalizeSha(info.assetDigest) : '',
@@ -179,6 +215,8 @@ async function fetchChecksums(url) {
 function startInstall(tag) {
   if (downloadState.status === 'downloading') throw new Error('已有下载任务进行中')
   if (!tag || typeof tag !== 'string') throw new Error('缺少版本号')
+  // 便携版没有可被安装包覆盖的安装目录，一键升级无从谈起（主进程也做了同样的判定，这里提前给出明确原因）
+  if (!canOneClick()) throw new Error('便携版不支持一键升级，请使用「手动下载安装包」')
   downloadState = {
     status: 'downloading',
     mode: 'install',
@@ -228,7 +266,7 @@ function downloadInstallAsset(tag, assetName, partPath) {
   })
 }
 
-// 实际执行一键升级下载：按候选资产名依次尝试（Windows 新命名优先，回落到旧名 AiRoute.exe），
+// 实际执行一键升级下载：按候选资产名依次尝试（Windows 安装版只取 -setup.exe），
 // 下载完成后必须拿到 SHA-256 并校验通过才置为 done；校验值缺失时拒绝自动升级（不静默降级）
 async function runInstall(tag) {
   const version = String(tag).replace(/^v/i, '')
@@ -250,7 +288,7 @@ async function runInstall(tag) {
     return
   }
   const errors = []
-  for (const assetName of assetCandidates(tag)) {
+  for (const assetName of installAssetCandidates(tag)) {
     const partPath = path.join(dir, `${assetName}.part`)
     const destPath = path.join(dir, assetName)
     try {
@@ -365,8 +403,14 @@ module.exports = {
   getDownloadState,
   getLocalVersion,
   assetCandidates,
+  installAssetCandidates,
+  normalizeInstallKind,
+  canOneClick,
   compareVersion,
   parseChecksums,
   normalizeSha,
+  SETUP_SUFFIX,
+  PORTABLE_SUFFIX,
+  INSTALL_KIND,
   UPDATE_DIR
 }
