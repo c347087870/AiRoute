@@ -2,6 +2,24 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.8.0] - 2026-10-21
+
+### 新增
+
+- **macOS 一键升级**：「设置 → 关于与更新」与侧边栏提示条改为一步完成 **下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启**，任一步失败自动回滚到上一版本
+  - 安装包下载到 `userData/updates`，校验值优先取 GitHub Release 资产的 `digest`，缺失时读同版本 `SHA256SUMS.txt`；两者都拿不到时拒绝自动升级（不静默降级）
+  - 替换前用 `ditto` 备份当前 `.app` 到 `updates/backup` 并回读可执行文件哈希；`hdiutil` 只读挂载 dmg，复制到 `/Applications` 同卷暂存目录后用 `rename` 完成原子替换
+  - 回读校验 `CFBundleShortVersionString`、`codesign --verify --deep --strict` 与可执行文件 SHA-256；任一项不符立即把旧包改名回原位
+  - 成功后 `app.relaunch()` 自动重启（Electron 无法单独热重载主进程）；旧包暂留为 `.airoute-old-*.app`，下次启动清理
+  - 设置页保留「手动下载安装包」与「回滚到该版本」入口；Windows 与开发模式仍走手动下载
+- **升级结果可追溯**：journal 记录每次升级的阶段与结果，启动时提示「已升级到 vX」或「上次升级失败（已回滚）」，失败时展示具体原因
+
+### 工程
+
+- 新增 `app/main/updater-core.js`（安装引擎，不依赖 Electron，可用假命令离线测试）与 `app/main/updater.js`（目标解析 / journal / 重启 / 启动清理）
+- 新增 `scripts/test-update.js`（10 项离线测试）：校验值解析、版本比较、路径约束、安装成功、哈希不匹配、回读失败自动回滚、手动回滚
+- `npm test` 现在同时运行 WorkBuddy 与一键升级测试
+
 ## [1.7.1] - 2026-10-21
 
 ### 新增
