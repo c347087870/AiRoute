@@ -19,7 +19,7 @@
     </div>
 
     <div class="sidebar-footer">
-      <div v-if="showUpdate" class="update-bar" :class="{ busy: downloading }" @click="onUpdateClick">
+      <div v-if="showUpdate" class="update-bar" :class="{ busy }" @click="onUpdateClick">
         {{ updateText }}
       </div>
       <div class="theme-switch" role="group" aria-label="主题">
@@ -72,24 +72,23 @@ const navItems = [
   { path: '/tutorial', label: '使用教程', icon: '✎' }
 ]
 
-// 更新功能共享状态（发现新版本时底部显示提示条）
-const { info, downloading, percent, savedPath, startDownload, openFolder, initUpdate } = useUpdate()
+// 更新功能共享状态（发现新版本时底部显示一键升级提示条）
+const { info, busy, stageText, installError, initUpdate, oneClickUpdate } = useUpdate()
 
 // 是否显示更新提示条（仅在发现新版本时可见）
 const showUpdate = computed(() => !!info.value?.hasUpdate)
 
-// 提示条文案：未下载→发现新版本；下载中→百分比；已下载→打开文件夹
+// 提示条文案：升级中显示当前阶段，失败可点击重试，空闲时提示一键升级
 const updateText = computed(() => {
-  if (downloading.value) return `下载中 ${percent.value}%`
-  if (savedPath.value) return '下载完成，点击打开文件夹'
-  return `发现新版本 v${info.value.latest}`
+  if (busy.value) return stageText.value || '升级中…'
+  if (installError.value) return '升级失败，点击重试'
+  return `发现新版本 v${info.value.latest} · 一键升级`
 })
 
-// 点击提示条：未下载则开始下载，已下载则打开文件夹
+// 点击提示条：直接走一键升级（下载 → 校验 → 备份 → 替换 → 回读 → 重启）
 function onUpdateClick() {
-  if (downloading.value) return
-  if (savedPath.value) openFolder()
-  else startDownload()
+  if (busy.value) return
+  oneClickUpdate()
 }
 
 async function checkHealth() {

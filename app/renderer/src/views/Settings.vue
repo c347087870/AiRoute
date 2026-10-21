@@ -108,7 +108,7 @@
           <label class="config-label">当前版本</label>
           <div class="config-control">
             <span class="version-text">v{{ info?.current || '未检查' }}</span>
-            <button class="btn-ghost btn-sm" :disabled="checking" @click="runCheck(false, true)">
+            <button class="btn-ghost btn-sm" :disabled="checking || busy" @click="runCheck(false, true)">
               {{ checking ? '检查中...' : '检查更新' }}
             </button>
           </div>
@@ -121,20 +121,36 @@
             <span v-else class="latest-tag">已是最新</span>
           </div>
         </div>
+        <div v-if="supported && backup" class="config-row">
+          <label class="config-label">版本回滚</label>
+          <div class="config-control">
+            <span class="version-text">已备份 v{{ backup.version }}</span>
+            <button class="btn-ghost btn-sm" :disabled="busy" @click="rollback">回滚到该版本</button>
+          </div>
+        </div>
         <div v-if="error" class="warning-box">⚠ {{ error }}</div>
+        <div v-if="lastResult && !lastResult.ok" class="warning-box">
+          ⚠ 上次升级失败：{{ lastResult.error }}{{ lastResult.rolledBack ? '（已回滚到 v' + lastResult.from + '）' : '' }}
+        </div>
         <div v-if="info && info.hasUpdate" class="update-block">
           <div v-if="info.publishedAt" class="config-hint">发布时间：{{ formatTime(info.publishedAt) }}</div>
           <div class="config-control">
-            <button v-if="!savedPath" class="btn-primary" :disabled="downloading" @click="startDownload">
-              {{ downloading ? `下载中 ${percent}%` : `下载新版本 v${info.latest}` }}
+            <button class="btn-primary" :disabled="busy || !supported" @click="oneClickUpdate">
+              {{ primaryLabel }}
             </button>
-            <button v-else class="btn-primary" @click="openFolder">打开文件夹</button>
-            <button class="btn-ghost" @click="openReleasePage">查看 Release 页面</button>
+            <button class="btn-ghost btn-sm" :disabled="busy" @click="manualDownload">手动下载安装包</button>
+            <button v-if="savedPath" class="btn-ghost btn-sm" @click="openFolder">打开文件夹</button>
+            <button class="btn-ghost btn-sm" @click="openReleasePage">Release 页面</button>
           </div>
-          <div v-if="downloading" class="progress-track">
-            <div class="progress-fill" :style="{ width: percent + '%' }"></div>
+          <div v-if="busy" class="progress-track">
+            <div class="progress-fill" :style="{ width: (downloading ? percent : 100) + '%' }"></div>
           </div>
-          <div v-if="savedPath" class="config-hint">已保存到：{{ savedPath }}</div>
+          <div v-if="stageText" class="config-hint">{{ stageText }}</div>
+          <div v-if="installError" class="warning-box">
+            ⚠ {{ installError }}{{ rolledBack ? '（已自动回滚到上一版本）' : '' }}
+          </div>
+          <div v-if="savedPath" class="config-hint">安装包已保存到：{{ savedPath }}（可双击手动安装）</div>
+          <div v-if="!supported" class="config-hint">{{ unsupportedReason }}</div>
           <div class="config-hint">{{ installHint }}</div>
         </div>
       </div>
@@ -169,11 +185,29 @@ const cacheSize = ref(null) // 日志缓存占用：{ totalSize, fileCount }
 const clearing = ref(false) // 清空缓存进行中
 
 // 更新功能共享状态与方法（与侧边栏提示条同源）
-const { info, checking, downloading, percent, savedPath, error, runCheck, startDownload, openFolder, openReleasePage } = useUpdate()
+const {
+  info, checking, stage, stageText, percent, error, installError, rolledBack, savedPath,
+  downloading, busy, supported, unsupportedReason, backup, lastResult,
+  runCheck, oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus
+} = useUpdate()
 
-// 安装方式提示：macOS 是 dmg 拖拽覆盖，Windows 是替换 exe 文件（平台取自服务端更新接口，见 useUpdate）
+// 一键升级按钮文案：按阶段展示当前动作，失败后变成重试
+const primaryLabel = computed(() => {
+  switch (stage.value) {
+    case 'downloading': return `下载中 ${percent.value}%`
+    case 'verifying': return '校验安装包…'
+    case 'backing-up': return '备份中…'
+    case 'replacing': return '替换中…'
+    case 'readback': return '回读校验…'
+    case 'restarting': return '正在重启…'
+    case 'error': return `重试升级到 v${info.value?.latest || ''}`
+    default: return `一键升级到 v${info.value?.latest || ''}`
+  }
+})
+
+// 安装方式提示：macOS 自动替换失败时才需要手动拖拽；Windows 仍为手动替换
 const installHint = computed(() => info.value?.platform === 'mac'
-  ? '下载完成后打开 dmg，把 AiRoute 拖到「应用程序」覆盖旧版本（不会自动替换）'
+  ? '一键升级会下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启；任一步失败自动回滚'
   : '下载完成后请退出 AiRoute，用新文件替换当前的 AiRoute-*.exe（不会自动替换）')
 
 // 统一提取接口错误信息用于提示
@@ -314,6 +348,8 @@ async function clearLogCache() {
 onMounted(() => {
   // loadData 内部已包含 loadSystemStatus（用于推导「待重启」提示），不再重复调用
   loadData()
+  // 升级状态：可回滚备份 / 上次升级结果（主进程已在启动时初始化）
+  refreshInstallStatus()
 })
 </script>
 

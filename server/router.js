@@ -810,11 +810,13 @@ app.get('/api/update/check', async (req, res) => {
 })
 
 // 启动应用内下载（服务端流式写盘，前端轮询进度）
+//   不传 savePath：一键升级，下载到托管目录并做 SHA-256 校验（供主进程替换安装）
+//   传 savePath  ：手动下载，另存为到用户指定路径（Windows / 自动替换失败时的兜底）
 app.post('/api/update/download', (req, res) => {
   const { tag, savePath } = req.body || {}
-  if (!tag || !savePath) return res.status(400).json({ error: '缺少版本号或保存路径' })
+  if (!tag) return res.status(400).json({ error: '缺少版本号' })
   try {
-    res.json(update.startDownload(tag, savePath))
+    res.json(savePath ? update.startDownload(tag, savePath) : update.startInstall(tag))
   } catch (e) {
     res.status(409).json({ error: e.message || '无法开始下载' })
   }
