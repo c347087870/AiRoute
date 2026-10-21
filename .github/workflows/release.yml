@@ -43,17 +43,22 @@ jobs:
       - name: 端到端冒烟测试
         run: npm run test:e2e
 
-      # tag 与 package.json 版本必须一致，否则产物版本与 Release 对不上
+      # tag 与 package.json 版本必须对得上，否则产物版本与 Release 不符。
+      # 允许带后缀（v1.7.0-beta.1 预发布、v1.6.1-macos.1 这类制品标记）
       - name: 校验 tag 与 package.json 版本
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg=$(node -p "require('./package.json').version")
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json ${pkg} 不一致"
-            exit 1
-          fi
-          echo "版本一致：${pkg}"
+          case "$tag" in
+            "$pkg" | "$pkg"-*)
+              echo "版本一致：${tag}（基线 ${pkg}）"
+              ;;
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} 与 package.json ${pkg} 不一致"
+              exit 1
+              ;;
+          esac
 
   build:
     name: 构建 (${{ matrix.platform }})
@@ -145,10 +150,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # tag 带后缀（v1.7.0-beta.1 这类）视为预发布，不打 latest
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; else prerelease=""; fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist-assets/* --clobber
+            [ -n "$prerelease" ] && gh release edit "$GITHUB_REF_NAME" --prerelease
+            true
           else
             gh release create "$GITHUB_REF_NAME" dist-assets/* \
               --title "$GITHUB_REF_NAME" \
-              --generate-notes
+              --generate-notes $prerelease
           fi
