@@ -4,6 +4,7 @@
 //   macOS  ：校验 Info.plist 版本、ad-hoc 签名、dmg 产物
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { execSync } = require('child_process')
 
 const root = path.join(__dirname, '..')
@@ -79,6 +80,7 @@ try {
 }
 
 // ④ release 产物大小与 SHA256（发布说明中需与上传资产一致）
+// 用 node 自带 crypto 计算：Windows 上 powershell 的 Get-FileHash 会因模块未自动加载而失败
 const assetName = isMac ? macAssetName : 'AiRoute.exe'
 const assetPath = path.join(root, 'app', 'release', assetName)
 let sha = ''
@@ -86,8 +88,7 @@ try {
   const size = fs.statSync(assetPath).size
   const minSize = isMac ? 10 * 1024 * 1024 : 1024 * 1024
   check(`release/${assetName} 大小`, size > minSize, `${(size / 1024 / 1024).toFixed(1)} MB`)
-  sha = execSync(isMac ? `shasum -a 256 "${assetPath}"` : `powershell -NoProfile -Command "(Get-FileHash '${assetPath}' -Algorithm SHA256).Hash"`, { encoding: 'utf8' }).trim()
-  if (isMac) sha = sha.split(/\s+/)[0]
+  sha = crypto.createHash('sha256').update(fs.readFileSync(assetPath)).digest('hex')
 } catch (err) {
   check(`release/${assetName} 大小`, false, err.message.split('\n')[0])
 }
