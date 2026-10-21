@@ -2493,9 +2493,9 @@ function errText(err) {
   color: var(--text-1);
 }
 
-.wb-stats .ok b { color: #16A34A; }
-.wb-stats .warn b { color: #D97706; }
-.wb-stats .bad b { color: #DC2626; }
+.wb-stats .ok b { color: var(--ok-text); }
+.wb-stats .warn b { color: var(--warn-text); }
+.wb-stats .bad b { color: var(--bad-text); }
 
 .wb-tabs {
   display: flex;
@@ -2635,9 +2635,9 @@ function errText(err) {
   white-space: nowrap;
 }
 
-.wb-state.is-ok { color: #16A34A; background: #ECFDF5; }
-.wb-state.is-warn { color: #D97706; background: #FFFBEB; }
-.wb-state.is-bad { color: #DC2626; background: #FEF2F2; }
+.wb-state.is-ok { color: var(--ok-text); background: var(--ok-bg); }
+.wb-state.is-warn { color: var(--warn-text); background: var(--warn-bg); }
+.wb-state.is-bad { color: var(--bad-text); background: var(--bad-bg); }
 
 .wb-reason-cell {
   max-width: 220px;
@@ -2650,7 +2650,7 @@ function errText(err) {
 .wb-model-limited {
   margin-top: 2px;
   font-size: 11px;
-  color: #D97706;
+  color: var(--warn-text);
 }
 
 .wb-oauth {
@@ -2740,9 +2740,9 @@ function errText(err) {
 }
 
 .wb-realm-tag.global {
-  color: #6b46c1;
-  border-color: #d6bcfa;
-  background: #faf5ff;
+  color: var(--purple-text);
+  border-color: var(--purple-border);
+  background: var(--tint-purple);
 }
 
 .wb-oauth-title .wb-realm-tag {
@@ -2824,7 +2824,7 @@ function errText(err) {
 .reward {
   margin-right: 8px;
   font-size: 11px;
-  color: #D97706;
+  color: var(--warn-text);
 }
 
 .wb-scan {
@@ -2859,7 +2859,7 @@ function errText(err) {
 }
 
 .wb-scan-error {
-  color: #DC2626;
+  color: var(--bad-text);
 }
 
 .wb-scan-detail {
@@ -3051,7 +3051,7 @@ function errText(err) {
 }
 
 .wb-log-row.is-warn {
-  background: #FEF2F2;
+  background: var(--bad-bg);
 }
 
 .wb-log-time {
@@ -3068,7 +3068,7 @@ function errText(err) {
 }
 
 .wb-log-channel.ch-chat { color: var(--primary); background: var(--primary-bg); }
-.wb-log-channel.ch-task { color: var(--purple); background: #F6EEF8; }
+.wb-log-channel.ch-task { color: var(--purple); background: var(--tint-purple-soft); }
 .wb-log-channel.ch-system { color: var(--text-2); background: var(--bg-hover); }
 .wb-log-channel.ch-other { color: var(--text-3); background: var(--bg-hover); }
 
@@ -3080,7 +3080,7 @@ function errText(err) {
 }
 
 .wb-log-level.is-warn {
-  color: #DC2626;
+  color: var(--bad-text);
 }
 
 .wb-log-msg {
@@ -3115,7 +3115,7 @@ function errText(err) {
 
 /* 有更新可应用 */
 .wb-warn {
-  color: #D97706;
+  color: var(--warn-text);
   font-size: 11px;
   margin-left: 4px;
 }
@@ -3127,7 +3127,7 @@ function errText(err) {
 .wb-modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3212,8 +3212,8 @@ function errText(err) {
   color: var(--text-1);
 }
 
-.wb-card-value.bad { color: #DC2626; }
-.wb-card-value.credit { color: #7C3AED; }
+.wb-card-value.bad { color: var(--bad-text); }
+.wb-card-value.credit { color: var(--purple-text); }
 
 .wb-section-title {
   display: flex;

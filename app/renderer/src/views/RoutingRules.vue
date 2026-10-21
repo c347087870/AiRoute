@@ -253,9 +253,9 @@ onMounted(loadData)
 }
 
 .warning-box {
-  background: #FFF7ED;
+  background: var(--tint-warning);
   border: 1px solid var(--warning);
-  color: #B45309;
+  color: var(--warning-text);
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;

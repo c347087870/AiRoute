@@ -45,14 +45,14 @@ function iconOf(type) {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: #FFFFFF;
+  background: var(--bg-elevated);
   border: 1px solid var(--border-3);
   border-left: 4px solid var(--success);
   border-radius: 10px;
   padding: 10px 18px;
   font-size: 13px;
   color: var(--text-1);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   cursor: pointer;
   pointer-events: auto;
   min-width: 220px;

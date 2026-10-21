@@ -47,6 +47,28 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">外观</h2>
+      <div class="card">
+        <div class="config-row">
+          <label class="config-label">主题</label>
+          <div class="config-control">
+            <button
+              v-for="item in themeOptions"
+              :key="item.value"
+              class="theme-opt"
+              :class="{ active: themeMode === item.value }"
+              :aria-pressed="themeMode === item.value"
+              @click="setMode(item.value)"
+            >
+              <span class="theme-opt-icon">{{ item.icon }}</span>{{ item.label }}
+            </button>
+          </div>
+        </div>
+        <div class="config-hint">选择「跟随系统」时，界面会随系统外观设置自动在亮色 / 暗色间切换</div>
+      </div>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">系统状态</h2>
       <div class="card">
         <div class="config-row">
@@ -126,6 +148,16 @@ import { getServerConfig, updateServerConfig, restartServer, probeServer, setSer
 import { showToast } from '../composables/useToast.js'
 import { formatBytes, formatTime } from '../utils/format.js'
 import { useUpdate } from '../composables/useUpdate.js'
+import { useTheme } from '../composables/useTheme.js'
+
+// 主题（与侧边栏快捷切换共享同一份状态）
+const { mode: themeMode, setMode } = useTheme()
+
+const themeOptions = [
+  { value: 'system', icon: '◐', label: '跟随系统' },
+  { value: 'light', icon: '☀', label: '亮色' },
+  { value: 'dark', icon: '☾', label: '暗色' }
+]
 
 const serverPort = ref(3000) // 端口输入框的值
 const portChanged = ref(false) // 端口已保存但尚未重启生效
@@ -335,9 +367,9 @@ onMounted(() => {
 }
 
 .warning-box {
-  background: #FFF7ED;
+  background: var(--tint-warning);
   border: 1px solid var(--warning);
-  color: #B45309;
+  color: var(--warning-text);
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;
@@ -390,9 +422,39 @@ onMounted(() => {
 .latest-tag {
   font-size: 12px;
   color: var(--success);
-  background: rgba(0, 181, 120, 0.08);
+  background: var(--tint-success);
   padding: 2px 10px;
   border-radius: 20px;
+}
+
+/* 主题三选一（跟随系统 / 亮色 / 暗色） */
+.theme-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-3);
+  color: var(--text-2);
+}
+
+.theme-opt:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.theme-opt.active {
+  background: var(--primary-bg);
+  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.theme-opt-icon {
+  font-size: 14px;
+  line-height: 1;
 }
 
 .update-block {

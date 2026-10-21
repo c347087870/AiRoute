@@ -256,7 +256,7 @@ onMounted(loadConfig)
 .tutorial-callout code {
   padding: 1px 5px;
   border-radius: 3px;
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--tint-neutral);
   font-size: 12px;
 }
 
@@ -284,14 +284,14 @@ onMounted(loadConfig)
 .section p {
   font-size: 14px;
   line-height: 1.7;
-  color: #444444;
+  color: var(--text-body);
   margin-bottom: 8px;
 }
 
 .section ul, .section ol {
   font-size: 14px;
   line-height: 1.8;
-  color: #444444;
+  color: var(--text-body);
   padding-left: 20px;
   margin-bottom: 8px;
 }
@@ -321,7 +321,7 @@ onMounted(loadConfig)
 }
 
 .section code {
-  background: #F0F4F8;
+  background: var(--bg-code);
   padding: 2px 6px;
   border-radius: 4px;
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -330,7 +330,7 @@ onMounted(loadConfig)
 }
 
 .section pre {
-  background: #F8F8F8;
+  background: var(--bg-inset);
   border: 1px solid var(--border-1);
   border-radius: 10px;
   padding: 12px 16px;
@@ -347,11 +347,11 @@ onMounted(loadConfig)
 }
 
 .section .note {
-  background: #EEF6FF;
+  background: var(--bg-note);
   border-left: 3px solid var(--primary);
   padding: 8px 12px;
   border-radius: 0 8px 8px 0;
-  color: #444444;
+  color: var(--text-body);
   font-size: 13px;
 }
 

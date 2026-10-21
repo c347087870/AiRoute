@@ -464,7 +464,7 @@ onMounted(refreshAll)
   font-weight: 500;
   position: sticky;
   top: 0;
-  background: #FFFFFF;
+  background: var(--bg-card);
   white-space: nowrap;
 }
 
