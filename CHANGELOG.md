@@ -2,6 +2,12 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.7.1] - 2026-10-21
+
+### 新增
+
+- **弹窗支持 Esc 关闭**：Providers 新增/编辑、WorkBuddy 账号详情、Benchmark 题目编辑与导入方式选择弹窗均可按 Esc 关闭；新增 `useEscClose` 组合式函数统一监听，输入法组词中（`isComposing`）不响应，避免中文输入时误关弹窗
+
 ## [1.7.0] - 2026-10-21
 
 ### 新增
