@@ -770,7 +770,7 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   gap: 16px;
-  background: #FFFFFF;
+  background: var(--bg-card);
   border: 1px solid var(--border-1);
   border-left: 3px solid transparent;
   border-radius: 12px;
@@ -779,13 +779,13 @@ onMounted(() => {
 }
 
 .provider-row:hover {
-  border-color: #DCDCDC;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  border-color: var(--border-3);
+  box-shadow: var(--shadow-hover);
 }
 
 .provider-row.active {
   border-left-color: var(--primary);
-  background: #FAFCFF;
+  background: var(--bg-subtle);
 }
 
 .row-main {
@@ -820,7 +820,7 @@ onMounted(() => {
 
 .badge-current {
   font-size: 11px;
-  background: rgba(0, 181, 120, 0.08);
+  background: var(--tint-success);
   color: var(--success);
   padding: 2px 8px;
   border-radius: 10px;
@@ -830,8 +830,8 @@ onMounted(() => {
 /* WorkBuddy 账号池类型徽标 */
 .badge-type {
   font-size: 11px;
-  background: rgba(59, 130, 246, 0.08);
-  color: #2563EB;
+  background: var(--tint-primary-soft);
+  color: var(--primary-text);
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 500;
@@ -849,15 +849,15 @@ onMounted(() => {
 }
 
 .wb-realm-tag.cn {
-  color: #4a5568;
+  color: var(--text-2);
   border-color: var(--border-1);
-  background: rgba(113, 128, 150, 0.08);
+  background: var(--tint-neutral);
 }
 
 .wb-realm-tag.global {
-  color: #6b46c1;
-  border-color: #d6bcfa;
-  background: #faf5ff;
+  color: var(--purple-text);
+  border-color: var(--purple-border);
+  background: var(--tint-purple);
 }
 
 /* 新增 WorkBuddy 源时的区域选择 */
@@ -921,7 +921,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: #FAFCFF;
+  background: var(--bg-subtle);
 }
 
 /* 区块标题行（标题 + 右侧跳转链接） */
@@ -987,9 +987,9 @@ onMounted(() => {
   padding: 1px 6px;
 }
 
-.wb-account-state.is-ok { color: #16A34A; background: #ECFDF5; }
-.wb-account-state.is-warn { color: #D97706; background: #FFFBEB; }
-.wb-account-state.is-bad { color: #DC2626; background: #FEF2F2; }
+.wb-account-state.is-ok { color: var(--ok-text); background: var(--ok-bg); }
+.wb-account-state.is-warn { color: var(--warn-text); background: var(--warn-bg); }
+.wb-account-state.is-bad { color: var(--bad-text); background: var(--bad-bg); }
 
 /* 模型清单列表（每行：模型 id + 推理档位 + 上下文/输出上限） */
 .wb-model-chips {
@@ -1029,7 +1029,7 @@ onMounted(() => {
   padding: 3px 4px;
   border: 1px solid var(--border-1);
   border-radius: 6px;
-  background: #FFFFFF;
+  background: var(--bg-card);
   color: var(--text-1);
   cursor: pointer;
 }
@@ -1046,7 +1046,7 @@ onMounted(() => {
   padding: 3px 6px;
   border: 1px solid var(--border-1);
   border-radius: 6px;
-  background: #FFFFFF;
+  background: var(--bg-card);
   color: var(--text-1);
 }
 
@@ -1059,14 +1059,14 @@ onMounted(() => {
   font-size: 11px;
   font-family: 'Courier New', Consolas, monospace;
   color: var(--text-2);
-  background: #EEF3FA;
+  background: var(--bg-chip);
   border-radius: 4px;
   padding: 2px 6px;
 }
 
 .row-count {
   font-size: 12px;
-  color: #B0B0B0;
+  color: var(--text-weak);
 }
 
 /* 端点信息：等宽字体 + 超长截断，避免撑破行 */
@@ -1085,13 +1085,13 @@ onMounted(() => {
 
 .meta-label {
   font-size: 11px;
-  color: #B0B0B0;
+  color: var(--text-weak);
   flex-shrink: 0;
 }
 
 .meta-value {
   font-size: 12px;
-  color: #555555;
+  color: var(--text-strong);
   font-family: 'Courier New', Consolas, monospace;
   max-width: 320px;
   overflow: hidden;
@@ -1121,7 +1121,7 @@ onMounted(() => {
 
 .model-chip.current {
   border-color: var(--success);
-  background: #F3FDF8;
+  background: var(--tint-success-soft);
 }
 
 .chip-name {
@@ -1133,16 +1133,16 @@ onMounted(() => {
 }
 
 .chip-meta {
-  color: #B0B0B0;
+  color: var(--text-weak);
   font-size: 11px;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .chip-use {
-  background: #FFFFFF;
+  background: var(--bg-card);
   border: 1px solid var(--border-3);
-  color: #888888;
+  color: var(--text-3);
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 12px;
@@ -1156,14 +1156,14 @@ onMounted(() => {
 }
 
 .chip-use.is-current {
-  background: rgba(0, 181, 120, 0.08);
+  background: var(--tint-success);
   border-color: var(--success);
   color: var(--success);
 }
 
 .chip-more {
   background: transparent;
-  border: 1px dashed #D8D8D8;
+  border: 1px dashed var(--border-3);
   color: var(--text-3);
   font-size: 11px;
   padding: 4px 10px;
@@ -1177,7 +1177,7 @@ onMounted(() => {
 
 .model-empty {
   font-size: 12px;
-  color: #C0C0C0;
+  color: var(--text-faint);
 }
 
 /* 测试结果内联展示 */
@@ -1191,12 +1191,12 @@ onMounted(() => {
 }
 
 .test-ok {
-  background: rgba(0, 181, 120, 0.08);
+  background: var(--tint-success);
   color: var(--success);
 }
 
 .test-fail {
-  background: rgba(255, 59, 48, 0.08);
+  background: var(--tint-danger);
   color: var(--danger);
 }
 
@@ -1227,7 +1227,7 @@ onMounted(() => {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1346,7 +1346,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: #FFFFFF;
+  background: var(--bg-card);
   border: 1px solid var(--border-1);
   border-radius: 10px;
   padding: 10px;
@@ -1423,7 +1423,7 @@ onMounted(() => {
 
 .model-editor-empty {
   font-size: 12px;
-  color: #B0B0B0;
+  color: var(--text-weak);
 }
 
 .form-actions {

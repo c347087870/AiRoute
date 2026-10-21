@@ -138,7 +138,7 @@
                 :y1="getGridY(i)"
                 :x2="svgWidth - paddingRight"
                 :y2="getGridY(i)"
-                stroke="#E0E0E0"
+                class="chart-grid-line"
                 stroke-width="1"
                 stroke-dasharray="4,4"
               />
@@ -151,7 +151,7 @@
               :y1="paddingTop"
               :x2="getX(tooltip.index)"
               :y2="svgHeight - paddingBottom"
-              stroke="#0082FC"
+              class="chart-hover-line"
               stroke-width="1.5"
               stroke-dasharray="5,5"
               opacity="0.6"
@@ -160,8 +160,8 @@
             <!-- 折线 -->
             <polyline
               :points="linePoints"
+              class="chart-line"
               fill="none"
-              stroke="#0082FC"
               stroke-width="2.5"
               stroke-linejoin="round"
               stroke-linecap="round"
@@ -174,10 +174,9 @@
               :cx="getX(index)"
               :cy="getY(point.total)"
               :r="tooltip.index === index ? 6 : 4"
-              :fill="tooltip.index === index ? '#FF5722' : '#0082FC'"
-              stroke="#FFFFFF"
               stroke-width="2"
               class="data-point"
+              :class="{ active: tooltip.index === index }"
             />
             
             <!-- X轴标签 -->
@@ -188,7 +187,7 @@
               :y="svgHeight - 10"
               text-anchor="middle"
               font-size="11"
-              fill="#666666"
+              class="chart-axis-label"
             >
               {{ point.label }}
             </text>
@@ -599,7 +598,7 @@ onMounted(() => {
 .period-btn:hover {
   border-color: var(--primary);
   color: var(--primary);
-  background: #F0F7FF;
+  background: var(--tint-primary);
 }
 
 .period-btn.active {
@@ -634,17 +633,17 @@ onMounted(() => {
 }
 
 .summary-icon.purple {
-  background: #F3E5F5;
+  background: var(--tint-purple);
   color: var(--purple);
 }
 
 .summary-icon.blue {
-  background: #E3F2FD;
+  background: var(--tint-primary-soft);
   color: var(--primary);
 }
 
 .summary-icon.orange {
-  background: #FFF3E0;
+  background: var(--tint-warning-soft);
   color: var(--warning);
 }
 
@@ -713,9 +712,32 @@ onMounted(() => {
   height: 100%;
 }
 
+/* 图表配色走 CSS 变量，暗色下自动换色 */
+.chart-grid-line {
+  stroke: var(--chart-grid);
+}
+
+.chart-hover-line {
+  stroke: var(--primary);
+}
+
+.chart-line {
+  stroke: var(--primary);
+}
+
+.chart-axis-label {
+  fill: var(--text-2);
+}
+
 .data-point {
   cursor: pointer;
   transition: r 0.2s;
+  fill: var(--primary);
+  stroke: var(--bg-card);
+}
+
+.data-point.active {
+  fill: var(--chart-active);
 }
 
 .data-point:hover {
@@ -734,11 +756,11 @@ onMounted(() => {
 /* Tooltip 样式 */
 .chart-tooltip {
   position: absolute;
-  background: rgba(255, 255, 255, 0.98);
+  background: var(--bg-elevated);
   border: 1px solid var(--border-3);
   border-radius: 8px;
   padding: 12px 16px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-pop);
   pointer-events: none;
   z-index: 1000;
   min-width: 150px;

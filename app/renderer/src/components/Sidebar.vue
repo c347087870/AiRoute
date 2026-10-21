@@ -22,6 +22,19 @@
       <div v-if="showUpdate" class="update-bar" :class="{ busy: downloading }" @click="onUpdateClick">
         {{ updateText }}
       </div>
+      <div class="theme-switch" role="group" aria-label="主题">
+        <button
+          v-for="item in themeOptions"
+          :key="item.value"
+          class="theme-btn"
+          :class="{ active: themeMode === item.value }"
+          :title="item.label"
+          :aria-pressed="themeMode === item.value"
+          @click="setMode(item.value)"
+        >
+          {{ item.icon }}
+        </button>
+      </div>
       <ModelSwitcher />
     </div>
   </nav>
@@ -33,8 +46,19 @@ import StatusBadge from './StatusBadge.vue'
 import ModelSwitcher from './ModelSwitcher.vue'
 import { getHealth } from '../api.js'
 import { useUpdate } from '../composables/useUpdate.js'
+import { useTheme } from '../composables/useTheme.js'
 
 const isOnline = ref(false)
+
+// 主题切换（与设置页「外观」共享同一份状态）
+const { mode: themeMode, setMode } = useTheme()
+
+// 三种主题模式：图标 + 悬停说明
+const themeOptions = [
+  { value: 'system', icon: '◐', label: '跟随系统' },
+  { value: 'light', icon: '☀', label: '亮色' },
+  { value: 'dark', icon: '☾', label: '暗色' }
+]
 
 const navItems = [
   { path: '/dashboard', label: '状态面板', icon: '◈' },
@@ -88,7 +112,7 @@ onMounted(() => {
 .sidebar {
   width: 220px;
   min-width: 220px;
-  background: #FFFFFF;
+  background: var(--bg-card);
   border-right: 1px solid var(--border-1);
   display: flex;
   flex-direction: column;
@@ -169,12 +193,43 @@ onMounted(() => {
 }
 
 .update-bar:hover {
-  background: rgba(0, 130, 252, 0.14);
+  background: var(--primary-bg-hover);
 }
 
 .update-bar.busy {
   color: var(--text-2);
   background: var(--bg-page);
   cursor: default;
+}
+
+/* 主题切换：三格分段按钮（跟随系统 / 亮色 / 暗色） */
+.theme-switch {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 10px;
+  padding: 2px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-2);
+  border-radius: 9px;
+}
+
+.theme-btn {
+  flex: 1;
+  padding: 4px 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1.4;
+  border-radius: 7px;
+}
+
+.theme-btn:hover {
+  color: var(--text-1);
+}
+
+.theme-btn.active {
+  background: var(--bg-card);
+  color: var(--primary);
+  box-shadow: var(--shadow-card);
 }
 </style>

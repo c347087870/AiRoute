@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppPath: () => ipcRenderer.invoke('get-app-path'),
   onTraySwitchModel: (callback) => ipcRenderer.on('tray-switch-model', (_, model) => callback(model)),
   showWindow: () => ipcRenderer.send('show-window'),
+  // 主题：把用户选择同步给主进程（nativeTheme.themeSource），影响菜单与原生对话框
+  setNativeTheme: (mode) => ipcRenderer.send('set-native-theme', mode),
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
   setAutoLaunch: (enabled) => ipcRenderer.invoke('set-auto-launch', enabled),
   // 系统状态：应用各进程内存占用（字节）

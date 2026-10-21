@@ -1065,7 +1065,7 @@ onUnmounted(stopPolling)
 .tab-btn.active {
   color: var(--primary);
   border-bottom-color: var(--primary);
-  background: #F0F7FF;
+  background: var(--tint-primary);
 }
 
 .tab-panel {
@@ -1126,9 +1126,9 @@ onUnmounted(stopPolling)
 }
 
 .warning-box {
-  background: #FFF7ED;
+  background: var(--tint-warning);
   border: 1px solid var(--warning);
-  color: #B45309;
+  color: var(--warning-text);
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;
@@ -1284,17 +1284,17 @@ onUnmounted(stopPolling)
 }
 
 .badge-ok {
-  background: #E6F7F0;
+  background: var(--tint-success);
   color: var(--success);
 }
 
 .badge-running {
-  background: #E3F2FD;
+  background: var(--tint-primary-soft);
   color: var(--primary);
 }
 
 .badge-fail {
-  background: #FFEBEA;
+  background: var(--tint-danger);
   color: var(--danger);
 }
 
@@ -1325,7 +1325,7 @@ onUnmounted(stopPolling)
 }
 
 .rank-first {
-  background: #F0F7FF;
+  background: var(--tint-primary);
 }
 
 .rank-first td {
@@ -1381,7 +1381,7 @@ onUnmounted(stopPolling)
 .cat-table .sticky-col {
   position: sticky;
   left: 0;
-  background: #FFFFFF;
+  background: var(--bg-card);
   z-index: 1;
 }
 
@@ -1514,7 +1514,7 @@ onUnmounted(stopPolling)
   margin-top: 8px;
   font-size: 12px;
   color: var(--purple);
-  background: #F3E5F5;
+  background: var(--tint-purple);
   border-radius: 8px;
   padding: 8px 10px;
 }
@@ -1523,7 +1523,7 @@ onUnmounted(stopPolling)
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, dialog, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, dialog, shell, nativeTheme } = require('electron')
 const path = require('path')
 const net = require('net')
 const http = require('http')
@@ -86,6 +86,8 @@ function createWindow() {
     minHeight: 600,
     title: 'AiRoute',
     icon: path.join(__dirname, '..', 'renderer', app.isPackaged ? 'dist' : 'public', 'icon.png'),
+    // 与前端 --bg-page 对应：暗色下先铺深色底，避免窗口出现前/缩放时闪白
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#141518' : '#F5F5F5',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -196,6 +198,14 @@ ipcMain.handle('get-app-memory', () => {
 // 供渲染进程把隐藏到托盘的窗口重新唤出
 ipcMain.on('show-window', () => {
   if (mainWindow) mainWindow.show()
+})
+
+// 渲染进程切换主题后同步原生主题，让菜单 / 原生对话框跟随用户选择（而非只跟随系统）
+ipcMain.on('set-native-theme', (_, mode) => {
+  if (!['system', 'light', 'dark'].includes(mode)) return
+  nativeTheme.themeSource = mode
+  // 窗口底色一并跟随，避免缩放/切换主题时从边缘露出旧底色
+  if (mainWindow) mainWindow.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#141518' : '#F5F5F5')
 })
 
 // 渲染进程切换模型或修改 Provider 配置后，重建托盘菜单保证选中态与模型列表最新

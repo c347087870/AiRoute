@@ -19,12 +19,12 @@ defineProps({
 }
 
 .badge.online {
-  background: rgba(0, 181, 120, 0.08);
+  background: var(--tint-success);
   color: var(--success);
 }
 
 .badge.offline {
-  background: rgba(255, 59, 48, 0.08);
+  background: var(--tint-danger);
   color: var(--danger);
 }
 </style>

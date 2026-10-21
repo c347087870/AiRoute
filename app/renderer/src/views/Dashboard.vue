@@ -381,7 +381,7 @@ onMounted(async () => {
 /* 失败数提示，鼠标悬停显示完整口径说明 */
 .stat-failed {
   font-size: 11px;
-  color: #B0B0B0;
+  color: var(--text-weak);
   margin-top: 4px;
   cursor: help;
 }
@@ -516,13 +516,13 @@ onMounted(async () => {
 }
 
 .token-badge.today {
-  background: #E3F2FD;
-  color: #1976D2;
+  background: var(--tint-primary-soft);
+  color: var(--primary-text);
 }
 
 .token-badge.month {
-  background: #F3E5F5;
-  color: #7B1FA2;
+  background: var(--tint-purple);
+  color: var(--purple-text);
 }
 
 .token-stat-values {
