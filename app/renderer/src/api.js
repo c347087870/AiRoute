@@ -131,6 +131,14 @@ export function testProvider(name, model = '') {
   return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000 }).then(r => r.data)
 }
 
+// 用 URL + Key 直接探测上游模型清单（无状态：表单未保存也能用）
+// 服务端最多串行探测两个协议端点（各 10s）+ 限时补上限，故超时放宽到 45s
+export function fetchProviderModels({ baseURL = '', openaiURL = '', apiKey = '' }) {
+  return api
+    .post('/api/providers/fetch-models', { baseURL, openaiURL, apiKey }, { timeout: 45000 })
+    .then(r => r.data)
+}
+
 export function getHealth() {
   return api.get('/api/health').then(r => r.data)
 }

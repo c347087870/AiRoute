@@ -19,6 +19,7 @@ const wbIdentity = require('./workbuddy/identity')
 const wbSession = require('./workbuddy/session')
 const wbAnthropic = require('./workbuddy/anthropic')
 const wbResponses = require('./workbuddy/responses')
+const providerModels = require('./provider-models')
 
 const {
   getConfig,
@@ -920,6 +921,25 @@ function cleanupProviderRefs(name, config) {
 
   return cleaned
 }
+
+// 用 URL + Key 探测上游模型清单：新增 Provider 时表单尚未落盘，所以不依赖已存在的配置。
+// 必须注册在 /api/providers/:name 之前——否则会被 :name 路由当成名为 fetch-models 的 Provider 吞掉
+app.post('/api/providers/fetch-models', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {}
+  try {
+    const result = await providerModels.fetchModels({
+      baseURL: typeof body.baseURL === 'string' ? body.baseURL : '',
+      openaiURL: typeof body.openaiURL === 'string' ? body.openaiURL : '',
+      apiKey: typeof body.apiKey === 'string' ? body.apiKey : ''
+    })
+    // 探测失败属于「用户输入/上游」问题，用 400 便于前端区分本地服务异常
+    if (!result.ok) return res.status(400).json(result)
+    res.json(result)
+  } catch {
+    // 不记录 apiKey：这里是唯一会接触明文密钥的非配置路径
+    res.status(500).json({ ok: false, error: '探测模型列表失败，请检查本地服务日志' })
+  }
+})
 
 app.post('/api/providers/:name', (req, res) => {
   const config = getConfig()
