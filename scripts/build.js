@@ -52,7 +52,7 @@ function copyServerFiles() {
   fs.ensureDirSync(serverBldDir)
   // 运行时数据与个人配置一律不进产物：state/fallback/rules/server-config 属「用户自己的配置」，
   // 随包分发会让新用户首启就选中一个不存在的模型（且 server-config 可能带上作者机器指纹）
-  const exclude = ['models.json', 'state.json', 'fallback.json', 'rules.json', 'server-config.json', 'node_modules', 'logs', 'cost.json', 'workbuddy-auths', 'workbuddy-state.json', 'usage.json', 'credit-history.json', 'token-stats.json', 'benchmark-questions.json', 'benchmark-runs.json', 'version-cache.json', '.npmrc']
+  const exclude = ['models.json', 'state.json', 'fallback.json', 'rules.json', 'server-config.json', 'node_modules', 'logs', 'cost.json', 'workbuddy-auths', 'workbuddy-state.json', 'usage.json', 'credit-history.json', 'token-stats.json', 'benchmark-questions.json', 'benchmark-runs.json', 'version-cache.json', '.npmrc', 'channels-data']
   const entries = fs.readdirSync(serverSrcDir)
   for (const entry of entries) {
     if (exclude.includes(entry)) continue

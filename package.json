@@ -8,9 +8,10 @@
     "dev": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development npx electron .\"",
     "dev:web": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\"",
     "build": "node scripts/build.js",
-    "test": "node scripts/test-workbuddy.js && node scripts/test-update.js",
+    "test": "node scripts/test-workbuddy.js && node scripts/test-update.js && node scripts/test-channels.js && node scripts/test-auto-strategy.js",
     "test:update": "node scripts/test-update.js",
-    "test:e2e": "node scripts/smoke-e2e.js"
+    "test:e2e": "node scripts/smoke-e2e.js",
+    "channels:login": "node scripts/channels-login.js"
   },
   "keywords": ["llm", "router", "gateway", "anthropic", "openai", "electron"],
   "author": "c",

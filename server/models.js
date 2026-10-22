@@ -9,8 +9,9 @@ const REF_SEP = '/'
 // Provider 允许写入的字段白名单，防止任意字段落盘
 const PROVIDER_TEXT_FIELDS = ['displayName', 'baseURL', 'openaiURL', 'type', 'region']
 
-// Provider 类型白名单：workbuddy 走账号池转发，其余为空（通用端点）
-const PROVIDER_TYPES = ['workbuddy']
+// Provider 类型白名单：workbuddy / channel 走账号池转发，其余为空（通用端点）
+// channel = 十个免费账号渠道（见 server/channels/），模型 id 形如 provider/model
+const PROVIDER_TYPES = ['workbuddy', 'channel']
 
 // 区域白名单：cn（国内版，默认）/ global（国际版）
 // workbuddy 源按区域区分：每个区域最多一个源，各自只调度本区域的账号
@@ -219,6 +220,16 @@ function isWorkbuddyProvider(provider) {
   return !!provider && provider.type === 'workbuddy'
 }
 
+// 是否 Channel 类型 Provider（十个账号渠道，同样不需要 apiKey/URL）
+function isChannelProvider(provider) {
+  return !!provider && provider.type === 'channel'
+}
+
+// 不需要 apiKey 的 Provider 类型（转发链路的准入判断，避免每个类型各写一处）
+function isPooledProvider(provider) {
+  return isWorkbuddyProvider(provider) || isChannelProvider(provider)
+}
+
 // 返回配置中 WorkBuddy 源的名称列表
 function listWorkbuddyProviders(config) {
   const names = []
@@ -290,6 +301,8 @@ module.exports = {
   sanitizeProviderInput,
   sanitizeModels,
   isWorkbuddyProvider,
+  isChannelProvider,
+  isPooledProvider,
   listWorkbuddyProviders,
   listWorkbuddyProvidersByRegion,
   workbuddyProviderNameForRegion,

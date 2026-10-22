@@ -20,6 +20,9 @@ const wbSession = require('./workbuddy/session')
 const wbAnthropic = require('./workbuddy/anthropic')
 const wbResponses = require('./workbuddy/responses')
 const providerModels = require('./provider-models')
+const channels = require('./channels')
+const channelSse = require('./channels/sse')
+const autoStrategy = require('./auto-strategy')
 
 const {
   getConfig,
@@ -90,6 +93,15 @@ function saveFallback(fallback) {
 
 // 构建本次请求要尝试的模型链：主模型 + 兜底模型
 function buildProviderChain(config, state, fallbackData, body) {
+  // 客户端点名了 auto 伪模型（/v1/models 里那三个）：这次请求按它的策略挑模型，
+  // 与面板里的激活模型无关。其它 model 值照旧被忽略 —— 保持「切换只在 AiRoute 里做」。
+  const requested = typeof body?.model === 'string' ? body.model.trim() : ''
+  const autoModel = autoStrategy.findAutoModel(requested)
+  if (autoModel) {
+    const chain = autoStrategy.buildChain(config, autoModel, fallbackData.model)
+    if (chain.length) return { chain, primaryRef: chain[0].ref, autoModel }
+  }
+
   const chain = []
   let requestedRef = state.current
 
@@ -179,6 +191,35 @@ async function handleRequest(req, res) {
   for (const entry of chain) {
     const provider = entry.provider
     const isFallback = entry.ref !== primaryRef
+
+    // Channel 类型：渠道包（十家免费账号 + WorkBuddy 的国内版/国际版）
+    if (models.isChannelProvider(provider)) {
+      try {
+        // WorkBuddy 的补全不走 worker：它的 payload 管线在主进程，绕进渠道包
+        // 的 GenerateOptions 再转回 OpenAI 是两次有损转换（见 worker.mjs 注释）
+        const realm = channelWorkbuddyRealm(entry.model.id)
+        if (realm) {
+          await handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses, realm)
+        } else {
+          await handleChannelRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses)
+        }
+        return
+      } catch (err) {
+        lastError = err
+        logFailure({ ...baseLog,
+          model: entry.ref,
+          status: err.status || 500,
+          error: err.message,
+          detail: err.body || undefined,
+          kind: err.kind || undefined,
+          code: err.code || undefined,
+          responseTime: Date.now() - startTime,
+          fallback: isFallback,
+          fallbackFrom: isFallback ? primaryRef : undefined
+        })
+        continue
+      }
+    }
 
     // WorkBuddy 类型：走账号池转发（不需要 apiKey / 端点 URL）
     if (models.isWorkbuddyProvider(provider)) {
@@ -496,8 +537,253 @@ async function handleRequest(req, res) {
   })
 }
 
-// WorkBuddy 类型 Provider 的请求转发：账号池化 + 换号重试 + SSE 重建（由 runtime 内部闭环）
-async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses) {
+// WorkBuddy 在渠道包里注册成两个 provider（国内版 / 国际版），模型 id 的前缀
+// 就是区域。拆成两个而不是一个：模型 id 在两地清单里会重名，而 `provider/model`
+// 是 AiRoute 的引用键，合成一个就无法表达「国内版的 X」。
+const WORKBUDDY_CHANNEL_REALM = { workbuddy: 'cn', 'workbuddy-global': 'global' }
+
+// 返回该渠道模型对应的 WorkBuddy 区域；不是 WorkBuddy 的模型返回 ''
+function channelWorkbuddyRealm(modelId) {
+  const provider = String(modelId || '').split('/')[0]
+  return WORKBUDDY_CHANNEL_REALM[provider] || ''
+}
+
+// 渠道测试的「传输层抖动」判据与重试间隔
+//
+// 为什么需要重试：本机 DNS 走代理的 fake-IP（198.18.x.x），实测会出现成片的
+// `getaddrinfo ENOTFOUND` —— 同一轮测试里 loomy / raccoon 同时 `fetch failed`，
+// 只花 2 到 6 毫秒（请求根本没发出去），过几分钟原样重测又全通。这类失败与
+// 「模型/账号真的不可用」有本质区别：把一次 DNS 抖动写成红点并持久化，用户下次
+// 打开模型页会以为模型坏了。
+//
+// 只重试「请求没打出去」这一类。业务错误（401、模型不存在、额度用尽、上游限流）
+// 一律不重试 —— 重试无用，还多打一次上游、平白增加风控风险。超时同样不重试：
+// sse chunk timeout 是 120 秒，重试一次会把整轮测试拖到 240 秒，超过前端 180 秒
+// 的请求超时，用户只会看到「请求超时」而不是真实原因。
+const TEST_TRANSIENT_RE = /(fetch failed|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|socket hang up|terminated|UND_ERR_|渠道网络请求失败)/i
+const TEST_TRANSIENT_RETRY_MS = 800
+
+function isTransientTestError(error) {
+  const message = String(error?.message || '')
+  if (/timeout/i.test(message)) return false
+  return TEST_TRANSIENT_RE.test(message) || TEST_TRANSIENT_RE.test(String(error?.code || ''))
+}
+
+// 渠道连通性测试（带一次抖动重试）：第二次仍失败就原样抛出，让界面看到真实原因。
+// 调用方不用关心重试，重试与否只看错误是传输层抖动还是业务结论。
+async function channelTestCompletion(model) {
+  try {
+    return await channelTestAttempt(model)
+  } catch (err) {
+    if (!isTransientTestError(err)) throw err
+    await new Promise(resolve => setTimeout(resolve, TEST_TRANSIENT_RETRY_MS))
+    return channelTestAttempt(model)
+  }
+}
+
+// 一次尝试。WorkBuddy 的补全不走 worker（它的适配器只提供目录，
+// 见 worker.mjs），所以这里必须分流 —— 否则测试面板对 WorkBuddy 永远报
+// 「适配器未实现」，而真实请求其实是通的。
+async function channelTestAttempt(model) {
+  const bare = String(model || '').replace(/^[^/]+\//, '')
+  const realm = channelWorkbuddyRealm(model)
+  if (realm) {
+    if (!workbuddy.getRuntime()) throw new Error('WorkBuddy 运行时未初始化')
+    let aggregated = null
+    await workbuddy.forwardChat({
+      // max_tokens 不能太小：带 reasoning 的模型会把几十个 token 全花在思考上，
+      // 正文为空，测试就显示成「回复（空）」
+      body: JSON.stringify({ model: bare, messages: [{ role: 'user', content: 'ping' }], stream: false, max_tokens: 64 }),
+      isStream: false,
+      model: bare,
+      realm,
+      onDone: payload => { aggregated = payload }
+    })
+    if (!aggregated) throw new Error('WorkBuddy 未返回有效响应')
+    return aggregated
+  }
+
+  const rt = channels.getRuntime()
+  if (!rt) throw new Error('渠道运行时未初始化')
+  const collector = channelSse.createCollector(model)
+  await rt.complete({
+    model,
+    openAi: { messages: [{ role: 'user', content: 'ping' }], max_tokens: 64, stream: false }
+  }, chunk => collector.push(chunk))
+  return collector.completion()
+}
+
+// Channel 类型 Provider 的请求转发：十个免费账号渠道（LobsterAI / Qoder / TRAE /
+// Cline / Loomy / Raccoon / MiniMax / ZCode / Gemini / Qoder CN）。
+// 真正的协议适配、登录态、账号池、限流标记都在 worker 里的渠道包；这里只做
+// 「协议收口 + 转帧 + 记账」。换号逻辑因此不在这里 —— 渠道包内部已经闭环，
+// 在外面再重试一次会让同一个请求在两个账号上各花一次配额。
+async function handleChannelRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses) {
+  const rt = channels.getRuntime()
+  if (!rt) throw Object.assign(new Error('渠道运行时未初始化'), { status: 503 })
+  if (!rt.handles(entry.model.id)) {
+    throw Object.assign(new Error(`渠道未提供模型 ${entry.model.id}`), { status: 404 })
+  }
+
+  const isStream = !!req.body?.stream
+  // 三个协议入口在这里收敛成 OpenAI Chat 形态：渠道包的适配器只认这一种。
+  // Anthropic 与 Responses 的回程再用 workbuddy 的转换器转回去，避免为渠道
+  // 单独维护第二套协议实现。
+  const openAi = clientIsAnthropic
+    ? wbAnthropic.toOpenAI(req.body || {})
+    : clientIsResponses
+      ? wbResponses.toChat(req.body || {})
+      : { ...(req.body || {}) }
+
+  // 客户端断开即取消上游：渠道包内部会释放该次请求占用的并发额度，
+  // 不取消会让用户在界面里点了停止、上游却继续跑完
+  const controller = new AbortController()
+  const onClose = () => { if (!res.writableEnded) controller.abort() }
+  res.on('close', onClose)
+
+  const recordUsage = usage => {
+    const stat = channelSse.toStatUsage(usage) || upstream.emptyUsage()
+    tokenStats.recordTokens(entry.ref, stat)
+    return stat
+  }
+
+  // 流式状态提到 try 之外：出错时得先知道「是否已经对客户端承诺过 200」，
+  // 已经发出帧之后再抛错只会让外层在已发送的响应上再写一次 JSON 头（ERR_HTTP_HEADERS_SENT）
+  let started = false
+  let emitter = null
+  let collector = null
+  const startSse = () => {
+    if (started) return
+    started = true
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+  }
+  // 已开始流式后失败：补错误帧 + [DONE] 收尾。不换源 —— 客户端已经收到
+  // 这次回答的前缀，再换一家只会把两段不同内容拼在一起
+  const failStream = message => {
+    try {
+      if (emitter) res.write(emitter.fail(message))
+      else res.write(`data: ${JSON.stringify({ error: { message, type: 'upstream_error', code: 'channel_stream_error' } })}\n\n`)
+      if (!emitter) res.write('data: [DONE]\n\n')
+      res.end()
+    } catch {
+      /* 下游已断开 */
+    }
+  }
+
+  try {
+    if (isStream) {
+      // Anthropic / Responses 客户端：把 OpenAI 帧喂给既有转换器；OpenAI 客户端直写
+      emitter = clientIsAnthropic
+        ? wbAnthropic.createStreamEmitter({ model: entry.ref })
+        : clientIsResponses
+          ? wbResponses.createStreamEmitter({ model: entry.ref })
+          : null
+      const writer = channelSse.createStreamWriter(entry.ref)
+      collector = writer.collector
+
+      await rt.complete({ model: entry.model.id, openAi }, chunk => {
+        const frames = writer.write(chunk)
+        if (!frames) return
+        startSse()
+        if (emitter) {
+          // 转换器按「一行 data 帧」消费，故拆开逐帧投喂
+          for (const frame of frames.split('\n\n')) {
+            if (!frame) continue
+            const out = emitter.push(frame)
+            if (out) res.write(out)
+          }
+        } else {
+          res.write(frames)
+        }
+      }, controller.signal)
+
+      if (collector.failed) throw Object.assign(new Error('渠道流未正常收尾'), { status: 502 })
+      startSse()
+      if (emitter) {
+        const tail = emitter.end()
+        if (tail) res.write(tail)
+      } else {
+        res.write(writer.end())
+      }
+      res.end()
+
+      const usage = recordUsage(collector.usage)
+      logger.log({
+        model: entry.ref,
+        status: 200,
+        responseTime: Date.now() - startTime,
+        fallback: isFallback,
+        fallbackFrom: isFallback ? primaryRef : undefined,
+        inputTokens: usage.input,
+        outputTokens: usage.output,
+        cacheReadTokens: usage.cacheRead,
+        cacheWriteTokens: usage.cacheWrite,
+        totalTokens: upstream.usageTotalOrNull(usage),
+        stream: true
+      })
+      return
+    }
+
+    // 非流式：聚合后一次返回
+    collector = channelSse.createCollector(entry.ref)
+    await rt.complete({ model: entry.model.id, openAi }, chunk => collector.push(chunk), controller.signal)
+    if (collector.failed) throw Object.assign(new Error('渠道生成未正常收尾'), { status: 502 })
+    const completion = collector.completion()
+    const usage = recordUsage(collector.usage)
+    logger.log({
+      model: entry.ref,
+      status: 200,
+      responseTime: Date.now() - startTime,
+      fallback: isFallback,
+      fallbackFrom: isFallback ? primaryRef : undefined,
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cacheReadTokens: usage.cacheRead,
+      cacheWriteTokens: usage.cacheWrite,
+      totalTokens: upstream.usageTotalOrNull(usage)
+    })
+    res.json(clientIsAnthropic
+      ? wbAnthropic.toMessage(completion, entry.ref)
+      : clientIsResponses
+        ? wbResponses.toResponse(completion, entry.ref)
+        : completion)
+  } catch (err) {
+    // 已经发出 200 与部分帧：收尾并结束，不把错误交给外层（外层会再写一次
+    // 响应头，在已发送的响应上必然抛 ERR_HTTP_HEADERS_SENT）
+    if (started) {
+      failStream(err.message)
+      const stat = channelSse.toStatUsage(collector?.usage) || upstream.emptyUsage()
+      if (collector?.usage) tokenStats.recordTokens(entry.ref, stat)
+      logFailure({
+        model: entry.ref,
+        status: 502,
+        error: err.message,
+        responseTime: Date.now() - startTime,
+        fallback: isFallback,
+        fallbackFrom: isFallback ? primaryRef : undefined,
+        inputTokens: stat.input,
+        outputTokens: stat.output,
+        totalTokens: upstream.usageTotalOrNull(stat),
+        stream: true
+      })
+      return
+    }
+    // 渠道包把上游状态码放在 statusCode 上（模型不存在 404、无可用账号 503 等）；
+    // 一律压成 500 会让「换个模型就行」看起来像网关故障
+    throw Object.assign(err, { status: err.status || err.statusCode || 502 })
+  } finally {
+    res.removeListener('close', onClose)
+  }
+}
+
+// WorkBuddy 的请求转发：账号池化 + 换号重试 + SSE 重建（由 runtime 内部闭环）
+//
+// realmOverride：渠道化之后区域由模型 id 前缀决定（workbuddy/ vs workbuddy-global/），
+// 不再来自 Provider 配置；旧路径（type: workbuddy 的源）仍然传空、按 Provider 取。
+async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, primaryRef, clientIsAnthropic, clientIsResponses, realmOverride) {
   const rt = workbuddy.getRuntime()
   if (!rt) {
     throw new Error('WorkBuddy 运行时未初始化')
@@ -507,9 +793,13 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
   const clientIP = iputil.extractClientIP(req)
   // WorkBuddy 源的推理档位走每个模型独立配置（不回落全局档位；未配置则不干预）
   const modelEffort = entry.model.reasoningEffort || ''
-  // 区域：该 Provider 是国际版还是国内版。据此刻隔离选号与出站域名，
-  // 保证「workbuddy（国内）」的请求绝不会落到国际版账号上，反之亦然
-  const realm = models.providerRegion(entry.provider)
+  // 区域：据此刻隔离选号与出站域名，保证「国内版」的请求绝不会落到国际版
+  // 账号上，反之亦然
+  const realm = realmOverride || models.providerRegion(entry.provider)
+  // 上游模型 id：渠道化之后 entry.model.id 带区域前缀（workbuddy/<m>），
+  // 上游只认裸 id。entry.ref（channels/workbuddy/<m>）仍用于日志与记账。
+  const modelId = String(entry.model.id || '')
+  const upstreamModel = channelWorkbuddyRealm(modelId) ? modelId.slice(modelId.indexOf('/') + 1) : modelId
 
   // Anthropic 客户端（/v1/messages）与 Responses 客户端（/v1/responses）：
   // 请求体先转 OpenAI Chat 形态，再进改写/上游管线
@@ -555,7 +845,7 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
         body: fwdBody,
         isStream: true,
         clientIP,
-        model: entry.model.id,
+        model: upstreamModel,
         reasoningEffort: modelEffort,
         // 区域：限定只从该区域的账号里选号（国内源不碰国际账号，反之亦然）
         realm,
@@ -632,7 +922,7 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
     body: fwdBody,
     isStream: false,
     clientIP,
-    model: entry.model.id,
+    model: upstreamModel,
     reasoningEffort: modelEffort,
     // 区域：限定只从该区域的账号里选号
     realm,
@@ -701,7 +991,11 @@ app.get('/v1/models', (req, res) => {
     id, object: 'model', created: 0, owned_by: 'airoute'
   }))
 
-  res.json({ object: 'list', data: [...configured, ...extra] })
+  // 三个 auto 伪模型排在配置模型之后、别名之前：客户端能选到它们，
+  // 但不会挤掉真实模型（有些客户端把列表第一项当默认值）
+  const autoModels = autoStrategy.listAutoModels().filter(item => !seen.has(item.id))
+
+  res.json({ object: 'list', data: [...configured, ...autoModels, ...extra] })
 })
 
 // ==================== Anthropic token 计数（Claude Code 预估用）====================
@@ -712,9 +1006,14 @@ app.post('/v1/messages/count_tokens', async (req, res) => {
   const body = req.body || {}
   const { chain } = buildProviderChain(getConfig(), getState(), getFallback(), body)
 
-  // WorkBuddy 通道：真实计数（Anthropic 请求先转 OpenAI 形态；极小输出预算，空回答属预期不重试）
+  // WorkBuddy：真实计数（Anthropic 请求先转 OpenAI 形态；极小输出预算，空回答属预期不重试）
+  // 渠道化之后它也是 channel 源，区域与上游模型 id 都要从模型 id 前缀还原
   for (const entry of chain) {
-    if (!models.isWorkbuddyProvider(entry.provider)) continue
+    const isChannel = models.isChannelProvider(entry.provider)
+    const realm = isChannel
+      ? channelWorkbuddyRealm(entry.model.id)
+      : (models.isWorkbuddyProvider(entry.provider) ? models.providerRegion(entry.provider) : '')
+    if (!realm) continue
     if (!workbuddy.getRuntime()) break
     try {
       const chatBody = {
@@ -730,10 +1029,10 @@ app.post('/v1/messages/count_tokens', async (req, res) => {
       await workbuddy.forwardChat({
         body: JSON.stringify(chatBody),
         isStream: false,
-        model: entry.model.id,
+        model: isChannel ? String(entry.model.id).replace(/^[^/]+\//, '') : entry.model.id,
         reasoningEffort: entry.model.reasoningEffort || '',
         // 区域：与该源账号池一致
-        realm: models.providerRegion(entry.provider),
+        realm,
         noEmptyRetry: true,
         isAborted: () => clientGone(req, res),
         onDone: payload => {
@@ -748,10 +1047,32 @@ app.post('/v1/messages/count_tokens', async (req, res) => {
     }
   }
 
+  // Channel 通道（渠道包里的另外十家）：同样走真实计数
+  for (const entry of chain) {
+    if (!models.isChannelProvider(entry.provider)) continue
+    // WorkBuddy 已在上面处理过（它的适配器只提供目录，不进 worker 补全）
+    if (channelWorkbuddyRealm(entry.model.id)) continue
+    const rt = channels.getRuntime()
+    if (!rt) continue
+    try {
+      const collector = channelSse.createCollector(entry.model.id)
+      await rt.complete({
+        model: entry.model.id,
+        openAi: { ...wbAnthropic.toOpenAI(body), max_tokens: 8, stream: false }
+      }, chunk => collector.push(chunk))
+      const usage = collector.usage
+      if (!usage) continue
+      // Anthropic 的 input_tokens = 未缓存 + 缓存读 + 缓存写 = OpenAI 的 prompt_tokens
+      return res.json({ input_tokens: usage.prompt_tokens })
+    } catch {
+      continue // 计数失败不阻断客户端，降级到转发/估算
+    }
+  }
+
   // 通用 Provider：Anthropic 端点原样转发（对方原生支持 count_tokens 时结果最准）
   for (const entry of chain) {
     const provider = entry.provider
-    if (models.isWorkbuddyProvider(provider)) continue
+    if (models.isPooledProvider(provider)) continue
     if (!provider.apiKey || !provider.baseURL) continue
     try {
       const base = String(provider.baseURL).replace(/\/+$/, '')
@@ -864,30 +1185,15 @@ app.put('/api/providers/:name', (req, res) => {
     return res.status(404).json({ error: `Provider ${name} not found` })
   }
   const update = sanitizeProviderInput(req.body)
-  // 不允许把通用 Provider 改成 WorkBuddy（若该区域已有 WorkBuddy 源），防止绕过唯一性限制
-  if (update.type === 'workbuddy' && !models.isWorkbuddyProvider(config[name])) {
-    const region = models.normalizeRegion(update.region)
-    const existing = models.listWorkbuddyProvidersByRegion(config)[region] || []
-    if (existing.length) {
-      const label = region === 'global' ? '国际版' : '国内版'
-      return res.status(409).json({ error: `${label} WorkBuddy 源只能有一个（已存在：${existing[0]}）` })
-    }
+  // WorkBuddy 不再是独立的源类型：它已经是渠道包里的第 11 家，
+  // 由 server/channels 的目录同步维护（见 migrateWorkbuddyProviders）
+  if (update.type === 'workbuddy') {
+    return res.status(400).json({ error: 'WorkBuddy 已并入「账号渠道」，不再单独建源' })
   }
-  applyPoolModelsForWorkbuddy(update)
   config[name] = { ...config[name], ...update }
   saveConfig(config)
   res.json({ ok: true })
 })
-
-// workbuddy 类型 Provider 的模型清单由账号池统一维护：未显式提供时用账号池启用清单填充
-// region：该源的区域，决定用哪一份启用清单（两地模型清单不同）
-function applyPoolModelsForWorkbuddy(input) {
-  if (!models.isWorkbuddyProvider(input)) return
-  if (Array.isArray(input.models) && input.models.length > 0) return
-  if (!workbuddy.getRuntime()) return
-  const enabled = workbuddy.getEnabledModels(input.region)
-  if (enabled.length) input.models = enabled
-}
 
 app.delete('/api/providers/:name', (req, res) => {
   const config = getConfig()
@@ -960,16 +1266,10 @@ app.post('/api/providers/:name', (req, res) => {
     return res.status(409).json({ error: `Provider ${name} already exists` })
   }
   const input = sanitizeProviderInput(req.body)
-  // WorkBuddy 源全局每个区域唯一：同区域已存在时拒绝新建（前端按钮也会同步禁用）
-  if (models.isWorkbuddyProvider(input)) {
-    const region = models.normalizeRegion(input.region)
-    const existing = models.listWorkbuddyProvidersByRegion(config)[region] || []
-    if (existing.length) {
-      const label = region === 'global' ? '国际版' : '国内版'
-      return res.status(409).json({ error: `${label} WorkBuddy 源只能有一个（已存在：${existing[0]}）` })
-    }
+  // WorkBuddy 已并入渠道包：新建源只允许「账号渠道」这一种池化形态
+  if (input.type === 'workbuddy') {
+    return res.status(400).json({ error: 'WorkBuddy 已并入「账号渠道」，不再单独建源' })
   }
-  applyPoolModelsForWorkbuddy(input)
   config[name] = input
   saveConfig(config)
   res.json({ ok: true })
@@ -984,7 +1284,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
   }
 
   const provider = toProviderView(raw)
-  if (!provider.apiKey && !models.isWorkbuddyProvider(provider)) {
+  if (!provider.apiKey && !models.isPooledProvider(provider)) {
     return res.json({ ok: false, error: 'API Key 未配置', latency: 0 })
   }
   if (!provider.models.length) {
@@ -993,6 +1293,32 @@ app.post('/api/providers/:name/test', async (req, res) => {
 
   const requestedId = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
   const model = (requestedId && provider.models.find(m => m.id === requestedId)) || provider.models[0]
+
+  // Channel 类型：交给渠道包的适配器发一次真实短对话（换号与限流在包内闭环）
+  if (models.isChannelProvider(provider)) {
+    const start = Date.now()
+    // 与 /api/channels/test 同口径：未点名模型时依次试前几个，单个模型此刻
+    // 调不通（上游目录与调用权限不同步）不足以判定整个源不通
+    const candidates = requestedId ? [model.id] : provider.models.slice(0, 3).map(m => m.id)
+    const tried = []
+    for (const id of candidates) {
+      try {
+        const completion = await channelTestCompletion(id)
+        const message = completion.choices?.[0]?.message || {}
+        return res.json({
+          ok: true,
+          latency: Date.now() - start,
+          model: id,
+          reply: (message.content || message.reasoning_content || '').slice(0, 80),
+          tried
+        })
+      } catch (err) {
+        tried.push({ model: id, error: err.message })
+      }
+    }
+    const last = tried[tried.length - 1]
+    return res.json({ ok: false, error: last.error, latency: Date.now() - start, model: last.model, tried })
+  }
 
   // WorkBuddy 类型：通过账号池发一次真实短对话验证连通性
   if (models.isWorkbuddyProvider(provider)) {
@@ -1362,8 +1688,9 @@ app.get('/api/workbuddy/models/enabled', async (req, res) => {
   res.json({ ok: true, region, models: workbuddy.getEnabledModelsWithEfforts(region) })
 })
 
-// 保存启用模型清单，并同步写入同区域 workbuddy 类型 Provider 的 models 字段
-app.post('/api/workbuddy/models/enabled', (req, res) => {
+// 保存启用模型清单。WorkBuddy 的模型现在挂在渠道源里（id 形如 workbuddy/<m>），
+// 所以清单变了要重刷一次渠道目录，否则界面与 /v1/models 会停在旧结果上。
+app.post('/api/workbuddy/models/enabled', async (req, res) => {
   if (!requireWorkbuddy(res)) return
   const region = models.normalizeRegion(req.body?.region)
   const incoming = Array.isArray(req.body?.models) ? req.body.models : []
@@ -1393,33 +1720,16 @@ app.post('/api/workbuddy/models/enabled', (req, res) => {
   }
   engine.saveServerConfig(serverConfig)
 
-  // 同步到**同区域**的 workbuddy Provider（引用体系 provider/modelId 依赖此字段）。
-  // 只同步本区域：把国内清单写进国际源会让引用指向不存在的模型
-  // 保留 Provider 侧已配置的模型级推理档位与上下文/输出上限（按模型 id 匹配，
-  // 不被账号池清单覆盖——这两项在 Provider 弹窗里可逐模型调整）
-  const config = getConfig()
-  let synced = 0
-  for (const [name, raw] of Object.entries(config)) {
-    const provider = toProviderView(raw)
-    if (!models.isWorkbuddyProvider(provider)) continue
-    if (models.providerRegion(provider) !== region) continue
-    const savedByID = new Map((provider.models || []).map(m => [m.id, m]))
-    config[name] = {
-      ...raw,
-      models: list.map(m => {
-        const saved = savedByID.get(m.id)
-        if (!saved) return { ...m }
-        return {
-          ...m,
-          maxContext: saved.maxContext ?? m.maxContext ?? null,
-          maxOutput: saved.maxOutput ?? m.maxOutput ?? null,
-          reasoningEffort: saved.reasoningEffort || ''
-        }
-      })
-    }
-    synced++
+  // 同步到渠道源：引用体系（provider/modelId）依赖 channels 的 models 字段。
+  // 只刷新目录，不重建配置 —— 模型级设置（上下文/输出上限、推理档位）由
+  // syncChannelProvider 按模型 id 合并保留。
+  let synced = false
+  try {
+    await syncChannelProviderFromRuntime()
+    synced = true
+  } catch (err) {
+    console.error('[aiRoute] 渠道目录刷新失败:', err.message)
   }
-  if (synced > 0) saveConfig(config)
 
   res.json({ ok: true, region, models: list, synced })
 })
@@ -1997,47 +2307,326 @@ function initWorkbuddy() {
 
 initWorkbuddy()
 
-// WorkBuddy 源归一化：每个区域只允许一个源，同区域多于一个时清空重建
-// （账号池数据不受影响）。跨区域的多源是正常状态，不动。
-function normalizeWorkbuddyProviders() {
+// ===== 免费账号渠道（server/channels/）=====
+//
+// 渠道包自己持有账号池、登录态、模型黑名单与积分，AiRoute 只在外面做两件事：
+// 把它的模型目录同步成一个 Provider，以及把请求转进 worker。
+//
+// 为什么只建一个 Provider 而不是十一家：渠道包的模型 id 本来就是
+// `provider/model` 形态（gemini/gemini-2.5-pro、workbuddy/auto），而 AiRoute 的
+// 引用格式是 `providerName/modelId` 且 modelId 允许含斜杠 —— 一个 `channels` 源
+// 即可无损表达，配置里也不用为每家各留一条会自动重生的记录。
+const CHANNEL_PROVIDER_ID = 'channels'
+const CHANNEL_PROVIDER_NAME = '账号渠道（11 家）'
+// 历次默认名。渠道数变了（10 → 11）之后，只有用户自己改过名字才需要保留，
+// 还是旧默认值的应当跟着升级 —— 否则界面上会长期写着「10 家」。
+const LEGACY_CHANNEL_NAMES = ['账号渠道', '账号渠道（10 家）']
+
+// 旧形态迁移：WorkBuddy 曾经是独立的 `type: 'workbuddy'` 源（每个区域一个），
+// 现在是渠道包里的第 11 家（两个 provider：workbuddy / workbuddy-global）。
+//
+// 迁移必须连模型级设置一起搬（显示名、推理档位），否则用户调过的档位会在升级后
+// 静默失效；路由规则与当前选择里的引用也要改写，否则会指向一个已被删掉的源。
+function migrateWorkbuddyProviders() {
   try {
     const config = getConfig()
-    const byRegion = models.listWorkbuddyProvidersByRegion(config)
+    const names = models.listWorkbuddyProviders(config)
+    if (names.length === 0) return
 
-    for (const region of ['cn', 'global']) {
-      const names = byRegion[region] || []
-      if (names.length <= 1) continue
-
-      const label = region === 'global' ? '国际版' : '国内版'
-      console.log(`[aiRoute] 检测到 ${names.length} 个${label} WorkBuddy 源（${names.join('、')}），清空重建为单一源`)
-      for (const name of names) {
-        delete config[name]
-        cleanupProviderRefs(name, config)
+    // 老源名 → 渠道包里的模型 id 前缀
+    const prefixOf = new Map()
+    const carried = []
+    for (const name of names) {
+      const provider = config[name]
+      const prefix = models.providerRegion(provider) === 'global' ? 'workbuddy-global' : 'workbuddy'
+      prefixOf.set(name, prefix)
+      for (const model of provider.models || []) {
+        const entry = typeof model === 'string' ? { id: model } : { ...model }
+        if (!entry.id) continue
+        carried.push({ ...entry, id: `${prefix}/${entry.id}` })
       }
-
-      // 重建一个干净的源：模型清单用该区域的账号池启用清单
-      // 基名固定，避免 while 里用「上一轮结果」做基名而级联拼出 xxx-2-3 这类名字
-      const base = region === 'global' ? `${models.WORKBUDDY_PROVIDER_ID}-global` : models.WORKBUDDY_PROVIDER_ID
-      let id = base
-      let suffix = 2
-      while (config[id]) id = `${base}-${suffix++}`
-      const enabled = workbuddy.getRuntime() ? workbuddy.getEnabledModels(region) : []
-      config[id] = {
-        displayName: region === 'global' ? 'WorkBuddy 账号池（国际版）' : 'WorkBuddy 账号池',
-        type: 'workbuddy',
-        region,
-        models: enabled
-      }
-      saveConfig(config)
-      console.log(`[aiRoute] 已重建${label} WorkBuddy 源：${id}（${enabled.length} 个模型）`)
+      delete config[name]
     }
+
+    // 并入而不是覆盖：渠道目录可能已经同步过一次，那一份才是权威，
+    // 老源只用来补回手工改过的字段
+    const existing = config[CHANNEL_PROVIDER_ID] || {}
+    const merged = [...(existing.models || [])]
+    const known = new Set(merged.map(model => (typeof model === 'string' ? model : model.id)))
+    for (const entry of carried) {
+      if (known.has(entry.id)) continue
+      known.add(entry.id)
+      merged.push(entry)
+    }
+    config[CHANNEL_PROVIDER_ID] = {
+      ...existing,
+      displayName: existing.displayName || CHANNEL_PROVIDER_NAME,
+      type: 'channel',
+      models: merged
+    }
+
+    // 引用改写：`<老源>/<模型>` → `channels/<前缀>/<模型>`
+    const rewrite = ref => {
+      if (typeof ref !== 'string') return ref
+      for (const [name, prefix] of prefixOf) {
+        if (ref.startsWith(`${name}/`)) {
+          return `${CHANNEL_PROVIDER_ID}/${prefix}/${ref.slice(name.length + 1)}`
+        }
+      }
+      return ref
+    }
+
+    const state = getState()
+    const nextCurrent = rewrite(state.current)
+    if (nextCurrent !== state.current) {
+      state.current = nextCurrent
+      saveState(state)
+    }
+
+    const fallbackData = getFallback()
+    const nextFallback = rewrite(fallbackData.model)
+    if (nextFallback !== fallbackData.model) saveFallback({ ...fallbackData, model: nextFallback })
+
+    const rules = engine.getRules()
+    let rulesChanged = false
+    for (const rule of [...(rules.rules || []), ...(rules.customRules || [])]) {
+      const next = rewrite(rule?.target)
+      if (next !== rule?.target) {
+        rule.target = next
+        rulesChanged = true
+      }
+    }
+    if (rulesChanged) engine.saveRules(rules)
+
+    saveConfig(config)
+    console.log(`[aiRoute] 已把 ${names.join('、')} 并入渠道源 ${CHANNEL_PROVIDER_ID}（${carried.length} 个模型）`)
   } catch (err) {
-    console.error('[aiRoute] WorkBuddy 源归一化失败:', err.message)
+    console.error('[aiRoute] WorkBuddy 源迁移失败:', err.message)
   }
 }
 
-normalizeWorkbuddyProviders()
+migrateWorkbuddyProviders()
 
+// 渠道目录 → Provider.models。
+// 合并而不是整体替换：用户可能改过显示名或填了推理档位，重登一次就冲掉
+// 会让这些手工值每次重启都丢。已被渠道移除的模型自然消失（不再出现在目录里）。
+// 上下文/输出上限不保留旧值 —— 目录里的才是权威值（WorkBuddy 那组还来自账号池
+// 的启用清单，保留旧值会让池里的修改永远不生效）。
+function syncChannelProvider(rows) {
+  try {
+    const config = getConfig()
+    const existing = config[CHANNEL_PROVIDER_ID]
+    // 用户把它改成了通用源 —— 那是显式选择，不覆盖
+    if (existing && existing.type !== 'channel') return
+
+    const list = (rows || []).map(row => ({
+      id: row.id,
+      displayName: row.name || row.id,
+      ...row.context_window ? { maxContext: row.context_window } : {},
+      ...row.max_tokens ? { maxOutput: row.max_tokens } : {}
+    }))
+    // 一个账号都没登录时不建空 Provider：空模型列表会让路由规则指向一个
+    // 永远失败的源（与 WorkBuddy 无账号时的行为不同，后者是池驱动、无需目录）
+    if (!existing && list.length === 0) return
+
+    const previous = new Map()
+    for (const model of existing?.models || []) {
+      if (typeof model === 'string') previous.set(model, model)
+      else if (model && typeof model.id === 'string') previous.set(model.id, model)
+    }
+    const merged = list.map(row => {
+      const prev = previous.get(row.id)
+      if (!prev || typeof prev === 'string') return row
+      return {
+        ...row,
+        ...prev.displayName ? { displayName: prev.displayName } : {},
+        ...prev.reasoningEffort ? { reasoningEffort: prev.reasoningEffort } : {}
+      }
+    })
+
+    const previousName = existing?.displayName || ''
+    config[CHANNEL_PROVIDER_ID] = {
+      ...existing,
+      // 旧默认名跟着升级，用户改过的保留
+      displayName: !previousName || LEGACY_CHANNEL_NAMES.includes(previousName) ? CHANNEL_PROVIDER_NAME : previousName,
+      type: 'channel',
+      models: models.sanitizeModels(merged)
+    }
+    saveConfig(config)
+  } catch (err) {
+    console.error('[aiRoute] 渠道模型目录同步失败:', err.message)
+  }
+}
+
+async function syncChannelProviderFromRuntime() {
+  const rt = channels.getRuntime()
+  if (!rt) return
+  syncChannelProvider(await rt.refresh())
+}
+
+// 目录同步去抖：渠道包在账号变更时会 emit，一次登录可能连发多条，
+// 每条都写一次 models.json 既吵又可能被用户在另一个窗口的改动覆盖
+let channelSyncTimer = null
+function scheduleChannelSync() {
+  clearTimeout(channelSyncTimer)
+  channelSyncTimer = setTimeout(() => {
+    syncChannelProviderFromRuntime().catch(err => console.error('[aiRoute] 渠道目录刷新失败:', err.message))
+  }, 400)
+  channelSyncTimer.unref?.()
+}
+
+// 初始化渠道运行时（未登录任何账号也能启动，转发时才报无可用账号）
+function initChannels() {
+  channels.init({
+    onChanged: scheduleChannelSync,
+    logger: {
+      info: message => console.log(`[channels] ${message}`),
+      warn: message => console.warn(`[channels] ${message}`),
+      error: message => console.error(`[channels] ${message}`)
+    }
+  }).then(() => syncChannelProviderFromRuntime())
+    .catch(err => console.error('[aiRoute] 渠道初始化失败:', err.message))
+}
+
+initChannels()
+
+app.get('/api/channels/status', async (req, res) => {
+  const rt = channels.getRuntime()
+  if (!rt) return res.json({ ok: true, state: 'unavailable', error: '', providers: [], models: 0 })
+  // 面板的首个请求常早于 worker 初始化完成：不等 ready 会回一份
+  // 「providers 空、models 0」的快照，界面看起来像渠道全没了（实际只是在启动）
+  try {
+    await rt.ready
+  } catch {
+    /* 初始化失败：下面按 failed 状态回报，不让请求挂在这里 */
+  }
+  const state = rt.state()
+  res.json({
+    ok: true,
+    state: state.state,
+    error: state.error,
+    providers: rt.providers,
+    models: rt.publicModelRows().length
+  })
+})
+
+// 实时目录（渠道包口径）：登录完就能看到该账号的模型
+app.get('/api/channels/models', async (req, res) => {
+  try {
+    const rt = channels.getRuntime()
+    if (!rt) return res.status(503).json({ ok: false, error: '渠道运行时未初始化' })
+    res.json({ ok: true, models: await rt.refresh() })
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// 重新采集目录并同步进 Provider 配置（新增账号、上游调整目录后调用）
+app.post('/api/channels/refresh', async (req, res) => {
+  try {
+    await syncChannelProviderFromRuntime()
+    res.json({ ok: true, models: channels.getRuntime()?.publicModelRows().length ?? 0 })
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// 渠道管理 RPC 透传：登录 / 账号池 / 积分 / 黑名单 / 备份全走渠道包自己的方法表。
+// 这里不做方法白名单 —— 抄一份方法表只会随上游版本漂移，而渠道包的 RPC 层
+// 已经对每个方法做了参数校验。
+app.post('/api/channels/rpc', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {}
+  const controller = new AbortController()
+  const onClose = () => { if (!req.complete) controller.abort() }
+  res.on('close', onClose)
+  try {
+    const result = await channels.rpc({ method: body.method, payload: body.payload }, controller.signal)
+    // 账号类方法会改动池与目录：登录成功、删号、启停都影响「哪些模型可见」
+    if (typeof body.method === 'string' && /^(?:account|login|provider|model|credits)\./.test(body.method)) {
+      scheduleChannelSync()
+    }
+    res.json({ ok: true, result })
+  } catch (err) {
+    const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 400
+    res.status(status).json({ ok: false, error: err.message })
+  } finally {
+    res.removeListener('close', onClose)
+  }
+})
+
+// 渠道 Provider 的连通性测试：发一次真实短对话（与 WorkBuddy 的测试口径一致）
+//
+// 未指定模型时**依次试前几个**而不是只试第一个：上游目录与「此刻真的能调」并
+// 不完全同步（曾见 TRAE 的 Doubao-Seed-Code 回流内 code=4001，同账号换 glm-5.1
+// 立刻正常，次日该模型又恢复正常 —— 即失败可能是上游侧的临时状态）。只试第一个
+// 会把「某个模型此刻不可调用」误报成「这个渠道不通」，而用户没有别的手段分辨。
+const TEST_MODEL_CANDIDATES = 3
+app.post('/api/channels/test', async (req, res) => {
+  const rt = channels.getRuntime()
+  if (!rt) return res.status(503).json({ ok: false, error: '渠道运行时未初始化' })
+  const provider = typeof req.body?.provider === 'string' ? req.body.provider.trim() : ''
+  const wantModel = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+  // worker 启动早期目录还没采集：此时按「没有模型」拒绝，会让用户误以为账号没登上
+  let rows = rt.publicModelRows()
+  if (!wantModel && rows.length === 0) {
+    try { rows = await rt.refresh() } catch { /* 采集失败：下面按没有候选处理 */ }
+  }
+  // 目录不受「是否登录」门控（未登录渠道也会播报模型），直接拿前几个候选会在
+  // 无账号的渠道上必然失败。故先按 provider.status 的账号计数筛出真正能调的渠道；
+  // 拿不到计数时不做过滤 —— 让真实调用给出答案，好过凭猜测拒绝。
+  let live = null
+  if (!wantModel) {
+    try {
+      // rt.rpc 回的是渠道包封套 { ok, value }，value 里才是 { statuses }
+      const reply = await rt.rpc({ method: 'provider.status', payload: { providers: rt.providers } })
+      const statuses = reply?.ok === true ? reply.value?.statuses : undefined
+      if (statuses) {
+        live = new Set(Object.entries(statuses)
+          .filter(([, status]) => (status?.accounts?.total || 0) > 0)
+          .map(([id]) => id))
+      }
+    } catch { /* 计数不可用：退回全量目录 */ }
+  }
+  const candidates = wantModel
+    ? [wantModel]
+    : rows
+      .filter(row => (!provider || row.channel === provider || row.id.startsWith(`${provider}/`))
+        // WorkBuddy 不在渠道包的 provider.status 里（它不是包内 provider），
+        // 只要运行时在就当作可用，让真实调用给出答案
+        && (live === null || live.has(row.channel) || (!!workbuddy.getRuntime() && !!channelWorkbuddyRealm(row.id))))
+      .map(row => row.id)
+      .slice(0, TEST_MODEL_CANDIDATES)
+  if (!candidates.length) {
+    return res.status(400).json({
+      ok: false,
+      error: provider
+        ? `渠道 ${provider} 还没有可用模型（先登录该渠道的账号）`
+        : '账号池里还没有可用模型（先登录一个账号）'
+    })
+  }
+  const start = Date.now()
+  const tried = []
+  for (const model of candidates) {
+    const attemptStart = Date.now()
+    try {
+      const completion = await channelTestCompletion(model)
+      const message = completion.choices?.[0]?.message || {}
+      return res.json({
+        ok: true,
+        model,
+        latency: Date.now() - attemptStart,
+        // 正文为空时退回 reasoning：只要上游真回了内容，就说明链路是通的
+        reply: (message.content || message.reasoning_content || '').slice(0, 80),
+        finish: completion.choices?.[0]?.finish_reason,
+        // 前面失败的候选一并回给界面：自动模式下用户要知道「跳过的是哪些、为什么」
+        tried
+      })
+    } catch (err) {
+      tried.push({ model, error: err.message })
+    }
+  }
+  res.json({ ok: false, error: tried[tried.length - 1].error, latency: Date.now() - start, tried })
+})
 
 // 兜底错误处理中间件（必须放在所有路由之后）：
 //  1. 未捕获异常不再走 Express 默认处理器——它会回吐完整堆栈与绝对路径

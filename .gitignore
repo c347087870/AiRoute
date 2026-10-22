@@ -19,6 +19,9 @@ server/server-config.json
 server/workbuddy-auths/
 server/workbuddy-state.json
 
+# 十个账号渠道的凭据、账号池与状态（channel-credentials.json 是明文，严禁提交）
+server/channels-data/
+
 # WorkBuddy 用量统计（运行时数据）
 server/usage.json
 
