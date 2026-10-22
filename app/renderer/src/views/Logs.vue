@@ -37,7 +37,7 @@
 
     <div class="card">
       <div class="table-wrap scroll-log" v-if="logs.length">
-        <table class="log-table">
+        <table class="table">
           <thead>
             <tr>
               <th>时间</th>
@@ -112,7 +112,7 @@
         <button class="btn-ghost btn-sm" @click="loadCreditHistory">刷新</button>
       </div>
       <div class="table-wrap scroll-credit" v-if="creditEntries.length">
-        <table class="log-table">
+        <table class="table">
           <thead>
             <tr>
               <th>时间</th>
@@ -354,40 +354,17 @@ onMounted(refreshAll)
 </script>
 
 <style scoped>
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-1);
-}
 
-.header-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
 .log-size {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-right: 4px;
 }
 
-.filter-bar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
 
 .filter-select {
-  font-size: 13px;
+  font-size: var(--fs-small);
   padding: 8px 12px;
 }
 
@@ -404,17 +381,17 @@ onMounted(refreshAll)
 }
 
 .credit-title {
-  font-size: 15px;
+  font-size: var(--fs-section);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .credit-hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .credit-note {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-left: auto;
 }
 
@@ -428,7 +405,7 @@ onMounted(refreshAll)
   justify-content: flex-end;
   gap: 10px;
   padding-top: 12px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .scroll-log {
@@ -441,36 +418,10 @@ onMounted(refreshAll)
   overflow: auto;
 }
 
-.table-wrap {
-  overflow-x: auto;
-}
 
-.log-table {
-  width: 100%;
-  border-collapse: collapse;
-}
 
-.log-table th,
-.log-table td {
-  text-align: left;
-  padding: 10px 12px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border-2);
-  color: var(--text-1);
-}
 
-.log-table th {
-  color: var(--text-3);
-  font-weight: 500;
-  position: sticky;
-  top: 0;
-  background: var(--bg-card);
-  white-space: nowrap;
-}
 
-.nowrap {
-  white-space: nowrap;
-}
 
 .input-cell {
   max-width: 260px;
@@ -479,31 +430,21 @@ onMounted(refreshAll)
   white-space: nowrap;
 }
 
-.text-green {
-  color: var(--success);
-}
 
-.text-red {
-  color: var(--danger);
-}
 
 .text-yellow {
   color: var(--warning);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .outcome-tag {
   margin-left: 6px;
   padding: 0 4px;
   border: 1px solid var(--warning);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--warning);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   white-space: nowrap;
-}
-
-.text-muted {
-  color: var(--text-4);
 }
 
 .error-cell {
@@ -511,35 +452,14 @@ onMounted(refreshAll)
   word-break: break-word;
 }
 
-.empty {
-  text-align: center;
-  color: var(--text-3);
-  padding: 40px;
-  font-size: 14px;
-}
 
 .token-cell {
   font-family: 'Courier New', monospace;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
-.text-blue {
-  color: var(--primary);
-}
 
-.text-green {
-  color: var(--success);
-}
 
-.text-purple {
-  color: var(--purple);
-}
 
-.text-orange {
-  color: var(--warning);
-}
 
-.font-bold {
-  font-weight: 600;
-}
 </style>

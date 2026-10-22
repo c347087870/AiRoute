@@ -3,7 +3,7 @@
     <!-- 页面头部：标题 + 汇总统计 + 刷新 -->
     <div class="page-header">
       <h1 class="page-title">WorkBuddy 账号池</h1>
-      <div class="header-right">
+      <div class="header-actions">
         <div class="wb-stats">
           <span class="stat">总计 <b>{{ counts.total }}</b></span>
           <span class="stat ok">可用 <b>{{ counts.healthy }}</b></span>
@@ -15,11 +15,11 @@
     </div>
 
     <!-- 顶部 Tab 导航 -->
-    <div class="wb-tabs">
+    <div class="tabs">
       <button
         v-for="t in TABS"
         :key="t.key"
-        class="wb-tab"
+        class="tab"
         :class="{ active: tab === t.key }"
         @click="tab = t.key"
       >
@@ -48,16 +48,16 @@
         <!-- 添加账号：先选区域（国际版与国内版的域名/OAuth 入口不同） -->
         <div v-if="addPanel" class="wb-add-realm">
           <div class="wb-add-realm-title">选择账号区域后开始登录</div>
-          <div class="wb-add-realm-opts">
-            <label class="wb-realm-opt" :class="{ active: addRealm === 'cn' }">
+          <div class="realm-options">
+            <label class="realm-option" :class="{ active: addRealm === 'cn' }">
               <input type="radio" value="cn" v-model="addRealm" />
-              <span class="wb-realm-name">国内版</span>
-              <span class="wb-realm-host">copilot.tencent.com</span>
+              <span class="realm-name">国内版</span>
+              <span class="realm-host">copilot.tencent.com</span>
             </label>
-            <label class="wb-realm-opt" :class="{ active: addRealm === 'global' }">
+            <label class="realm-option" :class="{ active: addRealm === 'global' }">
               <input type="radio" value="global" v-model="addRealm" />
-              <span class="wb-realm-name">国际版</span>
-              <span class="wb-realm-host">www.workbuddy.ai</span>
+              <span class="realm-name">国际版</span>
+              <span class="realm-host">www.workbuddy.ai</span>
             </label>
           </div>
           <div class="wb-add-realm-actions">
@@ -65,7 +65,7 @@
             <button class="btn-ghost btn-sm" @click="addPanel = false">取消</button>
           </div>
           <div class="wb-add-realm-note">
-            国际版无签到与成长任务，仅支持对话、余额、保活；添加后请在「Provider 管理」新建对应的国际版源。
+            国际版无签到与成长任务，仅支持对话、余额、保活；添加后该区域的模型会自动出现在「账号渠道」源的 <code>workbuddy-global/…</code> 组里。
           </div>
         </div>
 
@@ -73,7 +73,7 @@
         <div v-if="oauth" class="wb-oauth">
           <div class="wb-oauth-title">
             请在浏览器中完成 WorkBuddy 登录授权
-            <span class="wb-realm-tag" :class="oauth.realm === 'global' ? 'global' : 'cn'">
+            <span class="realm-tag" :class="oauth.realm === 'global' ? 'global' : 'cn'">
               {{ oauth.realm === 'global' ? '国际版' : '国内版' }}
             </span>
           </div>
@@ -86,12 +86,12 @@
           <div class="wb-oauth-status">{{ oauth.message || '等待浏览器完成登录，每 3 秒自动检测一次…' }}</div>
         </div>
 
-        <div v-if="!accounts.length" class="wb-empty">
+        <div v-if="!accounts.length" class="empty">
           还没有 WorkBuddy 账号，点击「+ 添加账号」通过 OAuth 登录（在浏览器打开授权链接完成登录）。
         </div>
 
         <div v-else class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>昵称</th>
@@ -110,7 +110,7 @@
               <tr v-for="acct in accounts" :key="acct.uid">
                 <td class="nowrap">{{ acct.nickname || '（未命名账号）' }}</td>
                 <td class="nowrap">
-                  <span class="wb-realm-tag" :class="acct.realm === 'global' ? 'global' : 'cn'">
+                  <span class="realm-tag" :class="acct.realm === 'global' ? 'global' : 'cn'">
                     {{ acct.realm === 'global' ? '国际版' : '国内版' }}
                   </span>
                 </td>
@@ -254,11 +254,11 @@
 
         <div class="wb-note">积分批次按「快过期优先、未用完在前」排序，与后端返回顺序一致。</div>
 
-        <div v-if="!accounts.length" class="wb-empty">还没有账号，请先在「账号池」添加。</div>
-        <div v-else-if="creditLoading" class="wb-empty">加载中…</div>
-        <div v-else-if="!creditPackages.length" class="wb-empty">该账号暂无积分批次数据</div>
+        <div v-if="!accounts.length" class="empty">还没有账号，请先在「账号池」添加。</div>
+        <div v-else-if="creditLoading" class="empty">加载中…</div>
+        <div v-else-if="!creditPackages.length" class="empty">该账号暂无积分批次数据</div>
         <div v-else class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>批次名称</th>
@@ -305,8 +305,8 @@
           </span>
         </div>
 
-        <div v-if="usageLoading && !usageData" class="wb-empty">加载中…</div>
-        <div v-else-if="!usageData || !usageData.totals || usageData.totals.req === 0" class="wb-empty">该窗口暂无用量数据</div>
+        <div v-if="usageLoading && !usageData" class="empty">加载中…</div>
+        <div v-else-if="!usageData || !usageData.totals || usageData.totals.req === 0" class="empty">该窗口暂无用量数据</div>
         <template v-else>
           <!-- 汇总卡组 -->
           <div class="wb-cards">
@@ -367,7 +367,7 @@
           <!-- 账号维度表 -->
           <div class="wb-section-title">账号维度（{{ usageWindowLabel }}）</div>
           <div class="table-wrap">
-            <table class="wb-table">
+            <table class="table">
               <thead>
                 <tr>
                   <th>账号</th>
@@ -402,7 +402,7 @@
           <!-- 模型 × 倍率维度表 -->
           <div class="wb-section-title">模型 × 倍率维度（{{ usageWindowLabel }}）</div>
           <div class="table-wrap">
-            <table class="wb-table">
+            <table class="table">
               <thead>
                 <tr>
                   <th>模型</th>
@@ -476,17 +476,19 @@
 
         <div class="wb-note">
           勾选后的清单是<strong>{{ modelRegion === 'global' ? '国际版' : '国内版' }}</strong>账号池统一维护的启用模型，
-          保存时会自动同步写入<strong>同区域</strong>的 WorkBuddy Provider 模型列表（不影响另一区域）。
+          保存后会刷新「账号渠道」源里
+          <code>{{ modelRegion === 'global' ? 'workbuddy-global' : 'workbuddy' }}/…</code>
+          这一组模型目录（不影响另一区域）。
         </div>
 
-        <div v-if="!modelRegionAccountCount" class="wb-empty">
+        <div v-if="!modelRegionAccountCount" class="empty">
           还没有{{ modelRegion === 'global' ? '国际版' : '国内版' }}账号，请先到「账号池」页签通过 OAuth 添加。
         </div>
-        <div v-else-if="!upstreamModels.length" class="wb-empty">
+        <div v-else-if="!upstreamModels.length" class="empty">
           还没有模型数据，点击「拉取上游模型」获取{{ modelRegion === 'global' ? '国际版' : '国内版' }}模型清单。
         </div>
         <div v-else class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>启用</th>
@@ -549,7 +551,7 @@
         </div>
 
         <!-- 无国内账号：成长任务不可用（国际版没有成长体系） -->
-        <div v-else class="wb-empty">
+        <div v-else class="empty">
           成长任务仅国内版账号可用。
           <template v-if="globalAccountCount">
             当前只有 {{ globalAccountCount }} 个国际版账号——上游不为国际版提供成长体系（签到 / 任务 / 旅行 / 连登 / 夜猫子均不可用），
@@ -583,7 +585,7 @@
             执行队列（{{ queueRunning ? '执行中' : '已结束' }}，共 {{ queueItems.length }} 项）
           </div>
           <div class="table-wrap">
-            <table class="wb-table">
+            <table class="table">
               <thead>
                 <tr>
                   <th>账号</th>
@@ -604,10 +606,10 @@
           </div>
         </div>
 
-        <div v-if="!accounts.length" class="wb-empty">还没有账号，请先在「账号池」添加。</div>
-        <div v-else-if="!taskList.length" class="wb-empty">该账号暂无可显示任务</div>
+        <div v-if="!accounts.length" class="empty">还没有账号，请先在「账号池」添加。</div>
+        <div v-else-if="!taskList.length" class="empty">该账号暂无可显示任务</div>
         <div v-else class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>选择</th>
@@ -670,7 +672,7 @@
         </div>
 
         <div class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>启用</th>
@@ -766,13 +768,13 @@
           </span>
         </div>
 
-        <div v-if="compLoadError" class="wb-note" style="color: #c0392b">
+        <div v-if="compLoadError" class="wb-note text-red">
           补偿状态查询失败：{{ compLoadError }}（这不是「没有待领补偿」，请检查网络或账号凭证后重试）
         </div>
         <div v-else-if="!compRows.length && !compLoading" class="wb-note">暂无账号或尚未查询</div>
 
         <div v-else class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>账号</th>
@@ -787,11 +789,11 @@
               <tr v-for="row in compRows" :key="row.uid">
                 <td>{{ row.nickname || row.uid.slice(0, 8) }}</td>
                 <!-- 查询失败的账号必须显形（红字），不能被渲染成「无活动」 -->
-                <td :style="row.error ? 'color: #c0392b' : ''">{{ compRowText(row) }}</td>
+                <td :class="{ 'text-red': !!row.error }">{{ compRowText(row) }}</td>
                 <td>{{ compPending(row) ? row.status.creditNum : '-' }}</td>
                 <td class="nowrap">{{ compEndMs(row) ? formatTime(compEndMs(row)) : '-' }}</td>
                 <!-- ≤48 小时标红：补偿带截止日，临近过期需要立刻处理 -->
-                <td class="nowrap" :style="compUrgent(row) ? 'color: #c0392b; font-weight: 600' : ''">
+                <td class="nowrap" :class="{ 'text-red font-bold': compUrgent(row) }">
                   {{ compCountdown(row) }}
                 </td>
                 <td class="nowrap">
@@ -835,9 +837,9 @@
           </span>
         </div>
 
-        <div v-if="!verFields.length" class="wb-empty">还没有检查过，点击「检查最新版本」获取。</div>
+        <div v-if="!verFields.length" class="empty">还没有检查过，点击「检查最新版本」获取。</div>
         <div v-else class="table-wrap">
-          <table class="wb-table">
+          <table class="table">
             <thead>
               <tr>
                 <th>版本项</th>
@@ -922,7 +924,7 @@
           提示词模式决定出站前如何处理客户端 system 消息（防上游内容审核误杀）；指纹脱敏对用户/assistant
           消息里的客户端指纹串做剥离。两者互不替代，建议同时开启。
         </div>
-        <div class="config-row">
+        <div class="wb-cfg-row">
           <span class="config-label">提示词模式</span>
           <select v-model="cfgForm.promptMode" class="wb-select">
             <option value="custom">custom（用网关自有提示词替换客户端 system）</option>
@@ -930,14 +932,14 @@
             <option value="passthrough">passthrough（透传，仅拦截时自动降级重试）</option>
           </select>
         </div>
-        <div class="config-row">
+        <div class="wb-cfg-row">
           <span class="config-label">指纹脱敏</span>
           <label class="wb-auto">
             <input type="checkbox" v-model="cfgForm.sanitizeFingerprints" />
             开启（推荐）
           </label>
         </div>
-        <div class="config-row">
+        <div class="wb-cfg-row">
           <span class="config-label">改写档位</span>
           <select v-model="cfgForm.rewriteMode" class="wb-select">
             <option value="compat">compat（默认：参数修正 + 工具配对清理 + 上下文压缩 + 标记修复）</option>
@@ -949,7 +951,7 @@
           并对响应流做帧重建与标记修复；native 只保留上游硬性的协议步骤（强制流式、档位降级、角色/图片映射），
           工具调用被改写导致异常时可切此档保真直通（若上游对原始参数报错，需切回 compat）。
         </div>
-        <div class="config-row">
+        <div class="wb-cfg-row">
           <span class="config-label">使用端身份</span>
           <select v-model="cfgForm.clientIdentity" class="wb-select">
             <option value="workbuddy">WorkBuddy 桌面端（默认：官网「使用端」显示 WorkBuddy）</option>
@@ -961,7 +963,7 @@
           服务端归因：WorkBuddy 桌面端 = 官方桌面端指纹，CodeBuddy IDE = 官方 IDE 指纹。
           保存后即时热生效（下一次请求开始）。UA 与版本细节可在下方「客户端指纹与版本覆盖」卡片中逐项覆盖。
         </div>
-        <div class="config-row">
+        <div class="wb-cfg-row">
           <span class="config-label">设备令牌文件</span>
           <input
             v-model="cfgForm.deviceTokenFile"
@@ -1228,7 +1230,7 @@
 
         <div class="wb-note">只记录关键事件（对话结果 / 任务执行 / 系统告警），不含 token 明文。</div>
 
-        <div v-if="!logs.length" class="wb-empty">暂无日志记录</div>
+        <div v-if="!logs.length" class="empty">暂无日志记录</div>
         <div v-else class="wb-logs">
           <div v-for="(log, i) in logs" :key="i" class="wb-log-row" :class="{ 'is-warn': log.level === 'warn' }">
             <span class="wb-log-time">{{ formatClock(log.ts) }}</span>
@@ -2098,7 +2100,7 @@ function toggleModel(id) {
   enabledModelIds.value = next
 }
 
-// 保存启用模型清单（后端按区域写入，并只同步同区域的 WorkBuddy Provider）
+// 保存启用模型清单（后端按区域写入，并刷新渠道源里对应区域的模型目录）
 async function saveEnabledModels() {
   const region = modelRegion.value
   const picked = upstreamModels.value.filter(m => enabledModelIds.value.includes(m.id))
@@ -2119,8 +2121,8 @@ async function saveEnabledModels() {
     const label = region === 'global' ? '国际版' : '国内版'
     showToast(
       res.synced
-        ? `已保存 ${enabledModelIds.value.length} 个${label}启用模型，已同步写入 ${res.synced} 个 Provider`
-        : `已保存 ${enabledModelIds.value.length} 个${label}启用模型（该区域还没有 Provider，请到「Provider 管理」新建）`
+        ? `已保存 ${enabledModelIds.value.length} 个${label}启用模型，渠道源目录已刷新`
+        : `已保存 ${enabledModelIds.value.length} 个${label}启用模型（渠道源目录刷新失败，重启或下次登录后会自愈）`
     )
   } catch (err) {
     showToast('保存失败: ' + errText(err), 'error')
@@ -2764,29 +2766,13 @@ function errText(err) {
 </script>
 
 <style scoped>
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-1);
-}
 
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
 
 .wb-stats {
   display: flex;
   gap: 16px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
 }
 
@@ -2798,32 +2784,9 @@ function errText(err) {
 .wb-stats .warn b { color: var(--warn-text); }
 .wb-stats .bad b { color: var(--bad-text); }
 
-.wb-tabs {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
 
-.wb-tab {
-  padding: 8px 16px;
-  font-size: 13px;
-  color: var(--text-2);
-  background: var(--bg-card);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-pill);
-}
 
-.wb-tab:hover {
-  color: var(--primary);
-  border-color: var(--primary);
-}
 
-.wb-tab.active {
-  color: #fff;
-  background: var(--primary);
-  border-color: var(--primary);
-}
 
 .wb-card {
   margin-bottom: 16px;
@@ -2838,100 +2801,58 @@ function errText(err) {
 }
 
 .wb-count {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
 .wb-note {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 12px;
   line-height: 1.6;
 }
 
 .wb-select {
-  font-size: 13px;
+  font-size: var(--fs-small);
   padding: 8px 12px;
   min-width: 200px;
 }
 
 .wb-input {
-  font-size: 13px;
+  font-size: var(--fs-small);
   padding: 8px 12px;
   flex: 1;
   min-width: 200px;
 }
 
-.filter-bar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
 
 .wb-auto {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
 }
 
-.wb-empty {
-  padding: 26px;
-  text-align: center;
-  color: var(--text-3);
-  font-size: 13px;
-  border: 1px dashed var(--border-1);
-  border-radius: var(--radius-md);
-}
 
-.table-wrap {
-  overflow-x: auto;
-}
 
-.wb-table {
-  width: 100%;
-  border-collapse: collapse;
-}
 
-.wb-table th,
-.wb-table td {
-  text-align: left;
-  padding: 10px 12px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border-2);
-  color: var(--text-1);
-  vertical-align: top;
-}
 
-.wb-table th {
-  color: var(--text-3);
-  font-weight: 500;
-  white-space: nowrap;
-}
 
-.wb-table tbody tr:hover {
-  background: var(--bg-hover);
-}
 
-.wb-table .row-done {
+.table .row-done {
   opacity: 0.55;
 }
 
-.nowrap {
-  white-space: nowrap;
-}
 
 .mono {
   font-family: 'Courier New', Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .wb-state {
-  font-size: 11px;
-  border-radius: 4px;
+  font-size: var(--fs-mini);
+  border-radius: var(--radius-xs);
   padding: 1px 6px;
   white-space: nowrap;
 }
@@ -2950,7 +2871,7 @@ function errText(err) {
 /* 模型受限标记（11102 该后端无此模型 / 6004 限流） */
 .wb-model-limited {
   margin-top: 2px;
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--warn-text);
 }
 
@@ -2972,43 +2893,16 @@ function errText(err) {
 }
 
 .wb-add-realm-title {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 10px;
 }
 
-.wb-add-realm-opts {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
 
-.wb-realm-opt {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 10px 14px;
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--text-1);
-}
 
-.wb-realm-opt.active {
-  border-color: var(--primary);
-  background: var(--primary-bg);
-}
 
-.wb-realm-name {
-  font-weight: 600;
-}
 
-.wb-realm-host {
-  font-size: 11px;
-  color: var(--text-3);
-}
 
 .wb-add-realm-actions {
   display: flex;
@@ -3018,35 +2912,16 @@ function errText(err) {
 
 .wb-add-realm-note {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   color: var(--text-3);
 }
 
 /* 账号行 / OAuth 标题上的区域标签 */
-.wb-realm-tag {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 10px;
-  font-size: 11px;
-  line-height: 18px;
-  vertical-align: middle;
-  border: 1px solid transparent;
-}
 
-.wb-realm-tag.cn {
-  color: var(--text-2);
-  border-color: var(--border-1);
-  background: var(--bg-2, transparent);
-}
 
-.wb-realm-tag.global {
-  color: var(--purple-text);
-  border-color: var(--purple-border);
-  background: var(--tint-purple);
-}
 
-.wb-oauth-title .wb-realm-tag {
+.wb-oauth-title .realm-tag {
   margin-left: 6px;
 }
 
@@ -3082,30 +2957,30 @@ function errText(err) {
 }
 
 .wb-realm-btn-name {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .wb-realm-btn-host {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
 }
 
 .wb-realm-btn-count {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-2);
 }
 
 .wb-oauth-title {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 8px;
 }
 
 .wb-oauth-url {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--primary);
   word-break: break-all;
   margin-bottom: 10px;
@@ -3118,13 +2993,13 @@ function errText(err) {
 
 .wb-oauth-status {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
 .reward {
   margin-right: 8px;
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--warn-text);
 }
 
@@ -3136,7 +3011,7 @@ function errText(err) {
 }
 
 .wb-scan-title {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 8px;
@@ -3146,7 +3021,7 @@ function errText(err) {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 3px 0;
 }
 
@@ -3171,35 +3046,29 @@ function errText(err) {
 }
 
 .wb-task-name {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
 }
 
 .wb-desc {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   margin-top: 2px;
 }
 
 .wb-hours-input {
   width: 130px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   padding: 6px 10px;
 }
 
-.section-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-1);
-  margin-bottom: 10px;
-}
 
 .wb-kv {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 6px 0;
-  font-size: 13px;
+  font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
 }
 
@@ -3217,12 +3086,12 @@ function errText(err) {
 }
 
 /* 高级配置页的编辑行（标签 + 控件） */
-.config-row {
+.wb-cfg-row {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 8px 0;
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 .config-label {
@@ -3245,7 +3114,7 @@ function errText(err) {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 700;
   color: var(--text-1);
   margin: 22px 0 0;
@@ -3254,7 +3123,7 @@ function errText(err) {
 }
 
 .fp-major-sub {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   font-weight: 400;
   color: var(--text-3);
 }
@@ -3264,7 +3133,7 @@ function errText(err) {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin: 14px 0 8px;
@@ -3272,26 +3141,26 @@ function errText(err) {
 
 /* 风险色标（安全 / 中风险 / 高风险） */
 .fp-risk {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   font-weight: 500;
   line-height: 1.6;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .fp-risk.safe {
-  color: #4fb46e;
-  background: rgba(79, 180, 110, 0.12);
+  color: var(--ok-text);
+  background: var(--ok-bg);
 }
 
 .fp-risk.mid {
-  color: #d8a657;
-  background: rgba(216, 166, 87, 0.12);
+  color: var(--warn-text);
+  background: var(--warn-bg);
 }
 
 .fp-risk.high {
-  color: #e06c75;
-  background: rgba(224, 108, 117, 0.12);
+  color: var(--bad-text);
+  background: var(--bad-bg);
 }
 
 /* 覆盖项自适应双列网格 */
@@ -3310,16 +3179,16 @@ function errText(err) {
 
 /* 指纹输入框清空（placeholder 可见）时标红提示，保存将被拦截 */
 .fp-grid .wb-input:placeholder-shown {
-  border-color: #e06c75;
+  border-color: var(--danger);
 }
 
 .fp-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 
 .fp-hint {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   line-height: 1.5;
 }
@@ -3343,7 +3212,7 @@ function errText(err) {
   align-items: baseline;
   gap: 10px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   border-bottom: 1px solid var(--border-2);
 }
 
@@ -3363,8 +3232,8 @@ function errText(err) {
 
 .wb-log-channel {
   flex-shrink: 0;
-  font-size: 11px;
-  border-radius: 4px;
+  font-size: var(--fs-mini);
+  border-radius: var(--radius-xs);
   padding: 1px 6px;
 }
 
@@ -3375,7 +3244,7 @@ function errText(err) {
 
 .wb-log-level {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   min-width: 34px;
 }
@@ -3394,36 +3263,33 @@ function errText(err) {
 /* 运行态徽标（保活中 / 签到中 / 刷余额中） */
 .wb-running {
   margin-left: 6px;
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--primary);
   background: var(--primary-bg);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 1px 6px;
 }
 
 /* 最近保活结果着色 */
 .wb-ok {
   color: var(--success);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   margin-left: 4px;
 }
 
 .wb-bad {
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   margin-left: 4px;
 }
 
 /* 有更新可应用 */
 .wb-warn {
   color: var(--warn-text);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   margin-left: 4px;
 }
 
-.mono {
-  font-family: 'Courier New', Consolas, monospace;
-}
 
 .wb-modal-overlay {
   position: fixed;
@@ -3449,7 +3315,7 @@ function errText(err) {
 }
 
 .wb-modal-header h2 {
-  font-size: 17px;
+  font-size: var(--fs-lg);
   margin: 0;
   color: var(--text-1);
 }
@@ -3458,7 +3324,7 @@ function errText(err) {
   background: transparent;
   border: none;
   color: var(--text-3);
-  font-size: 22px;
+  font-size: var(--fs-title);
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
@@ -3497,18 +3363,18 @@ function errText(err) {
   min-width: 120px;
   padding: 10px 12px;
   border: 1px solid var(--border-1);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg-hover);
 }
 
 .wb-card-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 6px;
 }
 
 .wb-card-value {
-  font-size: 18px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -3521,7 +3387,7 @@ function errText(err) {
   align-items: center;
   gap: 12px;
   margin: 18px 0 8px;
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
 }

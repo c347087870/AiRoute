@@ -48,9 +48,9 @@ function iconOf(type) {
   background: var(--bg-elevated);
   border: 1px solid var(--border-3);
   border-left: 4px solid var(--success);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 18px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
   box-shadow: var(--shadow-pop);
   cursor: pointer;
@@ -68,7 +68,7 @@ function iconOf(type) {
 }
 
 .toast-icon {
-  font-size: 13px;
+  font-size: var(--fs-small);
   line-height: 1;
   color: var(--success);
 }

@@ -7,7 +7,7 @@
       <button
         v-for="tab in tabs"
         :key="tab.value"
-        class="tab-btn"
+        class="tab"
         :class="{ active: activeTab === tab.value }"
         @click="activeTab = tab.value"
       >{{ tab.label }}</button>
@@ -105,7 +105,7 @@
             <span>评测进度</span>
             <span class="muted">{{ progressCompleted }} / {{ progressTotal }}</span>
           </div>
-          <div class="progress-bar">
+          <div class="progress-track">
             <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
           </div>
           <div class="hint">{{ running ? '评测进行中，每 1 秒刷新一次进度…' : '评测已结束' }}</div>
@@ -465,7 +465,7 @@ const modelGroupsByProvider = computed(() => {
     }
     map.get(item.providerName).models.push({
       ref: item.ref,
-      label: item.model.displayName || item.model.id
+      label: item.label
     })
   }
   return [...map.values()]
@@ -609,9 +609,9 @@ function statusText(status) {
 
 // 评测状态徽章的样式类
 function statusClass(status) {
-  if (status === 'completed') return 'badge-ok'
-  if (status === 'running') return 'badge-running'
-  if (status === 'failed' || status === 'error') return 'badge-fail'
+  if (status === 'completed') return 'ok'
+  if (status === 'running') return 'info'
+  if (status === 'failed' || status === 'error') return 'bad'
   return ''
 }
 
@@ -1043,40 +1043,11 @@ onUnmounted(stopPolling)
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 20px;
-  color: var(--text-1);
-}
 
 /* 顶部 Tab */
-.tabs {
-  display: flex;
-  gap: 8px;
-  border-bottom: 1px solid var(--border-2);
-  margin-bottom: 20px;
-}
 
-.tab-btn {
-  background: transparent;
-  color: var(--text-2);
-  padding: 10px 18px;
-  border-radius: 10px 10px 0 0;
-  font-size: 14px;
-  font-weight: 500;
-  border-bottom: 2px solid transparent;
-}
 
-.tab-btn:hover {
-  color: var(--primary);
-}
 
-.tab-btn.active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
-  background: var(--tint-primary);
-}
 
 .tab-panel {
   padding-bottom: 40px;
@@ -1094,7 +1065,7 @@ onUnmounted(stopPolling)
 }
 
 .block-title {
-  font-size: 16px;
+  font-size: var(--fs-section);
   font-weight: 600;
   margin: 0;
   color: var(--text-1);
@@ -1106,44 +1077,26 @@ onUnmounted(stopPolling)
   gap: 8px;
 }
 
-.section {
-  margin-bottom: 20px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
 .muted {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-top: 10px;
 }
 
 .empty-hint {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-3);
   padding: 16px 0;
   text-align: center;
 }
 
-.warning-box {
-  background: var(--tint-warning);
-  border: 1px solid var(--warning);
-  color: var(--warning-text);
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  margin-bottom: 14px;
-}
 
 /* 复选框分组 */
 .group {
@@ -1151,7 +1104,7 @@ onUnmounted(stopPolling)
 }
 
 .group-title {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 8px;
@@ -1169,7 +1122,7 @@ onUnmounted(stopPolling)
   gap: 8px;
   padding: 8px 10px;
   border: 1px solid var(--border-1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-hover);
   cursor: pointer;
   min-width: 0;
@@ -1180,7 +1133,7 @@ onUnmounted(stopPolling)
 }
 
 .check-main {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1188,7 +1141,7 @@ onUnmounted(stopPolling)
 }
 
 .check-sub {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   margin-left: auto;
   white-space: nowrap;
@@ -1209,7 +1162,7 @@ onUnmounted(stopPolling)
 }
 
 .field-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -1231,23 +1184,12 @@ onUnmounted(stopPolling)
 .progress-head {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
   margin-bottom: 8px;
 }
 
-.progress-bar {
-  height: 10px;
-  background: var(--border-2);
-  border-radius: 5px;
-  overflow: hidden;
-}
 
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--primary), #4DA6FF);
-  transition: width 0.3s ease;
-}
 
 /* 工具栏 */
 .toolbar {
@@ -1280,33 +1222,16 @@ onUnmounted(stopPolling)
   gap: 16px;
   flex-wrap: wrap;
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .run-error {
   color: var(--danger);
 }
 
-.badge {
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-}
 
-.badge-ok {
-  background: var(--tint-success);
-  color: var(--success);
-}
 
-.badge-running {
-  background: var(--tint-primary-soft);
-  color: var(--primary);
-}
 
-.badge-fail {
-  background: var(--tint-danger);
-  color: var(--danger);
-}
 
 /* 表格 */
 .data-table {
@@ -1318,7 +1243,7 @@ onUnmounted(stopPolling)
 .data-table td {
   text-align: left;
   padding: 12px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
   color: var(--text-1);
   white-space: nowrap;
@@ -1347,7 +1272,7 @@ onUnmounted(stopPolling)
   height: 22px;
   min-width: 120px;
   background: var(--border-2);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -1362,7 +1287,7 @@ onUnmounted(stopPolling)
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -1375,13 +1300,7 @@ onUnmounted(stopPolling)
   color: var(--danger);
 }
 
-.font-bold {
-  font-weight: 600;
-}
 
-.text-purple {
-  color: var(--purple);
-}
 
 /* 分类对比表横向滚动，首列固定 */
 .table-scroll {
@@ -1424,12 +1343,12 @@ onUnmounted(stopPolling)
 
 .arrow {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   width: 12px;
 }
 
 .detail-title {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -1457,25 +1376,25 @@ onUnmounted(stopPolling)
 }
 
 .qid {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--purple);
   font-weight: 600;
 }
 
 .qtitle {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
 }
 
 .score {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--primary);
 }
 
 .prompt-box {
   margin-bottom: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 
@@ -1488,11 +1407,11 @@ onUnmounted(stopPolling)
   white-space: pre-wrap;
   word-break: break-word;
   background: var(--bg-hover);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 10px;
   margin-top: 6px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   max-height: 200px;
   overflow-y: auto;
 }
@@ -1502,9 +1421,9 @@ onUnmounted(stopPolling)
   word-break: break-word;
   background: var(--bg-hover);
   border: 1px solid var(--border-2);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   cursor: pointer;
 }
@@ -1516,68 +1435,32 @@ onUnmounted(stopPolling)
 
 .answer-error {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--danger);
 }
 
 .answer-comment {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--purple);
   background: var(--tint-purple);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
 }
 
 /* 弹窗 */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
 
-.modal {
-  width: 560px;
-  max-height: 84vh;
-  overflow-y: auto;
-}
 
 .modal-sm {
   width: 420px;
 }
 
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
 
-.modal-header h2 {
-  font-size: 18px;
-  margin: 0;
-  color: var(--text-1);
-}
 
-.modal-close {
-  background: transparent;
-  border: none;
-  color: var(--text-3);
-  font-size: 24px;
-  cursor: pointer;
-  line-height: 1;
-}
 
-.modal-close:hover {
-  color: var(--danger);
-}
 
 .modal-text {
-  font-size: 14px;
+  font-size: var(--fs-base);
   color: var(--text-1);
   margin-bottom: 20px;
 }
@@ -1590,7 +1473,7 @@ onUnmounted(stopPolling)
 }
 
 .form-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -1600,10 +1483,4 @@ onUnmounted(stopPolling)
   line-height: 1.6;
 }
 
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 18px;
-}
 </style>

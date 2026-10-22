@@ -364,7 +364,7 @@ export function wbEnabledModels(region) {
   return api.get('/api/workbuddy/models/enabled', { params }).then(r => r.data)
 }
 
-// 保存启用模型清单（按区域写入，并只同步同区域的 workbuddy Provider）
+// 保存启用模型清单（按区域写入，并刷新渠道源里 WorkBuddy 的模型目录）
 export function wbSaveEnabledModels(models, region) {
   const body = { models, region: region === 'global' ? 'global' : 'cn' }
   return api.post('/api/workbuddy/models/enabled', body, { timeout: 60000 }).then(r => r.data)
@@ -427,6 +427,49 @@ export function wbCompensationClaimAll() {
 // 单号领取补偿
 export function wbCompensationClaim(uid) {
   return api.post(`/api/workbuddy/accounts/${encodeURIComponent(uid)}/compensation`, {}, { timeout: 120000 }).then(r => r.data)
+}
+
+// ==================== 十个账号渠道 ====================
+
+// 渠道运行时状态（ready / failed / unavailable）+ 目录里的模型数
+export function channelsStatus() {
+  return api.get('/api/channels/status').then(r => r.data)
+}
+
+// 重新采集渠道目录并同步进 channels 源（登录成功后调用；平时由服务端排程自动做）
+export function channelsRefresh() {
+  return api.post('/api/channels/refresh', {}, { timeout: 120000 }).then(r => r.data)
+}
+
+// 渠道管理 RPC：方法名与 payload 由渠道包自己的方法表定义（后端原样透传），
+// 这里只负责剥掉两层 { ok, result: { ok, value } }，并把失败变成可 catch 的 Error
+export async function channelsRpc(method, payload = {}, timeout = 120000) {
+  let data
+  try {
+    ({ data } = await api.post('/api/channels/rpc', { method, payload }, { timeout }))
+  } catch (err) {
+    // 服务端把渠道包的错误翻成 4xx/5xx + { ok:false, error }，优先用它给出的文案
+    throw new Error(err.response?.data?.error || err.message)
+  }
+  if (!data?.ok) throw new Error(data?.error || '渠道接口调用失败')
+  const result = data.result
+  // 渠道包的响应是 { ok:true, value } / { ok:false, error:{message} }，两层都要判
+  if (result?.ok !== true) throw new Error(result?.error?.message || '渠道接口返回失败')
+  return result.value
+}
+
+// 渠道连通性测试：拿账号池里第一个可用模型发一次真实短对话
+// payload: { provider?, model? } —— 都不给时服务端依次试前几个候选模型
+export async function channelsTest(payload = {}) {
+  try {
+    const { data } = await api.post('/api/channels/test', payload, { timeout: 180000 })
+    return data
+  } catch (err) {
+    // 「账号池里还没有可用模型」这类失败服务端回 400 + { ok:false, error }，
+    // 它是一次测试结果而不是网络异常，交给调用方按结果渲染
+    if (err.response && err.response.data) return err.response.data
+    throw err
+  }
 }
 
 // ==================== 更新检查 ====================

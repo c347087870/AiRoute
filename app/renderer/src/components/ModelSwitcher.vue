@@ -59,7 +59,7 @@ onMounted(() => {
 }
 
 .current-label {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -71,8 +71,8 @@ onMounted(() => {
   border: 1px solid var(--border-3);
   color: var(--text-1);
   padding: 8px 10px;
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-small);
   cursor: pointer;
 }
 </style>

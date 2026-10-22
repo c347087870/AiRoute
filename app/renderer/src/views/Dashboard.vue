@@ -137,7 +137,7 @@
         </button>
       </div>
       <div class="card table-card">
-        <table class="log-table" v-if="recentLogs.length">
+        <table class="table" v-if="recentLogs.length">
           <thead>
             <tr>
               <th>时间</th>
@@ -228,7 +228,7 @@ const quickSwitchGroups = computed(() => {
       group = { label: item.providerLabel, models: [] }
       groups.push(group)
     }
-    group.models.push({ ref: item.ref, label: item.model.displayName || item.model.id })
+    group.models.push({ ref: item.ref, label: item.label })
   }
   return groups
 })
@@ -327,12 +327,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 24px;
-  color: var(--text-1);
-}
 
 .stats-grid {
   display: grid;
@@ -346,7 +340,7 @@ onMounted(async () => {
 }
 
 .stat-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 8px;
   text-transform: uppercase;
@@ -354,7 +348,7 @@ onMounted(async () => {
 }
 
 .stat-value {
-  font-size: 24px;
+  font-size: var(--fs-display);
   font-weight: 700;
   color: var(--text-1);
 }
@@ -373,29 +367,20 @@ onMounted(async () => {
 
 /* 请求数卡片的统计口径说明 */
 .stat-subtitle {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   margin-top: 6px;
 }
 
 /* 失败数提示，鼠标悬停显示完整口径说明 */
 .stat-failed {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-weak);
   margin-top: 4px;
   cursor: help;
 }
 
-.section {
-  margin-bottom: 24px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
 .section-header {
   display: flex;
@@ -416,7 +401,7 @@ onMounted(async () => {
 }
 
 .group-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 6px;
 }
@@ -432,8 +417,8 @@ onMounted(async () => {
   border: 1px solid var(--border-3);
   color: var(--text-2);
   padding: 8px 16px;
-  border-radius: 20px;
-  font-size: 13px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-small);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -449,39 +434,11 @@ onMounted(async () => {
   color: var(--primary);
 }
 
-.log-table {
-  width: 100%;
-  border-collapse: collapse;
-}
 
-.log-table th,
-.log-table td {
-  text-align: left;
-  padding: 8px 12px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border-2);
-  color: var(--text-1);
-}
 
-.log-table th {
-  color: var(--text-3);
-  font-weight: 500;
-}
 
-.text-green {
-  color: var(--success);
-}
 
-.text-red {
-  color: var(--danger);
-}
 
-.empty {
-  text-align: center;
-  color: var(--text-3);
-  padding: 24px;
-  font-size: 14px;
-}
 
 /* Token 统计样式 */
 .token-stats-grid {
@@ -503,15 +460,15 @@ onMounted(async () => {
 }
 
 .token-stat-title {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .token-badge {
   padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 11px;
+  border-radius: var(--radius-lg);
+  font-size: var(--fs-mini);
   font-weight: 500;
 }
 
@@ -537,7 +494,7 @@ onMounted(async () => {
 }
 
 .token-stat-label {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   margin-bottom: 6px;
   text-transform: uppercase;
@@ -545,7 +502,7 @@ onMounted(async () => {
 }
 
 .token-stat-number {
-  font-size: 18px;
+  font-size: var(--fs-lg);
   font-weight: 700;
 }
 
@@ -570,7 +527,7 @@ onMounted(async () => {
 }
 
 .subsection-title {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   margin-bottom: 12px;
   color: var(--text-1);
@@ -578,11 +535,11 @@ onMounted(async () => {
 
 /* 统计口径说明入口，悬停查看完整口径 */
 .subsection-hint {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   font-weight: 400;
   color: var(--text-3);
   border: 1px solid var(--border-3);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 1px 8px;
   margin-left: 8px;
   cursor: help;
@@ -598,7 +555,7 @@ onMounted(async () => {
 .model-token-table td {
   text-align: left;
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
   color: var(--text-1);
 }
@@ -608,30 +565,12 @@ onMounted(async () => {
   font-weight: 500;
 }
 
-.text-blue {
-  color: var(--primary);
-}
 
-.text-green {
-  color: var(--success);
-}
 
-.text-purple {
-  color: var(--purple);
-}
 
-.text-orange {
-  color: var(--warning);
-}
 
-.font-bold {
-  font-weight: 600;
-}
 
 /* 表格列较多，窄屏时允许卡片内横向滚动 */
-.table-card {
-  overflow-x: auto;
-}
 
 /* 窄屏下用量卡片改为三列，避免数字挤在一起 */
 @media (max-width: 1200px) {

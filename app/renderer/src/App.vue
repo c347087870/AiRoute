@@ -99,17 +99,18 @@ useTheme().initTheme()
   --chart-grid: #E0E0E0;
   --chart-active: #FF5722;
 
-  /* 圆角 */
+  /* 圆角阶梯：4 标签/徽标 · 8 小控件 · 10 卡片与按钮 · 14 大面板 · pill 胶囊 */
+  --radius-xs: 4px;
   --radius-lg: 14px;
   --radius-md: 10px;
   --radius-sm: 8px;
   --radius-pill: 20px;
 
-  /* 阴影 */
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
-
-  /* 字号 */
+  /* 字号阶梯：24 大数字 · 22 页面标题 · 18 面板标题 · 16 区块标题 ·
+     14 正文 · 13 次要 · 12 辅助 · 11 标签 */
+  --fs-display: 24px;
   --fs-title: 22px;
+  --fs-lg: 18px;
   --fs-section: 16px;
   --fs-base: 14px;
   --fs-small: 13px;
@@ -313,5 +314,368 @@ button {
   border-radius: var(--radius-lg);
   padding: 20px;
   box-shadow: var(--shadow-card);
+}
+
+/* ==================== 共享版式 ==================== */
+/* 下面这批类是各页面原本各自复制一份的东西（.page-title 在 10 个文件里出现过，
+   边距从 16px 到 32px 不等）。统一收在这里，页面里不要再定义同名类 ——
+   scoped 样式的优先级高于全局，留着旧定义就等于没改。 */
+
+/* 页头：标题 + 右侧操作区；没有操作区的页面可以只用 .page-title */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.page-title {
+  margin-bottom: 20px;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* 标题已经在 .page-header 里时，间距交给页头，避免双重外边距 */
+.page-header .page-title {
+  margin-bottom: 0;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 设置类表单：一行一个配置项（标签 + 控件 + 说明）。路由规则、系统设置共用 */
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-2);
+}
+
+.config-row:last-of-type {
+  border-bottom: none;
+}
+
+.config-label {
+  width: 200px;
+  flex-shrink: 0;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-1);
+}
+
+.config-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-hint {
+  padding: 4px 0 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* 页签：胶囊样式。原来 Channels/WorkBuddy 用 .ch-tab/.wb-tab，Benchmark 用
+   .tab-btn 下划线样式，TokenStats 用 .period-btn，同一交互四种外观，统一到这里 */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.tab {
+  padding: 8px 16px;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  background: var(--bg-card);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-pill);
+}
+
+.tab:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.tab.active {
+  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+/* 徽标：状态标签（在线/离线、评测状态、渠道可用性、版本提示）。
+   颜色一律走「状态色」成对令牌，不要再各页面自定义一套 */
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  font-size: var(--fs-mini);
+  font-weight: 500;
+  white-space: nowrap;
+  border-radius: var(--radius-pill);
+}
+
+.badge.ok {
+  color: var(--ok-text);
+  background: var(--ok-bg);
+}
+
+.badge.warn {
+  color: var(--warn-text);
+  background: var(--warn-bg);
+}
+
+.badge.bad {
+  color: var(--bad-text);
+  background: var(--bad-bg);
+}
+
+.badge.info {
+  color: var(--primary);
+  background: var(--tint-primary-soft);
+}
+
+/* 进度条：下载安装、批量评测共用 */
+.progress-track {
+  height: 6px;
+  overflow: hidden;
+  background: var(--border-2);
+  border-radius: var(--radius-xs);
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: var(--radius-xs);
+  transition: width 0.3s ease;
+}
+
+/* 筛选条：日志、WorkBuddy 等列表页顶部的一排筛选控件 */.filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+/* 警示条：数据可能不准 / 操作有风险时的提示 */
+.warning-box {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  font-size: var(--fs-small);
+  color: var(--warning-text);
+  background: var(--tint-warning);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+}
+
+/* 区域选择（国内版 / 国际版）：WorkBuddy 账号池与 Provider 表单共用同一套 */
+.realm-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.realm-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: var(--fs-small);
+  color: var(--text-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.realm-option.active {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+
+.realm-name {
+  font-weight: 600;
+}
+
+.realm-host {
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+}
+
+/* 区域标签：账号行 / OAuth 标题上标「国内」「国际」 */
+.realm-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: var(--fs-mini);
+  line-height: 18px;
+  vertical-align: middle;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+}
+
+.realm-tag.cn {
+  color: var(--text-2);
+  background: var(--tint-neutral);
+  border-color: var(--border-1);
+}
+
+.realm-tag.global {
+  color: var(--purple-text);
+  background: var(--tint-purple);
+  border-color: var(--purple-border);
+}
+
+/* 页面分区：一个分区一块内容，统一 24px 间距 */
+.section {
+  margin-bottom: 24px;
+}
+
+.section-title {
+  margin-bottom: 12px;
+  font-size: var(--fs-section);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* 空状态：表格/列表没有数据时统一用这一块，别每个页面自己写 padding */
+.empty {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: var(--fs-base);
+  color: var(--text-3);
+}
+
+/* 表格：横向滚动容器 + 统一表头字号；边框交给外层卡片，避免和 .card 叠出双线 */
+.table-wrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+}
+
+.table th {
+  padding: 10px 12px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-3);
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-1);
+}
+
+.table td {
+  padding: 10px 12px;
+  color: var(--text-1);
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-2);
+}
+
+.table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ==================== 工具类 ==================== */
+/* 语义文字色 / 等宽 / 加粗这类小工具原本在 4~5 个页面里各抄了一份，统一到这里 */
+.text-red {
+  color: var(--danger);
+}
+
+.text-green {
+  color: var(--success);
+}
+
+.text-orange {
+  color: var(--warning);
+}
+
+.text-blue {
+  color: var(--primary);
+}
+
+.text-purple {
+  color: var(--purple);
+}
+
+.text-muted {
+  color: var(--text-3);
+}
+
+.font-bold {
+  font-weight: 600;
+}
+
+.mono {
+  font-family: 'Courier New', Consolas, monospace;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+/* ==================== 共享弹窗 ==================== */
+/* 弹窗骨架统一在这里；页面里只保留自己特有的宽度修饰（.modal-sm / .picker-modal） */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+}
+
+.modal {
+  width: 560px;
+  /* 窗口拉窄时不要顶到边上：Electron 主窗口允许拖到 800px 以下 */
+  max-width: calc(100vw - 32px);
+  max-height: 84vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  color: var(--text-1);
+}
+
+.modal-close {
+  padding: 0 4px;
+  font-size: var(--fs-title);
+  line-height: 1;
+  color: var(--text-3);
+  background: transparent;
+  border: none;
+}
+
+.modal-close:hover {
+  color: var(--danger);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
 }
 </style>

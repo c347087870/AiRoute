@@ -49,6 +49,45 @@
           <span class="info-value">sk-airoute</span>
         </div>
         <p class="note">AiRoute 不校验 API Key，填任意非空字符串即可（推荐 <code>sk-airoute</code>）。</p>
+
+        <h3>4. 让 AI 自己接入（提示词，直接复制）</h3>
+        <p>不想自己翻配置文件，就把下面这段整段复制给要接入的 AI（Claude Code、Codex、Cursor 的 Agent 等）。它会先判断自己该改哪份配置，写完再跑一遍连通性自检，最后告诉你还差哪一步。</p>
+        <div class="prompt-wrap">
+          <div class="prompt-head">
+            <span class="prompt-title">接入提示词</span>
+            <button class="btn-ghost btn-sm" @click="copySetupPrompt">
+              {{ copyState === 'ok' ? '已复制' : copyState === 'fail' ? '请手动选中复制' : '复制' }}
+            </button>
+          </div>
+          <pre class="prompt-block"><code>{{ setupPrompt }}</code></pre>
+        </div>
+        <p class="note">地址取自本页「接入地址」，端口在「设置」里改过之后这里会跟着变。给另一台设备上的 AI 用时，把提示词里的 <code>localhost</code> 换成本页上方的「局域网」地址。</p>
+
+        <h3>5. 让客户端自己选策略：auto-fast / auto-cheap / auto</h3>
+        <p>模型列表里除了真实模型，还有三个「策略伪模型」。客户端把模型名填成它们之一，这条请求就按对应策略挑模型，<strong>不用改 AiRoute 里的激活模型</strong>。</p>
+        <table>
+          <thead>
+            <tr><th>id</th><th>策略</th><th>怎么挑</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>auto-fast</code></td>
+              <td>体验优先</td>
+              <td>按最近 200 次的中位延迟排序，失败率越高越靠后；从没实测过的按 5000ms 估</td>
+            </tr>
+            <tr>
+              <td><code>auto-cheap</code></td>
+              <td>性价比优先</td>
+              <td>免费模型优先，其次按每 1k token 的实测消耗（没有样本时用渠道包写的倍率）；账号层本来就会优先消耗快到期的积分</td>
+            </tr>
+            <tr>
+              <td><code>auto</code></td>
+              <td>综合</td>
+              <td>延迟与成本各自归一化后等权相加</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="note">一次请求最多按顺序试 4 个模型，前面失败就换下一个；「路由规则」里配的兜底模型排在最后。排序数据只来自本机日志（最近两份、各 4000 行），缓存 60 秒，冷启动没有数据时退化成配置顺序。除这三个 id 之外，请求里的 <code>model</code> 字段照旧不影响结果。</p>
       </section>
 
       <!-- 二、核心概念 -->
@@ -195,6 +234,64 @@ const lanIPs = ref([]) // 本机局域网 IPv4 列表（服务端动态检测，
 // 本机接入地址（localhost），随端口配置动态变化
 const localhostUrl = computed(() => `http://localhost:${serverPort.value}`)
 
+// 「让 AI 自己接入」的提示词。三个理由让它拼成字符串而不是写死在模板里：
+// 1. 端口可改，写死就会让用户复制到一个已经不存在的地址；
+// 2. 提示词要能被一键复制（用户不必自己在长篇文字里挑出哪段是要复制的）；
+// 3. 它是给**别的 AI**看的，格式（分段、命令、预期输出）比排版更重要。
+const setupPrompt = computed(() => `你要把「你自己」接入本机的 AiRoute 网关。AiRoute 同时兼容
+Anthropic 与 OpenAI 协议，接入后你的模型请求统一由它调度（真实上游账号、模型切换、
+失败兜底都在它那边），你不需要知道任何上游地址或 Key。
+
+【网关信息】
+- 本机地址：${localhostUrl.value}
+- Anthropic 协议：base URL 只写到端口（${localhostUrl.value}），不要拼 /v1/messages 或 /v1
+- OpenAI 兼容协议：base URL 写 ${localhostUrl.value}/v1
+  端点：/v1/chat/completions、/v1/responses、/v1/models
+- API Key：sk-airoute（AiRoute 不做鉴权，任意非空字符串都可以）
+- 模型名：随便填。AiRoute 只转发它自己的「当前激活模型」，请求里的 model 字段不参与
+  路由，写什么都会被替换；想看可用的模型 id 就请求 /v1/models。
+
+【请按顺序做】
+1. 先确认你是哪个客户端、读的是哪份配置，再动手改：
+   Claude Code 读 ~/.claude/settings.json 的 env；OpenAI 兼容的工具是 base_url + api_key
+   两个字段；纯 GUI 客户端（如 Cursor）只能手填界面、不要替它改内部数据库。
+   不确定就先读现有配置文件，不要新建一份自己根本不会读的文件。
+2. 写入配置，只动接入相关的键，改之前把原文件备份成同名 .bak：
+   - Claude Code：env 里加 ANTHROPIC_AUTH_TOKEN=sk-airoute、
+     ANTHROPIC_BASE_URL=${localhostUrl.value}
+   - 其它：base_url=${localhostUrl.value}/v1，api_key=sk-airoute
+3. 自检，两条都要跑，把输出摘要给我：
+   curl -s ${localhostUrl.value}/v1/models -H 'authorization: Bearer sk-airoute'
+   curl -s -X POST ${localhostUrl.value}/v1/chat/completions -H 'content-type: application/json' -d '{"model":"placeholder","messages":[{"role":"user","content":"ping"}],"max_tokens":8}'
+   预期：第一条返回 JSON 且 data 非空；第二条返回 choices，且响应里的 model 字段是
+   AiRoute 的当前激活模型 —— 不是你传的 placeholder，这是正常的。
+4. 汇报：改了哪个文件哪一项、自检结果、还需要我手动做什么（重启客户端 / 在 AiRoute 里切模型）。
+
+【约束】
+- 不要给地址加 /v1/messages 或 /v1 后缀（OpenAI 兼容的 base_url 除外），路径重复拼接会 404。
+- 不要把 http 改成 https，不要改端口。
+- 如果 ${localhostUrl.value} 连不上：停下来告诉我，先确认 AiRoute 正在运行
+  （面板右上角「Router 状态」显示运行中），不要靠改配置绕过。
+- 只改本机配置，不要把地址或 Key 写进会被提交进版本库的文件。
+- 这个客户端跑在另一台机器上时，把上面所有 localhost 换成本机的局域网 IP。`)
+
+const copyState = ref('') // '' | 'ok' | 'fail'
+let copyTimer = 0
+
+async function copySetupPrompt() {
+  try {
+    await navigator.clipboard.writeText(setupPrompt.value)
+    copyState.value = 'ok'
+  } catch {
+    // 剪贴板被拒（窗口无焦点等）：提示词本身就在 pre 里可见可选中，退化成手抄
+    copyState.value = 'fail'
+  }
+  clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => {
+    copyState.value = ''
+  }, 2500)
+}
+
 // 加载服务端配置（端口与局域网 IP 列表），失败时保持默认值
 async function loadConfig() {
   try {
@@ -208,15 +305,7 @@ onMounted(loadConfig)
 </script>
 
 <style scoped>
-.page-header {
-  margin-bottom: 24px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-1);
-}
 
 /* 打赏区域：标题下方居中展示二维码与说明文字 */
 .donate {
@@ -228,12 +317,12 @@ onMounted(loadConfig)
 
 .donate-img {
   width: 180px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .donate-text {
   margin-top: 8px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-3);
 }
 
@@ -246,26 +335,23 @@ onMounted(loadConfig)
   margin: 10px 0 14px;
   padding: 10px 14px;
   border-left: 3px solid var(--primary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--primary-bg);
-  font-size: 13px;
+  font-size: var(--fs-small);
   line-height: 1.75;
   color: var(--text-2);
 }
 
 .tutorial-callout code {
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--tint-neutral);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
-.section {
-  margin-bottom: 32px;
-}
 
 .section h2 {
-  font-size: 18px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   margin-bottom: 12px;
   padding-bottom: 8px;
@@ -274,7 +360,7 @@ onMounted(loadConfig)
 }
 
 .section h3 {
-  font-size: 15px;
+  font-size: var(--fs-section);
   font-weight: 600;
   margin-top: 20px;
   margin-bottom: 8px;
@@ -282,14 +368,14 @@ onMounted(loadConfig)
 }
 
 .section p {
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1.7;
   color: var(--text-body);
   margin-bottom: 8px;
 }
 
 .section ul, .section ol {
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1.8;
   color: var(--text-body);
   padding-left: 20px;
@@ -303,7 +389,7 @@ onMounted(loadConfig)
 .section table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--fs-small);
   margin-bottom: 8px;
 }
 
@@ -323,16 +409,16 @@ onMounted(loadConfig)
 .section code {
   background: var(--bg-code);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--primary);
 }
 
 .section pre {
   background: var(--bg-inset);
   border: 1px solid var(--border-1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 12px 16px;
   margin-bottom: 8px;
   overflow-x: auto;
@@ -341,9 +427,45 @@ onMounted(loadConfig)
 .section pre code {
   background: none;
   padding: 0;
-  font-size: 13px;
+  font-size: var(--fs-small);
   line-height: 1.6;
   color: var(--text-1);
+}
+
+/* 接入提示词：可一键复制的整段文字。head 与正文分开，
+   复制按钮固定在右上角，长提示词滚动时也够得着 */
+.prompt-wrap {
+  margin-bottom: 8px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px 6px 16px;
+  background: var(--bg-note);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.prompt-title {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+
+.section .prompt-block {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  max-height: 420px;
+  overflow: auto;
+  /* 提示词里有整行 curl，自动换行比让用户横向滚动更好读；
+     pre-wrap 同时保住分段与缩进，复制出去仍是原文 */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .section .note {
@@ -352,7 +474,7 @@ onMounted(loadConfig)
   padding: 8px 12px;
   border-radius: 0 8px 8px 0;
   color: var(--text-body);
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 .info-row {
@@ -360,7 +482,7 @@ onMounted(loadConfig)
   align-items: center;
   gap: 12px;
   padding: 8px 0;
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 .info-label {
@@ -373,6 +495,6 @@ onMounted(loadConfig)
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   color: var(--primary);
   font-weight: 500;
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 </style>

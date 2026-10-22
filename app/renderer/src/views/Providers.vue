@@ -3,20 +3,13 @@
     <div class="page-header">
       <h1 class="page-title">Provider 管理</h1>
       <div class="header-actions">
-        <button class="btn-ghost" @click="openAddModal('')">+ 通用 Provider</button>
-        <button
-          class="btn-primary"
-          :disabled="!workbuddyAddRegion"
-          :title="workbuddyAddHint"
-          @click="openAddModal('workbuddy')"
-        >
-          {{ workbuddyAddLabel }}
-        </button>
+        <button class="btn-primary" @click="openAddModal()">+ 通用 Provider</button>
       </div>
     </div>
 
-    <div v-if="!providerCount" class="card empty-state">
-      还没有配置任何 Provider，点击右上角「+ 通用 Provider」或「+ 添加 WorkBuddy 账号池」开始。
+    <div v-if="!providerCount" class="card empty">
+      还没有配置任何 Provider，点击右上角「+ 通用 Provider」开始。
+      免费账号（含 WorkBuddy）由「渠道账号」页登录后自动出现在渠道源里。
     </div>
 
     <div v-else class="provider-list">
@@ -30,23 +23,20 @@
           <div class="row-head">
             <span class="row-name">{{ provider.displayName || name }}</span>
             <span class="row-id">{{ name }}</span>
-            <span v-if="provider.type === 'workbuddy'" class="badge-type">账号池</span>
-            <span
-              v-if="provider.type === 'workbuddy'"
-              class="wb-realm-tag"
-              :class="provider.region === 'global' ? 'global' : 'cn'"
-            >{{ provider.region === 'global' ? '国际版' : '国内版' }}</span>
+            <span v-if="provider.type === 'channel'" class="badge-type">渠道</span>
             <span v-if="isCurrentProvider(name)" class="badge-current">当前</span>
             <span class="row-count">{{ provider.models?.length || 0 }} 个模型</span>
           </div>
 
           <div class="row-meta">
-            <template v-if="provider.type === 'workbuddy'">
+            <template v-if="provider.type === 'channel'">
               <span class="meta-item">
-                <span class="meta-label">类型</span>
-                <span class="meta-value">
-                  WorkBuddy 账号池（{{ provider.region === 'global' ? '国际版 workbuddy.ai' : '国内版 codebuddy.cn' }}）
-                </span>
+                <span class="meta-label">来源</span>
+                <span class="meta-value">渠道包（10 家免费账号 + WorkBuddy 国内版 / 国际版）</span>
+              </span>
+              <span class="meta-item">
+                <span class="meta-label">账号</span>
+                <span class="meta-value">在「渠道账号」页登录与管理</span>
               </span>
             </template>
             <template v-else>
@@ -74,7 +64,7 @@
                 :class="{ current: currentModel === `${name}/${model.id}` }"
                 :title="`${model.id}｜上下文 ${formatLimit(model.maxContext)}｜输出 ${formatLimit(model.maxOutput)}`"
               >
-                <span class="chip-name">{{ model.displayName || model.id }}</span>
+                <span class="chip-name">{{ modelLabel(provider, model) }}</span>
                 <span class="chip-meta">
                   {{ formatLimit(model.maxContext) }} / {{ formatLimit(model.maxOutput) }}
                 </span>
@@ -133,100 +123,10 @@
           </label>
           <!-- 类型由新增入口决定，编辑时只读展示 -->
           <div v-if="editingName" class="form-type-line">
-            类型：{{ form.type === 'workbuddy' ? 'WorkBuddy 账号池' : '通用端点（OpenAI / Anthropic）' }}
-            <span v-if="form.type === 'workbuddy'" class="wb-realm-tag" :class="form.region === 'global' ? 'global' : 'cn'">
-              {{ form.region === 'global' ? '国际版' : '国内版' }}
-            </span>
+            类型：{{ form.type === 'channel' ? '账号渠道（渠道包）' : '通用端点（OpenAI / Anthropic）' }}
           </div>
 
-          <!-- WorkBuddy 类型：先选区域（国际版与国内版是两个独立的源与账号池） -->
-          <div v-if="form.type === 'workbuddy' && !editingName" class="wb-realm-pick">
-            <div class="wb-realm-pick-title">选择区域</div>
-            <div class="wb-add-realm-opts">
-              <label class="wb-realm-opt" :class="{ active: form.region !== 'global' }">
-                <input type="radio" value="cn" v-model="form.region" />
-                <span class="wb-realm-name">国内版</span>
-                <span class="wb-realm-host">copilot.tencent.com</span>
-              </label>
-              <label class="wb-realm-opt" :class="{ active: form.region === 'global' }">
-                <input type="radio" value="global" v-model="form.region" />
-                <span class="wb-realm-name">国际版</span>
-                <span class="wb-realm-host">www.workbuddy.ai</span>
-              </label>
-            </div>
-            <div class="wb-realm-pick-note">
-              国内版与国际版是两个独立的源，各自只调度本区域的账号，互不混用。
-              国际版无签到与成长任务能力。
-            </div>
-          </div>
-
-          <!-- WorkBuddy 类型：账号池中的全部账号自动轮转，这里只读展示 -->
-          <div v-if="form.type === 'workbuddy'" class="wb-entry">
-            <div class="wb-entry-header">
-              <span class="wb-entry-title">
-                {{ form.region === 'global' ? '国际版' : '国内版' }}账号（{{ wbAccountsForForm.length }} 个，自动轮转）
-              </span>
-              <router-link to="/workbuddy" class="wb-entry-link">前往账号池页面管理 →</router-link>
-            </div>
-            <div class="wb-entry-hint">
-              该区域的账号都参与本源的请求轮转（自动换号、限流冷却、会话粘性），无需在此选择。
-              {{ form.region === 'global' ? '' : '其他区域的账号不会被派发到本源的请求。' }}
-            </div>
-            <div v-if="!wbAccountsForForm.length" class="wb-entry-empty">
-              账号池还没有{{ form.region === 'global' ? '国际版' : '国内版' }}账号，请先到「账号池」页面通过 OAuth 添加。
-            </div>
-            <div v-else class="wb-account-list">
-              <div v-for="acct in wbAccountsForForm" :key="acct.uid" class="wb-account-item">
-                <span class="wb-account-name">{{ acct.nickname || acct.uid.slice(0, 12) }}</span>
-                <span class="wb-realm-tag" :class="acct.realm === 'global' ? 'global' : 'cn'">
-                  {{ acct.realm === 'global' ? '国际版' : '国内版' }}
-                </span>
-                <span class="wb-account-state" :class="accountStateClass(acct)">{{ accountStateLabel(acct) }}</span>
-              </div>
-            </div>
-
-            <div class="wb-entry-header">
-              <span class="wb-entry-title">模型清单</span>
-              <router-link to="/workbuddy" class="wb-entry-link">调整启用模型 →</router-link>
-            </div>
-            <div class="wb-entry-hint">
-              {{ editingName ? '模型清单来自' : '已默认带出' }}账号池「模型和档位」中启用的全部模型（共
-              {{ wbModelList.length }} 个）{{ editingName ? '，保存后自动同步。' : '，保存后生效。' }}
-            </div>
-            <div class="wb-model-chips">
-              <div v-for="m in wbModelList" :key="m.id" class="wb-model-row">
-                <div class="wb-model-line">
-                  <span class="wb-model-chip">{{ m.id }}</span>
-                  <select
-                    class="effort-select-sm"
-                    :value="effortSelectValue(m)"
-                    @change="onEffortSelect(m, $event.target.value)"
-                  >
-                    <option value="">默认（不干预）</option>
-                    <option v-for="e in m.efforts" :key="e" :value="e">{{ e }}</option>
-                    <option value="__custom">自定义…</option>
-                  </select>
-                  <input v-if="m.custom" v-model="m.reasoningEffort" class="effort-input" placeholder="输入自定义档位" />
-                </div>
-                <div class="wb-model-line">
-                  <div class="limit-field">
-                    <span class="limit-label">最大上下文</span>
-                    <input v-model="m.maxContext" type="number" min="1" placeholder="留空" />
-                  </div>
-                  <div class="limit-field">
-                    <span class="limit-label">最大输出</span>
-                    <input v-model="m.maxOutput" type="number" min="1" placeholder="留空" />
-                  </div>
-                </div>
-              </div>
-              <span v-if="!wbModelList.length" class="wb-entry-empty">尚未配置模型，请到账号池页面勾选要启用的模型。</span>
-            </div>
-            <div class="wb-entry-hint">
-              推理档位逐模型独立配置（WorkBuddy 源不回落全局档位）：下拉列出该模型后台支持的全部档位，默认档已预选；选「默认」表示不改写客户端请求的档位，「自定义」可手填。最大上下文与最大输出取自后台拉取的值，可自行调整，留空表示不注入。
-            </div>
-          </div>
-
-          <template v-else>
+          <template v-if="form.type !== 'channel'">
           <label>
             Anthropic URL
             <input v-model="form.baseURL" placeholder="https://api.example.com/anthropic" />
@@ -247,10 +147,10 @@
           </label>
           </template>
 
-          <div v-if="form.type !== 'workbuddy'" class="model-editor">
+          <div class="model-editor">
             <div class="model-editor-header">
               <span class="model-editor-title">模型列表</span>
-              <div class="model-editor-actions">
+              <div v-if="form.type !== 'channel'" class="model-editor-actions">
                 <button
                   class="btn-ghost btn-sm"
                   :disabled="picker.loading"
@@ -263,9 +163,16 @@
               </div>
             </div>
             <div class="model-editor-hint">
-              第一个模型为默认模型。最大上下文与最大输出不填即为空，填写后会在请求未指定 max_tokens 时自动注入。
-              推理档位逐模型配置（下拉可选 low / high / max / xhigh，或输入自定义值），选「默认」表示不干预客户端请求。
-              填好 URL 与 Key 后点「从接口拉取模型」，可一次带出上游全部模型。
+              <template v-if="form.type === 'channel'">
+                渠道模型的清单由渠道包维护（登录/退出账号、账号池改启用清单后自动同步）。
+                这里改<strong>显示名</strong>与<strong>推理档位</strong>会在下次同步时保留；
+                模型 ID 与上下文/输出上限以目录为准，改了会被刷新覆盖。
+              </template>
+              <template v-else>
+                第一个模型为默认模型。最大上下文与最大输出不填即为空，填写后会在请求未指定 max_tokens 时自动注入。
+                推理档位逐模型配置（下拉可选 low / high / max / xhigh，或输入自定义值），选「默认」表示不干预客户端请求。
+                填好 URL 与 Key 后点「从接口拉取模型」，可一次带出上游全部模型。
+              </template>
             </div>
 
             <div v-for="(model, index) in form.models" :key="index" class="model-edit-row">
@@ -366,7 +273,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useModel } from '../composables/useModel.js'
 import { showToast } from '../composables/useToast.js'
 import { useEscClose } from '../composables/useEscClose.js'
@@ -376,11 +283,10 @@ import {
   updateProvider,
   deleteProvider,
   testProvider,
-  fetchProviderModels,
-  wbAccounts as fetchWbAccounts,
-  wbEnabledModels
+  fetchProviderModels
 } from '../api.js'
 import { formatNumber } from '../utils/format.js'
+import { modelLabel } from '../utils/models.js'
 
 // 模型 chip 超过该数量时折叠，点击 +N 展开
 const MODEL_COLLAPSE_LIMIT = 3
@@ -393,9 +299,6 @@ const editingName = ref('') // 正在编辑的 provider 名
 const showKey = ref(false) // API Key 密码/明文切换
 const expanded = ref(new Set()) // 已展开全部模型的 provider 名
 const form = ref(emptyForm()) // 编辑表单数据
-const wbAccounts = ref([]) // WorkBuddy 账号池的账号列表（只读展示自动轮转的账号）
-const enabledModels = ref([]) // 账号池统一维护的启用模型清单（只读展示）
-const wbModelList = ref([]) // WorkBuddy 表单的模型清单（由启用清单构建，档位可逐模型编辑）
 
 // 上游模型探测结果（选择层）：只存在于表单内，不落盘
 // all：探测到的全部模型（含 chat 标记与命中的上下限）；selected：勾选的模型 ID
@@ -423,58 +326,15 @@ const visiblePickerModels = computed(() => {
   })
 })
 
-// WorkBuddy 源按区域唯一：每个区域最多一个源，两个区域可共存
-const wbProvidersByRegion = computed(() => {
-  const out = { cn: [], global: [] }
-  for (const [name, p] of Object.entries(providers.value)) {
-    if (p.type !== 'workbuddy') continue
-    out[p.region === 'global' ? 'global' : 'cn'].push(name)
-  }
-  return out
-})
-// 下一个可添加的 WorkBuddy 区域：优先补尚未建源的那个（两个区域都已建源返回 ''）
-// 新增入口的禁用态与文案都以它为准——按区域唯一，而非旧的「全局唯一」
-const workbuddyAddRegion = computed(() => {
-  const taken = wbProvidersByRegion.value
-  if (!taken.cn.length) return 'cn'
-  if (!taken.global.length) return 'global'
-  return ''
-})
-
-// 新增入口文案（带目标区域，避免用户以为还能再加一个同区域源）
-const workbuddyAddLabel = computed(() => {
-  if (workbuddyAddRegion.value === 'global') return '+ 添加 WorkBuddy 账号池（国际版）'
-  if (workbuddyAddRegion.value === 'cn') return '+ 添加 WorkBuddy 账号池（国内版）'
-  return '两个区域均已有源'
-})
-
-// 新增入口提示
-const workbuddyAddHint = computed(() => {
-  if (workbuddyAddRegion.value) {
-    return `WorkBuddy 源按区域唯一：国内版与国际版各可添加一个（将添加${workbuddyAddRegion.value === 'global' ? '国际版' : '国内版'}）`
-  }
-  return '国内版与国际版的 WorkBuddy 源都已存在，删除对应区域的源后才能重新添加'
-})
-
-// 表单区域对应的账号（只展示本区域账号，避免误以为跨区共用）
-const wbAccountsForForm = computed(() =>
-  wbAccounts.value.filter(a => (a.realm === 'global' ? 'global' : 'cn') === (form.value.region === 'global' ? 'global' : 'cn'))
-)
-
-// 弹窗标题：编辑态显示「编辑 Provider」，新增态按入口类型区分
-const modalTitle = computed(() => {
-  if (editingName.value) return '编辑 Provider'
-  if (form.value.type !== 'workbuddy') return '新增通用 Provider'
-  return form.value.region === 'global' ? '添加 WorkBuddy 账号池（国际版）' : '添加 WorkBuddy 账号池（国内版）'
-})
+// 弹窗标题：编辑态显示「编辑 Provider」，新增态只有通用端点一种
+const modalTitle = computed(() => (editingName.value ? '编辑 Provider' : '新增通用 Provider'))
 
 // 生成一份空白表单
 function emptyForm() {
   return {
     name: '', // Provider ID
     displayName: '', // 显示名称
-    type: '', // Provider 类型（空=通用端点，workbuddy=账号池）
-    region: 'cn', // 区域（仅 workbuddy 有意义）：cn 国内版 / global 国际版
+    type: '', // Provider 类型（空=通用端点；channel=账号渠道，只读由渠道包维护）
     baseURL: '', // Anthropic 端点 URL
     openaiURL: '', // OpenAI 端点 URL
     apiKey: '', // API Key
@@ -482,72 +342,10 @@ function emptyForm() {
   }
 }
 
-// 加载账号池数据（账号列表 + 该区域启用模型清单），供 WorkBuddy 类型表单使用
-// existingModels：编辑态传入当前 Provider 的模型列表，用于回填各模型已配置的推理档位
-// region：按区域取模型清单（两地可用模型不同）
-async function loadWorkbuddyData(existingModels, region) {
-  const want = region === 'global' ? 'global' : 'cn'
-  let acctRes = null
-  let modelRes = null
-  try {
-    ;[acctRes, modelRes] = await Promise.all([fetchWbAccounts(), wbEnabledModels(want)])
-  } catch {
-    // 账号池接口不可用时静默降级（表单仍可保存通用配置）
-    acctRes = null
-    modelRes = null
-  }
-  // 过期响应守卫：期间用户可能切了区域或换了弹窗。
-  // 没有这道守卫时，先打开的国内弹窗的后返回响应会覆盖国际弹窗（共享 ref），
-  // 导致国际源表单里显示国内模型清单，保存时被后端跨区校验拒绝
-  const now = form.value.region === 'global' ? 'global' : 'cn'
-  if (form.value.type !== 'workbuddy' || now !== want) return
-  wbAccounts.value = (acctRes && acctRes.accounts) || []
-  enabledModels.value = (modelRes && modelRes.models) || []
-  wbModelList.value = buildWbModelList(existingModels)
-}
-
-// 由账号池启用清单构建 WorkBuddy 模型列表
-// 档位候选来自后台拉取的 efforts；已配置过的档位优先回填，否则用后台默认档
-// 上下文与最大输出优先用 Provider 侧已配置值，未配置时回填后台拉取到的值
-function buildWbModelList(existingModels) {
-  const configured = new Map((existingModels || []).map(m => [m.id, m]))
-  return enabledModels.value.map(m => {
-    const saved = configured.get(m.id)
-    const efforts = Array.isArray(m.efforts) ? m.efforts.slice() : []
-    const savedEffort = (saved?.reasoningEffort || '').trim()
-    const defaultEffort = (m.defaultEffort || '').trim()
-    const effort = savedEffort || (efforts.includes(defaultEffort) ? defaultEffort : '')
-    return {
-      id: m.id, // 模型 id
-      displayName: m.displayName || '', // 显示名
-      maxContext: saved?.maxContext ?? m.maxContext ?? null, // 最大上下文（Provider 侧优先）
-      maxOutput: saved?.maxOutput ?? m.maxOutput ?? null, // 最大输出（Provider 侧优先）
-      efforts, // 该模型后台支持的档位候选
-      reasoningEffort: effort, // 当前档位（已配置优先，否则预选后台默认档）
-      custom: !!effort && !efforts.includes(effort) // 当前档位是否为列表外的自定义值
-    }
-  })
-}
-
-// 账号状态标签文案（与账号池页面保持同一口径）
-function accountStateLabel(acct) {
-  if (acct.disabled) return '已禁用'
-  if (acct.cooling) return '冷却中'
-  return '可用'
-}
-
-// 账号状态标签样式类
-function accountStateClass(acct) {
-  if (acct.disabled) return 'is-bad'
-  if (acct.cooling) return 'is-warn'
-  return 'is-ok'
-}
-
-// 通用 Provider 的档位候选（WorkBuddy 源改用后台拉取的候选，不用这里）
+// 通用 Provider 的档位候选
 const EFFORT_PRESETS = ['low', 'high', 'max', 'xhigh']
 
 // 档位下拉的当前显示值：空 = 默认（不干预）；命中候选档位原样返回；其余归入自定义
-// fallback：模型没有后台候选时使用的兜底候选（通用 Provider 传固定档位表）
 function effortSelectValue(model, fallback) {
   const v = (model.reasoningEffort || '').trim()
   if (!v) return ''
@@ -755,7 +553,7 @@ function applyPickedModels() {
   showToast(added ? `已合并 ${next.length} 个模型（新增 ${added} 个）` : `已同步 ${next.length} 个模型`)
 }
 
-// 打开编辑弹窗，加载完整的 apiKey 与账号池数据
+// 打开编辑弹窗，加载完整的 apiKey
 async function editProvider(name, provider) {
   editingName.value = name
   resetPicker()
@@ -763,7 +561,6 @@ async function editProvider(name, provider) {
     name,
     displayName: provider.displayName || '',
     type: provider.type || '',
-    region: provider.region === 'global' ? 'global' : 'cn',
     baseURL: provider.baseURL || '',
     openaiURL: provider.openaiURL || '',
     apiKey: '', // 先置空，下面异步回填
@@ -772,40 +569,24 @@ async function editProvider(name, provider) {
           id: m.id || '',
           displayName: m.displayName || '',
           maxContext: m.maxContext ?? null,
-          maxOutput: m.maxOutput ?? null
+          maxOutput: m.maxOutput ?? null,
+          // 必须回填：否则保存时以空值覆盖，用户配过的档位会静默丢失
+          reasoningEffort: m.reasoningEffort || ''
         }))
       : [emptyModel()]
   }
   showKey.value = false
-  if (form.value.type === 'workbuddy') loadWorkbuddyData(provider.models, form.value.region)
   try {
     const full = await getProviderFull(name)
     form.value.apiKey = full.apiKey || ''
   } catch {}
 }
 
-// 打开新增弹窗：type 为空 = 通用 Provider，'workbuddy' = WorkBuddy 账号池（由入口按钮决定类型）
-// WorkBuddy 默认区域取「尚未建源」的那个（两个区域都已建源时回落国内版）
-function openAddModal(type = '') {
+// 打开新增弹窗：只有通用端点一种入口（账号渠道由渠道包自动建，不在这里加）
+function openAddModal() {
   resetForm()
-  form.value.type = type
-  if (type === 'workbuddy') {
-    form.value.region = workbuddyAddRegion.value || 'cn'
-    loadWorkbuddyData(null, form.value.region)
-  }
   showAdd.value = true
 }
-
-// 切换区域时重新拉取该区域的启用模型清单（两地可用模型不同）
-watch(
-  () => form.value.region,
-  (next, prev) => {
-    if (form.value.type !== 'workbuddy') return
-    if (!showAdd.value && !editingName.value) return
-    if (next === prev) return
-    loadWorkbuddyData(null, next)
-  }
-)
 
 // 复制 apiKey 到剪贴板
 async function copyKey() {
@@ -831,47 +612,28 @@ function toLimitOrNull(value) {
 
 // 保存 provider
 async function saveProvider() {
-  const isWorkbuddy = form.value.type === 'workbuddy'
-  // WorkBuddy 类型的模型清单来自账号池统一配置（档位在 Provider 侧逐模型独立配置）；通用类型用表单里的模型编辑区
-  const models = isWorkbuddy
-    ? wbModelList.value
-        .map(m => ({
-          id: (m.id || '').trim(),
-          displayName: (m.displayName || '').trim(),
-          maxContext: toLimitOrNull(m.maxContext),
-          maxOutput: toLimitOrNull(m.maxOutput),
-          reasoningEffort: (m.reasoningEffort || '').trim()
-        }))
-        .filter(m => m.id)
-    : form.value.models
-        .map(m => ({
-          id: (m.id || '').trim(),
-          displayName: (m.displayName || '').trim(),
-          maxContext: toLimitOrNull(m.maxContext),
-          maxOutput: toLimitOrNull(m.maxOutput),
-          reasoningEffort: (m.reasoningEffort || '').trim()
-        }))
-        .filter(m => m.id)
+  const models = form.value.models
+    .map(m => ({
+      id: (m.id || '').trim(),
+      displayName: (m.displayName || '').trim(),
+      maxContext: toLimitOrNull(m.maxContext),
+      maxOutput: toLimitOrNull(m.maxOutput),
+      reasoningEffort: (m.reasoningEffort || '').trim()
+    }))
+    .filter(m => m.id)
 
   if (!form.value.name.trim()) {
     showToast('请填写 Provider 名称', 'error')
     return
   }
   if (!models.length) {
-    showToast(
-      isWorkbuddy
-        ? '账号池尚未配置模型，请先到「账号池」页面的「模型和档位」勾选要启用的模型'
-        : '至少需要一个模型，且模型 ID 不能为空',
-      'error'
-    )
+    showToast('至少需要一个模型，且模型 ID 不能为空', 'error')
     return
   }
 
   const data = {
     displayName: form.value.displayName.trim(),
     type: form.value.type,
-    // 区域：仅 workbuddy 源有意义；后端按区域隔离账号池与域名
-    region: isWorkbuddy ? (form.value.region === 'global' ? 'global' : 'cn') : form.value.region,
     baseURL: form.value.baseURL.trim(),
     openaiURL: form.value.openaiURL.trim(),
     apiKey: form.value.apiKey,
@@ -881,13 +643,10 @@ async function saveProvider() {
   try {
     if (editingName.value) {
       await updateProvider(editingName.value, data)
-      // 编辑提示也带区域：两个 WorkBuddy 源可能同名，不带区域无法确认改的是哪个
-      const editLabel = isWorkbuddy ? `（${data.region === 'global' ? '国际版' : '国内版'}）` : ''
-      showToast(`已保存 Provider「${editingName.value}」${editLabel}`)
+      showToast(`已保存 Provider「${editingName.value}」`)
     } else {
       await addProvider(form.value.name.trim(), data)
-      const label = isWorkbuddy ? `（${data.region === 'global' ? '国际版' : '国内版'}）` : ''
-      showToast(`已新增 Provider「${form.value.name.trim()}」${label}`)
+      showToast(`已新增 Provider「${form.value.name.trim()}」`)
     }
     closeModal()
     await loadModelData()
@@ -900,9 +659,7 @@ async function saveProvider() {
 // 删除 provider，服务端会同步清理相关引用
 async function removeProvider(name) {
   const p = providers.value[name]
-  const base = (p && p.displayName) || name
-  const region = p && p.type === 'workbuddy' ? `（${p.region === 'global' ? '国际版' : '国内版'}）` : ''
-  const label = `${base}${region}`
+  const label = (p && p.displayName) || name
   if (!window.confirm(`确定删除 Provider「${label}」吗？\n指向它的路由规则、兜底配置和当前模型引用会一并清理。`)) {
     return
   }
@@ -954,39 +711,17 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-1);
-}
 
 /* 右上角新增入口按钮组（通用 Provider / WorkBuddy 账号池） */
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
 
 /* 编辑弹窗中的只读类型行 */
 .form-type-line {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   padding: 2px 0;
 }
 
-.empty-state {
-  text-align: center;
-  color: var(--text-3);
-  padding: 40px;
-  font-size: 14px;
-}
 
 /* 每行一个 Provider */
 .provider-list {
@@ -1002,7 +737,7 @@ onMounted(() => {
   background: var(--bg-card);
   border: 1px solid var(--border-1);
   border-left: 3px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 14px 18px;
   transition: box-shadow 0.15s, border-color 0.15s, background 0.15s;
 }
@@ -1033,231 +768,46 @@ onMounted(() => {
 }
 
 .row-name {
-  font-size: 15px;
+  font-size: var(--fs-section);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .row-id {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   background: var(--bg-page);
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   padding: 2px 7px;
   font-family: 'Courier New', Consolas, monospace;
 }
 
 .badge-current {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   background: var(--tint-success);
   color: var(--success);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-weight: 500;
 }
 
 /* WorkBuddy 账号池类型徽标 */
 .badge-type {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   background: var(--tint-primary-soft);
   color: var(--primary-text);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-weight: 500;
-}
-
-/* ===== 区域（国内版 / 国际版）===== */
-.wb-realm-tag {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 10px;
-  font-size: 11px;
-  line-height: 18px;
-  vertical-align: middle;
-  border: 1px solid transparent;
-}
-
-.wb-realm-tag.cn {
-  color: var(--text-2);
-  border-color: var(--border-1);
-  background: var(--tint-neutral);
-}
-
-.wb-realm-tag.global {
-  color: var(--purple-text);
-  border-color: var(--purple-border);
-  background: var(--tint-purple);
-}
-
-/* 新增 WorkBuddy 源时的区域选择 */
-.wb-realm-pick {
-  border: 1px solid var(--border-1);
-  border-radius: 10px;
-  padding: 12px;
-}
-
-.wb-realm-pick-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1);
-  margin-bottom: 10px;
-}
-
-.wb-add-realm-opts {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.wb-realm-opt {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 10px 14px;
-  border: 1px solid var(--border-1);
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--text-1);
-}
-
-.wb-realm-opt.active {
-  border-color: var(--primary);
-  background: var(--primary-bg);
-}
-
-.wb-realm-name {
-  font-weight: 600;
-}
-
-.wb-realm-host {
-  font-size: 11px;
-  color: var(--text-3);
-}
-
-.wb-realm-pick-note {
-  margin-top: 10px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-3);
-}
-
-/* WorkBuddy 类型在表单中的账号管理入口 */
-.wb-entry {
-  border: 1px solid var(--border-1);
-  border-radius: 10px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: var(--bg-subtle);
-}
-
-/* 区块标题行（标题 + 右侧跳转链接） */
-.wb-entry-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.wb-entry-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.wb-entry-link {
-  font-size: 12px;
-  color: var(--primary);
-  text-decoration: none;
-}
-
-.wb-entry-link:hover {
-  text-decoration: underline;
-}
-
-.wb-entry-hint {
-  font-size: 12px;
-  color: var(--text-3);
-  line-height: 1.6;
-}
-
-.wb-entry-empty {
-  font-size: 12px;
-  color: var(--text-3);
-}
-
-/* 账号只读列表（最多高度内滚动） */
-.wb-account-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.wb-account-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 6px;
-  font-size: 12px;
-}
-
-.wb-account-name {
-  flex: 1;
-  color: var(--text-1);
-}
-
-.wb-account-state {
-  font-size: 11px;
-  border-radius: 4px;
-  padding: 1px 6px;
-}
-
-.wb-account-state.is-ok { color: var(--ok-text); background: var(--ok-bg); }
-.wb-account-state.is-warn { color: var(--warn-text); background: var(--warn-bg); }
-.wb-account-state.is-bad { color: var(--bad-text); background: var(--bad-bg); }
-
-/* 模型清单列表（每行：模型 id + 推理档位 + 上下文/输出上限） */
-.wb-model-chips {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-/* 单个模型块（两行：id + 档位；上下文 + 输出上限） */
-.wb-model-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-1);
-}
-
-/* 模型块内的一行 */
-.wb-model-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 模型块内的上下限输入行（两个字段等宽平分） */
-.wb-model-line .limit-field {
-  flex: 1;
-  min-width: 0;
 }
 
 /* 推理档位快捷选择（与右侧自定义输入框配合使用） */
 .effort-select-sm {
   width: 130px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 3px 4px;
   border: 1px solid var(--border-1);
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--bg-card);
   color: var(--text-1);
   cursor: pointer;
@@ -1271,10 +821,10 @@ onMounted(() => {
 /* 推理档位自定义输入框 */
 .effort-input {
   width: 130px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 3px 6px;
   border: 1px solid var(--border-1);
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--bg-card);
   color: var(--text-1);
 }
@@ -1284,17 +834,8 @@ onMounted(() => {
   border-color: var(--primary);
 }
 
-.wb-model-chip {
-  font-size: 11px;
-  font-family: 'Courier New', Consolas, monospace;
-  color: var(--text-2);
-  background: var(--bg-chip);
-  border-radius: 4px;
-  padding: 2px 6px;
-}
-
 .row-count {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-weak);
 }
 
@@ -1313,13 +854,13 @@ onMounted(() => {
 }
 
 .meta-label {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-weak);
   flex-shrink: 0;
 }
 
 .meta-value {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-strong);
   font-family: 'Courier New', Consolas, monospace;
   max-width: 320px;
@@ -1342,9 +883,9 @@ onMounted(() => {
   gap: 7px;
   background: var(--bg-hover);
   border: 1px solid var(--border-2);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 4px 6px 4px 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   max-width: 320px;
 }
 
@@ -1363,7 +904,7 @@ onMounted(() => {
 
 .chip-meta {
   color: var(--text-weak);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -1372,9 +913,9 @@ onMounted(() => {
   background: var(--bg-card);
   border: 1px solid var(--border-3);
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   padding: 2px 8px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   flex-shrink: 0;
   transition: all 0.15s;
 }
@@ -1394,9 +935,9 @@ onMounted(() => {
   background: transparent;
   border: 1px dashed var(--border-3);
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   padding: 4px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .chip-more:hover {
@@ -1405,15 +946,15 @@ onMounted(() => {
 }
 
 .model-empty {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-faint);
 }
 
 /* 测试结果内联展示 */
 .row-test {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   align-self: flex-start;
   max-width: 100%;
   word-break: break-all;
@@ -1453,48 +994,11 @@ onMounted(() => {
   }
 }
 
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
 
-.modal {
-  width: 560px;
-  max-height: 84vh;
-  overflow-y: auto;
-}
 
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
 
-.modal-header h2 {
-  font-size: 18px;
-  margin: 0;
-  color: var(--text-1);
-}
 
-.modal-close {
-  background: transparent;
-  border: none;
-  color: var(--text-3);
-  font-size: 22px;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-}
 
-.modal-close:hover {
-  color: var(--danger);
-}
 
 .form {
   display: flex;
@@ -1506,7 +1010,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
 }
 
@@ -1529,10 +1033,10 @@ onMounted(() => {
 .key-copy-btn {
   background: transparent;
   border: 1px solid var(--border-3);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 6px 8px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1;
   flex-shrink: 0;
 }
@@ -1545,7 +1049,7 @@ onMounted(() => {
 
 .model-editor {
   border: 1px solid var(--border-1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 12px;
   background: var(--bg-hover);
   display: flex;
@@ -1560,13 +1064,13 @@ onMounted(() => {
 }
 
 .model-editor-title {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .model-editor-hint {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   line-height: 1.5;
 }
@@ -1577,7 +1081,7 @@ onMounted(() => {
   gap: 8px;
   background: var(--bg-card);
   border: 1px solid var(--border-1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px;
 }
 
@@ -1601,8 +1105,8 @@ onMounted(() => {
   color: var(--text-3);
   width: 30px;
   height: 30px;
-  border-radius: 8px;
-  font-size: 16px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-section);
   line-height: 1;
   flex-shrink: 0;
 }
@@ -1620,7 +1124,7 @@ onMounted(() => {
 }
 
 .limit-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -1629,7 +1133,7 @@ onMounted(() => {
   flex: 1;
   min-width: 0;
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 /* 推理档位行：下拉固定宽，自定义输入占满剩余空间，与上下限输入同高 */
@@ -1647,11 +1151,11 @@ onMounted(() => {
 .model-edit-row .effort-select-sm,
 .model-edit-row .effort-input {
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 .model-editor-empty {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-weak);
 }
 
@@ -1676,7 +1180,7 @@ onMounted(() => {
 .picker-state {
   padding: 28px 12px;
   text-align: center;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-3);
 }
 
@@ -1689,7 +1193,7 @@ onMounted(() => {
 }
 
 .picker-meta {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   line-height: 1.6;
   margin-bottom: 10px;
@@ -1707,7 +1211,7 @@ onMounted(() => {
   flex: 1;
   min-width: 160px;
   padding: 7px 10px;
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 /* 复选框统一小而紧凑：覆盖全局 input 的大内边距 */
@@ -1724,7 +1228,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -1733,7 +1237,7 @@ onMounted(() => {
   max-height: 46vh;
   overflow-y: auto;
   border: 1px solid var(--border-1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-card);
 }
 
@@ -1742,7 +1246,7 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   cursor: pointer;
   border-bottom: 1px solid var(--bg-page);
 }
@@ -1763,7 +1267,7 @@ onMounted(() => {
 }
 
 .picker-name {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   max-width: 38%;
   overflow: hidden;
@@ -1772,15 +1276,15 @@ onMounted(() => {
 }
 
 .picker-limit {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   white-space: nowrap;
 }
 
 .picker-tag {
-  font-size: 10px;
+  font-size: var(--fs-mini);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-page);
   color: var(--text-3);
   white-space: nowrap;
@@ -1789,7 +1293,7 @@ onMounted(() => {
 .picker-empty {
   padding: 22px 12px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-weak);
 }
 

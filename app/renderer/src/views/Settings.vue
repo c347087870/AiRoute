@@ -117,8 +117,8 @@
           <label class="config-label">最新版本</label>
           <div class="config-control">
             <span class="version-text">v{{ info.latest }}</span>
-            <span v-if="info.hasUpdate" class="update-tag">有新版本可用</span>
-            <span v-else class="latest-tag">已是最新</span>
+            <span v-if="info.hasUpdate" class="badge info">有新版本可用</span>
+            <span v-else class="badge ok">已是最新</span>
           </div>
         </div>
         <div v-if="supported && backup" class="config-row">
@@ -358,79 +358,28 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 24px;
-  color: var(--text-1);
-}
 
-.section {
-  margin-bottom: 28px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
-.config-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border-2);
-}
 
-.config-row:last-of-type {
-  border-bottom: none;
-}
 
-.config-label {
-  width: 200px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-1);
-  flex-shrink: 0;
-}
 
-.config-control {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
 .port-input {
   width: 120px;
 }
 
-.warning-box {
-  background: var(--tint-warning);
-  border: 1px solid var(--warning);
-  color: var(--warning-text);
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  margin: 8px 0;
-}
 
-.config-hint {
-  font-size: 12px;
-  color: var(--text-3);
-  padding: 4px 0 8px;
-}
 
 .sys-value {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
 }
 
 .toggle-btn {
   padding: 6px 20px;
-  border-radius: 20px;
-  font-size: 13px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-small);
   font-weight: 500;
   background: var(--border-2);
   color: var(--text-3);
@@ -446,26 +395,12 @@ onMounted(() => {
 }
 
 .version-text {
-  font-size: 14px;
+  font-size: var(--fs-base);
   color: var(--text-1);
   font-weight: 500;
 }
 
-.update-tag {
-  font-size: 12px;
-  color: var(--primary);
-  background: var(--primary-bg);
-  padding: 2px 10px;
-  border-radius: 20px;
-}
 
-.latest-tag {
-  font-size: 12px;
-  color: var(--success);
-  background: var(--tint-success);
-  padding: 2px 10px;
-  border-radius: 20px;
-}
 
 /* 主题三选一（跟随系统 / 亮色 / 暗色） */
 .theme-opt {
@@ -473,8 +408,8 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border-radius: 8px;
-  font-size: 13px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-small);
   background: var(--bg-page);
   border: 1px solid var(--border-3);
   color: var(--text-2);
@@ -493,7 +428,7 @@ onMounted(() => {
 }
 
 .theme-opt-icon {
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1;
 }
 
@@ -504,17 +439,5 @@ onMounted(() => {
   gap: 10px;
 }
 
-.progress-track {
-  height: 6px;
-  background: var(--border-2);
-  border-radius: 3px;
-  overflow: hidden;
-}
 
-.progress-fill {
-  height: 100%;
-  background: var(--primary);
-  border-radius: 3px;
-  transition: width 0.3s;
-}
 </style>

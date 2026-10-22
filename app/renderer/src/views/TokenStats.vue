@@ -11,11 +11,11 @@
     </div>
 
     <!-- 时间维度选择 -->
-    <div class="period-selector">
+    <div class="tabs">
       <button
         v-for="period in periods"
         :key="period.value"
-        class="period-btn"
+        class="tab"
         :class="{ active: selectedPeriod === period.value }"
         @click="selectPeriod(period.value)"
       >
@@ -555,57 +555,13 @@ onMounted(() => {
   padding-bottom: 40px;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-}
 
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text-1);
-}
 
 /* 时间维度选择器 */
-.period-selector {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
 
-.period-btn {
-  background: var(--bg-page);
-  border: 1px solid var(--border-3);
-  color: var(--text-2);
-  padding: 10px 20px;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-weight: 500;
-}
 
-.period-btn:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: var(--tint-primary);
-}
 
-.period-btn.active {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #FFFFFF;
-}
 
 /* 汇总卡片 */
 .summary-cards {
@@ -625,7 +581,7 @@ onMounted(() => {
 .summary-icon {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -652,7 +608,7 @@ onMounted(() => {
 }
 
 .summary-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 6px;
   text-transform: uppercase;
@@ -660,7 +616,7 @@ onMounted(() => {
 }
 
 .summary-value {
-  font-size: 24px;
+  font-size: var(--fs-display);
   font-weight: 700;
 }
 
@@ -677,21 +633,12 @@ onMounted(() => {
 }
 
 /* 图表区域 */
-.section {
-  margin-bottom: 24px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
 /* 标题右侧的次要信息，请求次数从汇总卡片移到这里展示 */
 .title-meta {
   margin-left: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: var(--text-3);
 }
@@ -750,7 +697,7 @@ onMounted(() => {
   justify-content: center;
   height: 250px;
   color: var(--text-3);
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 /* Tooltip 样式 */
@@ -758,7 +705,7 @@ onMounted(() => {
   position: absolute;
   background: var(--bg-elevated);
   border: 1px solid var(--border-3);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 12px 16px;
   box-shadow: var(--shadow-pop);
   pointer-events: none;
@@ -767,7 +714,7 @@ onMounted(() => {
 }
 
 .tooltip-time {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 8px;
@@ -784,7 +731,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 4px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .tooltip-row:last-child {
@@ -811,7 +758,7 @@ onMounted(() => {
 .model-table td {
   text-align: left;
   padding: 12px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
   color: var(--text-1);
 }
@@ -830,7 +777,7 @@ onMounted(() => {
   position: relative;
   height: 24px;
   background: var(--border-2);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -845,22 +792,13 @@ onMounted(() => {
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-1);
 }
 
-.text-purple {
-  color: var(--purple);
-}
 
-.text-orange {
-  color: var(--warning);
-}
 
-.font-bold {
-  font-weight: 600;
-}
 
 /* 响应式 */
 @media (max-width: 1200px) {

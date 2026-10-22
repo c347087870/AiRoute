@@ -202,72 +202,21 @@ onMounted(loadData)
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 24px;
-  color: var(--text-1);
-}
 
-.section {
-  margin-bottom: 28px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
-.config-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border-2);
-}
 
-.config-row:last-of-type {
-  border-bottom: none;
-}
 
-.config-label {
-  width: 200px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-1);
-  flex-shrink: 0;
-}
 
-.config-control {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
-.config-hint {
-  font-size: 12px;
-  color: var(--text-3);
-  padding: 4px 0 8px;
-}
 
-.warning-box {
-  background: var(--tint-warning);
-  border: 1px solid var(--warning);
-  color: var(--warning-text);
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  margin-bottom: 16px;
-}
 
 .fallback-select {
   width: 260px;
 }
 
 .rule-hint {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-3);
   padding: 8px 0;
 }
@@ -294,11 +243,11 @@ onMounted(loadData)
 
 .rule-arrow {
   color: var(--text-3);
-  font-size: 16px;
+  font-size: var(--fs-section);
 }
 
 .custom-label {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
   white-space: nowrap;
 }
@@ -306,9 +255,9 @@ onMounted(loadData)
 .custom-keyword {
   width: 160px;
   padding: 8px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-3);
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 .section-actions {
