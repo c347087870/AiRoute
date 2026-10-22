@@ -24,7 +24,7 @@ node scripts/verify-release.js   # 发布前自检：版本一致性、产物元
 - 主进程 / `server/` / `scripts/` 是 CommonJS；`app/renderer` 是 ESM（Vite + Vue SFC）。全仓库无 TypeScript，也没有 lint / 格式化配置；跟随周边文件风格，不要引入新工具链
 - 注释与文档用中文，注释解释「为什么」，不复述代码
 - 产物命名以 `electron-builder.json` 的 `artifactName` 为唯一事实来源，`scripts/targets.js` 从它推导；不要在脚本里另写一份文件名
-- 以下内容被 `.gitignore` 忽略，**绝不能提交**：`docs/`、`app/release/`、`app/dist-electron/`、`.claude/`；`server/` 下的运行数据与凭证同样不入库——`workbuddy-auths/`（明文 accessToken）、`state.json`、`server-config.json`、`models.json`、`token-stats.json`、`workbuddy-state.json`、`usage.json`、`credit-history.json` 等。注意 `server/models.example.json` 与 `server/questions.json` 是正常跟踪的文件，别一起排除
+- 以下内容被 `.gitignore` 忽略，**绝不能提交**：`docs/`、`app/release/`、`app/dist-electron/`、`.claude/`；`server/` 下的运行数据与凭证同样不入库——`workbuddy-auths/`（明文 accessToken）、`channels-data/`（渠道包账号与明文 `channel-credentials.json`）、`state.json`、`server-config.json`、`models.json`、`token-stats.json`、`workbuddy-state.json`、`usage.json`、`credit-history.json` 等。注意 `server/models.example.json` 与 `server/questions.json` 是正常跟踪的文件，别一起排除
 
 ## 改动后必须验证
 
@@ -53,6 +53,7 @@ npm run test:e2e
 app/main/        Electron 主进程（窗口、托盘、更新、安装形态判定）
 app/renderer/    Vue 渲染层
 server/          本地 HTTP 服务与上游适配（router / upstream / workbuddy）
+server/channels/ 免费账号渠道包（vendor 的 ESM bundle + worker 线程 + 凭据存储）
 scripts/         构建、产物推导、发布自检与测试
 .agents/skills/  Agent Skills
 ```
