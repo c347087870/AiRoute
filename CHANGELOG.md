@@ -2,6 +2,25 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0-beta.3] - 2026-10-23
+
+上游对齐版：把「渠道实现必须与上游 `dsh-our-free-model` 一致」从口头约定变成可执行、接进 `npm test` 与 CI 的校验。运行时行为、协议与产物命名均无变化——重新生成的 `business.mjs` 与此前逐字节相同。
+
+### 新增
+
+- **渠道一致性校验**（`npm run channels:verify`，7 项）：`scripts/verify-channels.js` 用**与生成同一套改写管线**重跑上游 `pack.js`，与 `server/channels/business.mjs` 逐字节比对，能区分两种不一致——产物头记录的 SHA 与当前 `pack.js` 不同时提示「上游换了产物，重跑生成」，两者相同但内容不同时提示「产物被手改过，改渠道行为要回上游改源码」；同时核对渠道清单四处（面板 `PROVIDERS`、账号链接 `SLOTS`、CLI `PROVIDERS`、`CHANNEL_PROVIDER_NAME` 的「N 家」= 上游渠道数 + WorkBuddy）与面板展示名是否等于上游 `displayName`。已接到 `npm test` 末尾
+- **上游检出加为子模块** `vendor/dsh-our-free-model`：只作行为参考与再生成源（`pack.js`），构建与运行都不依赖它
+
+### 变更
+
+- **改写管线独立成模块** `scripts/channel-pack-transform.js`：`build-channels.js`（生成）与 `verify-channels.js`（校验）共用一条，改改写规则只动一处；拆分后的生成结果与拆分前逐字节一致
+- **CI 测试 job 带子模块**：`actions/checkout` 加 `submodules: true`。缺子模块时校验只会打印「跳过」并以 0 退出，闸门等于没接上；构建 job 不需要，未改
+- **新增 channels Agent Skill**（`.agents/skills/channels/`）：改动分层判定、上游重生成流程、新增渠道的同步点清单、用量口径、排查顺序与硬约束
+
+### 测试
+
+- 新增 `channels:verify` 7 项；`npm test` 全绿（原有 5 个套件 + 新校验）；`npm run test:e2e` 54 项通过
+
 ## [2.0.0-beta.2] - 2026-10-23
 
 日志与图标的收尾版：状态面板的「最近请求」不再丢失兜底成功的请求，macOS 图标换成系统圆角网格。协议、配置格式与产物命名均无变化。

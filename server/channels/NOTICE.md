@@ -44,14 +44,26 @@ Raccoon、MiniMax Code、ZCode、Gemini 十个账号渠道的登录、账号池�
 ## 再生成
 
 ```bash
-# 需要本机有一份 dsh-our-free-model 检出（提供 pack.js）
-OFM_CHANNEL_PACK=/path/to/dsh-our-free-model/vendor/channel-pack/pack.js \
+# ① 只有改了上游源码才需要重建 pack.js
+(cd vendor/dsh-our-free-model && pnpm channel-pack)
+
+# ② 生成 AiRoute 的产物
+OFM_CHANNEL_PACK=vendor/dsh-our-free-model/vendor/channel-pack/pack.js \
   node scripts/build-channels.js
+
+# ③ 校验：产物逐字节等于上游改写结果 + 渠道清单四处对齐
+npm run channels:verify
 ```
 
 脚本对每处替换都要求「唯一命中」：上游改了产物形状会立刻失败，而不是静默
 产出一个能加载、直到某个渠道登录时才炸的文件。产物头部记录了源 `pack.js`
 的 SHA256，便于核对引入的是哪一版。
+
+改写规则本身在 `scripts/channel-pack-transform.js`（生成与校验共用一条管线），
+`scripts/verify-channels.js` 用它重跑一遍并与磁盘上的 `business.mjs` 逐字节比对，
+因此手改产物、上游换了产物没重跑、面板/CLI/账号链接漏登记渠道，都会被它抓出来。
+这条校验已挂在 `npm test` 末尾；没有子模块的机器（含 CI 浅检出）会打印「跳过」，
+**跳过不等于通过**。
 
 ## 注意
 

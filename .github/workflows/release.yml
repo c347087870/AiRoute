@@ -27,7 +27,11 @@ jobs:
     name: 测试与版本校验
     runs-on: ubuntu-latest
     steps:
+      # 带子模块：npm test 末尾的 scripts/verify-channels.js 要拿上游 pack.js 做逐字节
+      # 比对。缺子模块时它会打印「跳过」并以 0 退出，那样这道闸门在 CI 等于没接上。
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: actions/setup-node@v4
         with:

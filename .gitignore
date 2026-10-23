@@ -47,6 +47,8 @@ app/server/
 app/renderer/dist/
 app/dist-electron/
 
+# 构建脚本独立安装的生产依赖（build.js 的中间产物）
+.build-node_modules/
 # 构建脚本重命名的旧依赖目录（删除失败时的残留）
 .build-node_modules.old.*
 
