@@ -155,6 +155,16 @@ export function restartServer() {
   return api.post('/api/restart').then(r => r.data)
 }
 
+// 配置备份：导出含明文 apiKey 与账号凭据，导入是覆盖式（服务端先自动快照）
+// 导入要重建账号池与渠道 worker，耗时可能到十几秒，单独放宽超时
+export function exportConfig() {
+  return api.get('/api/config/export', { timeout: 60000 }).then(r => r.data)
+}
+
+export function importConfig(payload) {
+  return api.post('/api/config/import', payload, { timeout: 120000 }).then(r => r.data)
+}
+
 export function getFallback() {
   return api.get('/api/fallback').then(r => r.data)
 }

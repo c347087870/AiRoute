@@ -1,13 +1,11 @@
 <template>
   <div class="logs">
-    <div class="page-header">
-      <h1 class="page-title">日志查看</h1>
+    <div class="page-toolbar">
       <div class="header-actions">
         <span v-if="logSize" class="log-size text-muted">
           日志已占用 {{ formatBytes(logSize.totalSize) }} · {{ logSize.fileCount }} 个文件
         </span>
         <button class="btn-danger btn-sm" :disabled="clearing" @click="clearAllLogs">清空</button>
-        <button class="btn-ghost btn-sm" @click="refreshAll">刷新</button>
       </div>
     </div>
 
@@ -147,6 +145,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { getLogs, getLogModels, clearLogs, getLogsSize, wbAccounts, wbCreditHistory } from '../api.js'
 import { showToast } from '../composables/useToast.js'
+import { usePageActions } from '../composables/usePageActions.js'
 import { formatNumber, formatTime, formatBytes } from '../utils/format.js'
 
 const logs = ref([]) // 当前加载出来的日志列表（服务端已按任务合并，一条 = 一个任务）
@@ -161,6 +160,7 @@ const CREDIT_PAGE_SIZE = 50 // 积分历史每页条数（服务端 limit）
 const creditUid = ref('') // 积分历史账号筛选，空表示全部
 const creditPage = ref(1) // 积分历史当前页（从 1 开始）
 const clearing = ref(false) // 清空日志请求进行中（防重入）
+const refreshing = ref(false) // 顶部栏「刷新」按钮的 loading 状态
 const creditTotal = ref(0) // 积分历史过滤后总条数（服务端返回）
 const creditNote = ref('') // 积分历史统计说明（总条数 · 净变动）
 
@@ -314,8 +314,16 @@ function changeCreditPage(delta) {
 
 // 全量刷新：日志 + 模型选项 + 目录占用 + 账号池昵称 + 积分历史
 async function refreshAll() {
-  await Promise.all([loadLogs(), loadModels(), loadSize(), loadAccounts(), loadCreditHistory()])
+  refreshing.value = true
+  try {
+    await Promise.all([loadLogs(), loadModels(), loadSize(), loadAccounts(), loadCreditHistory()])
+  } finally {
+    refreshing.value = false
+  }
 }
+
+// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
+usePageActions({ refresh: refreshAll, loading: refreshing })
 
 // 重置筛选条件，条数属于展示设置不参与重置
 function resetFilters() {

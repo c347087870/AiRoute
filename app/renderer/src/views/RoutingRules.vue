@@ -1,7 +1,5 @@
 <template>
   <div class="routing">
-    <h1 class="page-title">路由规则</h1>
-
     <div v-if="!hasModels" class="warning-box">
       请先在 Provider 管理中配置至少一个模型，否则无法选择路由目标。
     </div>

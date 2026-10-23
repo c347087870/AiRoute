@@ -1,4 +1,4 @@
-// 主题共享状态：侧边栏快捷切换与设置页「外观」使用同一份数据
+// 主题共享状态：唯一入口是侧边栏底部的三格按钮（设置页不再重复放一份）
 // mode 为用户选择（system / light / dark），resolved 为实际生效的亮暗
 import { computed, ref } from 'vue'
 

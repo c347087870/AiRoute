@@ -78,7 +78,7 @@ import { useTheme } from '../composables/useTheme.js'
 
 const isOnline = ref(false)
 
-// 主题切换（与设置页「外观」共享同一份状态）
+// 主题切换（唯一入口，设置页不再重复放一份）
 const { mode: themeMode, setMode } = useTheme()
 
 // 三种主题模式：图标 + 悬停说明

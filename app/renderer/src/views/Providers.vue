@@ -1,7 +1,6 @@
 <template>
   <div class="providers">
-    <div class="page-header">
-      <h1 class="page-title">Provider 管理</h1>
+    <div class="page-toolbar">
       <div class="header-actions">
         <button class="btn-primary" @click="openAddModal()">+ 通用 Provider</button>
       </div>

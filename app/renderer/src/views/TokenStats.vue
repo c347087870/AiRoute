@@ -1,13 +1,7 @@
 <template>
   <div class="token-stats-page">
-    <div class="page-header">
-      <h1 class="page-title">Token 使用统计</h1>
-      <div class="header-actions">
-        <button class="btn-danger btn-sm" @click="clearStats" :disabled="loading">清空</button>
-        <button class="btn-ghost" @click="refreshData" :disabled="loading">
-          {{ loading ? '刷新中...' : '刷新' }}
-        </button>
-      </div>
+    <div class="page-toolbar">
+      <button class="btn-danger btn-sm" @click="clearStats" :disabled="loading">清空</button>
     </div>
 
     <!-- 时间维度选择 -->
@@ -242,6 +236,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats, clearTokenStats } from '../api.js'
 import { showToast } from '../composables/useToast.js'
+import { usePageActions } from '../composables/usePageActions.js'
 import { formatNumber, toLocalDateKey } from '../utils/format.js'
 
 // 时间维度选项
@@ -530,6 +525,9 @@ async function loadPeriodData(period) {
 async function refreshData() {
   await loadPeriodData(selectedPeriod.value)
 }
+
+// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
+usePageActions({ refresh: refreshData, loading })
 
 // 清空全部 Token 统计（二次确认，不可恢复；状态面板请求数同源一并归零）
 async function clearStats() {

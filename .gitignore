@@ -33,6 +33,8 @@ server/version-cache.json
 
 # 工具本地数据
 .codebuddy/
+# pnpm dev:isolated 的独立 Electron 用户目录（与正式版单实例锁隔离）
+.dev-userdata/
 .claude/
 .workbuddy-ai/
 # lockfile

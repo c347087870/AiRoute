@@ -1,7 +1,5 @@
 <template>
   <div class="benchmark">
-    <h1 class="page-title">模型测分</h1>
-
     <!-- 顶部 Tab：运行评测 / 评测结果 / 题库管理 -->
     <div class="tabs">
       <button

@@ -23,6 +23,7 @@ const providerModels = require('./provider-models')
 const channels = require('./channels')
 const channelSse = require('./channels/sse')
 const autoStrategy = require('./auto-strategy')
+const configIO = require('./config-io')
 
 const {
   getConfig,
@@ -2229,6 +2230,28 @@ app.put('/api/server-config', (req, res) => {
   res.json({ ok: true, portChanged: current.port !== next.port })
 })
 
+// ==================== 配置备份（导出 / 导入） ====================
+// 导出包含明文的模型 apiKey 与账号凭据：只经本机 127.0.0.1 传输，前端不落盘缓存
+app.get('/api/config/export', (req, res) => {
+  try {
+    res.json(configIO.exportAll())
+  } catch (err) {
+    res.status(500).json({ error: '导出配置失败: ' + (err.message || '未知原因') })
+  }
+})
+
+// 覆盖式导入：config-io 内部写盘前先快照，失败回滚；这里只负责按新文件重建运行时
+app.post('/api/config/import', async (req, res) => {
+  let result
+  try {
+    result = configIO.importAll(req.body)
+  } catch (err) {
+    return res.status(400).json({ error: err.message || '导入配置失败' })
+  }
+  await reloadRuntimes()
+  res.json(result)
+})
+
 let server = null
 let restarting = false
 
@@ -2476,8 +2499,9 @@ function scheduleChannelSync() {
 }
 
 // 初始化渠道运行时（未登录任何账号也能启动，转发时才报无可用账号）
+// 返回初始化 promise：导入配置后要等它完成，才能确认新账号已生效
 function initChannels() {
-  channels.init({
+  return channels.init({
     onChanged: scheduleChannelSync,
     logger: {
       info: message => console.log(`[channels] ${message}`),
@@ -2489,6 +2513,23 @@ function initChannels() {
 }
 
 initChannels()
+
+// 导入配置后按新文件重建运行时：WorkBuddy 账号池/调度器与渠道 worker 都只在
+// init 时读盘，不重建的话界面显示新账号、请求却还在用旧池
+async function reloadRuntimes() {
+  try {
+    workbuddy.shutdown()
+  } catch (err) {
+    console.error('[aiRoute] WorkBuddy 关停失败:', err.message)
+  }
+  try {
+    await channels.shutdown()
+  } catch (err) {
+    console.error('[aiRoute] 渠道关停失败:', err.message)
+  }
+  initWorkbuddy()
+  await initChannels()
+}
 
 app.get('/api/channels/status', async (req, res) => {
   const rt = channels.getRuntime()

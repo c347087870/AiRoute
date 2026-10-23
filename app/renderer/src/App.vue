@@ -2,16 +2,42 @@
   <div class="app-layout">
     <Sidebar />
     <main class="main-content">
-      <router-view />
+      <!-- 页面标题由布局统一接管并常驻顶部：切页只换文字，不参与内容滚动 -->
+      <header class="top-bar">
+        <BackButton v-if="route.meta.back" />
+        <h1 class="top-title">{{ route.meta.title }}</h1>
+        <!-- 刷新 / 实时由页面登记（usePageActions），布局只负责摆在标题右侧 -->
+        <div v-if="actions.refresh" class="top-actions">
+          <span
+            v-if="actions.live"
+            class="live-badge"
+            title="每 5 秒自动刷新；窗口隐藏时暂停，回到前台立即补一次"
+          >
+            <span class="live-dot"></span>实时
+          </span>
+          <button class="btn-ghost btn-sm" :disabled="actions.loading" @click="actions.refresh()">
+            {{ actions.loading ? '刷新中…' : '刷新' }}
+          </button>
+        </div>
+      </header>
+      <div class="main-scroll">
+        <router-view />
+      </div>
     </main>
   </div>
   <ToastHost />
 </template>
 
 <script setup>
+import { useRoute } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
+import BackButton from './components/BackButton.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useTheme } from './composables/useTheme.js'
+import { getPageActions } from './composables/usePageActions.js'
+
+const route = useRoute()
+const actions = getPageActions()
 
 // 尽早应用主题：index.html 的首屏脚本已先铺一次，这里接管后续的切换与系统变化监听
 useTheme().initTheme()
@@ -227,8 +253,81 @@ body {
 
 .main-content {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 顶部标题栏：常驻，不随页面内容滚动。
+   高度与侧边栏 header 对齐（实测 62.5px），两条分隔线连成一条；
+   底色跟侧边栏一致用 --bg-card，否则左侧白、上方灰会割成两块 */
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 62px;
+  flex: none;
+  padding: 0 32px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-2);
+}
+
+.top-title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* 标题栏右侧动作：刷新 / 实时。margin-left:auto 把它顶到最右，
+   页面里不再各自放一份，切页时随登记状态出现或消失 */
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* 实时刷新提示：绿点带一圈柔光和呼吸动画，静止时也能看出「在跑」 */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--tint-success);
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}
+
+/* 页面内容滚动区：标题栏之外的部分独立滚动 */
+.main-scroll {
+  flex: 1;
   overflow-y: auto;
-  padding: 28px 32px;
+  padding: 24px 32px 28px;
 }
 
 input, select, textarea {
@@ -319,27 +418,23 @@ button {
 /* ==================== 共享版式 ==================== */
 /* 下面这批类是各页面原本各自复制一份的东西（.page-title 在 10 个文件里出现过，
    边距从 16px 到 32px 不等）。统一收在这里，页面里不要再定义同名类 ——
-   scoped 样式的优先级高于全局，留着旧定义就等于没改。 */
+   scoped 样式的优先级高于全局，留着旧定义就等于没改。
+   页面标题已由 App.vue 的顶部栏接管，页面内不再写 <h1 class="page-title">。 */
 
-/* 页头：标题 + 右侧操作区；没有操作区的页面可以只用 .page-title */
-.page-header {
+/* 页内工具条：只放本页操作（标题在顶部栏），默认右对齐。
+   relative 让工具条内的绝对定位弹层以整条为锚点，而不是被左侧按钮带偏 */
+.page-toolbar {
+  position: relative;
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: 10px;
+  margin-bottom: 16px;
 }
 
-.page-title {
-  margin-bottom: 20px;
-  font-size: var(--fs-title);
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-/* 标题已经在 .page-header 里时，间距交给页头，避免双重外边距 */
-.page-header .page-title {
-  margin-bottom: 0;
+/* 两边各有内容时（例如渠道页：左侧说明入口、右侧统计与刷新） */
+.page-toolbar.between {
+  justify-content: space-between;
 }
 
 .header-actions {

@@ -1,16 +1,12 @@
 <template>
   <div class="wb-page">
-    <!-- 页面头部：标题 + 汇总统计 + 刷新 -->
-    <div class="page-header">
-      <h1 class="page-title">WorkBuddy 账号池</h1>
-      <div class="header-actions">
-        <div class="wb-stats">
-          <span class="stat">总计 <b>{{ counts.total }}</b></span>
-          <span class="stat ok">可用 <b>{{ counts.healthy }}</b></span>
-          <span class="stat warn">冷却 <b>{{ counts.cooling }}</b></span>
-          <span class="stat bad">禁用 <b>{{ counts.disabled }}</b></span>
-        </div>
-        <button class="btn-ghost btn-sm" @click="refreshPage">{{ loading ? '刷新中…' : '刷新' }}</button>
+    <!-- 页面工具条：汇总统计（刷新在顶部栏） -->
+    <div class="page-toolbar">
+      <div class="wb-stats">
+        <span class="stat">总计 <b>{{ counts.total }}</b></span>
+        <span class="stat ok">可用 <b>{{ counts.healthy }}</b></span>
+        <span class="stat warn">冷却 <b>{{ counts.cooling }}</b></span>
+        <span class="stat bad">禁用 <b>{{ counts.disabled }}</b></span>
       </div>
     </div>
 
@@ -1248,6 +1244,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { showToast } from '../composables/useToast.js'
 import { useEscClose } from '../composables/useEscClose.js'
+import { usePageActions } from '../composables/usePageActions.js'
 import {
   wbAccounts,
   wbOauthStart,
@@ -1727,6 +1724,9 @@ async function refreshPage() {
   else if (tab.value === 'logs') await loadLogs()
   else if (tab.value === 'advanced') await loadAdvanced()
 }
+
+// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
+usePageActions({ refresh: refreshPage, loading })
 
 // 点击「+ 添加账号」：先展开区域选择（国际版与国内版的域名与 OAuth 入口不同）
 function startAddAccount() {

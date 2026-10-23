@@ -1,10 +1,8 @@
 <template>
   <div class="ch-page">
-    <!-- 页面头部：标题 + 汇总统计 + 刷新 -->
-    <div class="page-header">
+    <!-- 页面工具条：说明入口 + 汇总统计（刷新在顶部栏） -->
+    <div class="page-toolbar between">
       <div class="ch-heading">
-        <h1 class="page-title">渠道账号</h1>
-        <!-- 说明文字很长，收进问号里：页面主体留给卡片，需要时点开看 -->
         <button
           class="ch-help"
           :class="{ active: showNote }"
@@ -29,7 +27,7 @@
               <code>workbuddy-global</code> 国际版），模型引用形如 <code>channels/workbuddy/auto</code>；
               它的账号与积分由主进程的账号池管理，所以卡片上的按钮走 <code>/api/workbuddy/*</code>。
             </li>
-            <li>拖动卡片标题左侧的手柄可以调整顺序，顺序只存在本机。</li>
+            <li>拖动卡片标题左侧的手柄可以调整顺序（拖动中按 Esc 取消），顺序只存在本机。</li>
             <li>
               账号行左侧的外链图标会用系统浏览器打开该渠道的个人中心 / 用量明细页（没填过的渠道用内置默认，
               Raccoon 没有默认；点卡片上的齿轮可以改成任意地址，改过的链接也只存本机）。
@@ -46,9 +44,6 @@
         <button v-if="isCustomOrder" class="btn-ghost btn-sm" title="回到渠道包自带的顺序" @click="resetCardOrder">
           恢复默认顺序
         </button>
-        <button class="btn-ghost btn-sm" :disabled="loading" @click="reload">
-          {{ loading ? '刷新中…' : '刷新' }}
-        </button>
       </div>
     </div>
 
@@ -64,9 +59,9 @@
 
     <!-- ==================== Tab 1：账号 ==================== -->
     <template v-if="tab === 'accounts'">
-      <!-- 拖拽的命中判定挂在网格上（不是每张卡）：动画里的卡片视觉位置会偏移，
-           按事件目标判定会丢步，见 onDragOver 的注释 -->
-      <div ref="gridEl" class="ch-grid" @dragover="onDragOver" @drop.prevent="onDrop()">
+      <!-- 卡片拖拽是自绘的（指针事件 + 跟手浮层 + 虚线占位），不走 HTML5 原生拖拽：
+           原生拖影只能是一张静态快照，配不上实时让位的卡片，看起来像两张卡在打架 -->
+      <div ref="gridEl" class="ch-grid">
         <!-- WorkBuddy：渠道包里的第 11 家（模型目录由 worker 里的适配器代理到主进程，
              补全由 router 直通主进程的 forwardChat）。积分构成 / 成长任务 / 定时任务
              那些低频页面留在 /workbuddy 子页面，不往卡片里塞。 -->
@@ -80,10 +75,8 @@
             <div class="ch-title">
               <span
                 class="ch-grip"
-                draggable="true"
-                title="拖动排序"
-                @dragstart="onDragStart('workbuddy', $event)"
-                @dragend="onDragEnd"
+                title="拖动排序（Esc 取消）"
+                @pointerdown="onGripPointerDown('workbuddy', $event)"
               >
                 <AppIcon name="gripVertical" />
               </span>
@@ -214,10 +207,8 @@
             <div class="ch-title">
               <span
                 class="ch-grip"
-                draggable="true"
-                title="拖动排序"
-                @dragstart="onDragStart(p.id, $event)"
-                @dragend="onDragEnd"
+                title="拖动排序（Esc 取消）"
+                @pointerdown="onGripPointerDown(p.id, $event)"
               >
                 <AppIcon name="gripVertical" />
               </span>
@@ -576,6 +567,7 @@ import { showToast } from '../composables/useToast.js'
 import AppIcon from '../components/AppIcon.vue'
 import ChannelLinkEditor from '../components/ChannelLinkEditor.vue'
 import { slotsOf, linkKeyOf, readCustomLinks, saveCustomLinks } from '../utils/channel-links.js'
+import { usePageActions } from '../composables/usePageActions.js'
 import { channelsStatus, channelsRefresh, channelsRpc, channelsTest } from '../api.js'
 // WorkBuddy 走独立的一组端点（/api/workbuddy/*），和渠道包 RPC 是两套账号体系。
 // 函数名统一加 wb 前缀并与本页已有的 removeAccount / testAccount 等区分开。
@@ -666,22 +658,54 @@ function cardOrderIndex(id) {
   return i < 0 ? DEFAULT_ORDER.length : i
 }
 
-// 拖动时实时重排（不是等放手才变）：划到哪张卡上，那张卡立刻让位。
-// 拖拽期间不做 FLIP 动画（原因见 flipCards），卡片瞬时落位，命中判定才和看到的一致。
+// ==================== 卡片拖拽排序 ====================
+// 用指针事件自绘，而不是 HTML5 的 draggable：
+//   · 原生拖影只是 dragstart 那一刻的静态快照，卡片实时让位时它会和页面对不上，
+//     看起来像「手里一张、页面上还有一张」；
+//   · 原生 dragover 只有落在卡片盒子里才算命中，卡片之间的间隙是死区；
+//   · 拖出窗口松手时 drop / dragend 不保证回来，顺序会半途而废。
+// 现在的做法：按住手柄超过阈值后浮起一张跟手的卡片快照，原位留虚线占位槽；
+// 占位槽随指针越过其他卡片中线换位（其他卡片 FLIP 让位），松手落定、Esc 撤销。
 const gridEl = ref(null)
 const dragId = ref('')
 let orderDirty = false
-// 上一次真正换位时指针的位置：卡片高度不一致时，换位会让整列上下挪，
-// 指针原地不动也会落到另一张卡上 —— 不设这道闸就会自己往下窜好几格
-let lastSwapPoint = null
+// 一次拖拽的会话状态：pending（只按下还没动）→ active（浮层已起）
+let drag = null
+let scrollRaf = 0
+
+const DRAG_THRESHOLD = 4 // 小于这个位移当点击，避免按一下手柄就抖成拖拽
+const SCROLL_EDGE = 72 // 指针距滚动容器上下边缘多近开始自动滚动
+const SCROLL_MAX_STEP = 18 // 自动滚动每帧最多几像素
 
 const cardClass = id => ({ dragging: dragId.value === id })
+
+function findScrollParent(el) {
+  for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+    const style = getComputedStyle(node)
+    if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node
+  }
+  return document.scrollingElement || document.documentElement
+}
+
+// 卡片在**布局**里的盒子（不受 FLIP 动画的 transform 影响）。
+// `.ch-grid` 有 position: relative，卡片以网格为 offsetParent，offsetLeft/offsetTop
+// 就是布局坐标；再加上网格自身在视口里的位置即可。这样页面滚动、卡片飞行动画
+// 都不会让落点判定和看到的位置错开。
+function layoutBoxOf(el) {
+  const grid = gridEl.value
+  if (!grid) return null
+  const base = grid.getBoundingClientRect()
+  const left = base.left + grid.clientLeft + el.offsetLeft
+  const top = base.top + grid.clientTop + el.offsetTop
+  return { left, top, right: left + el.offsetWidth, bottom: top + el.offsetHeight }
+}
 
 // FLIP：改 order 前先量一遍每张卡的位置，改完再量一遍，用差值做一次反向位移动画。
 // CSS grid 的重排是瞬间跳变的，没有这一步就只剩「闪一下」。
 //
-// 动画期间卡片的视觉位置与布局位置会短暂不一致，所以命中判定不能用事件目标或
-// getBoundingClientRect()（见 layoutBoxOf）；拖拽时动画短一点，跟手比好看重要。
+// 量的是 offsetLeft/offsetTop（网格内布局坐标），不是 getBoundingClientRect()：
+// 拖拽时自动滚动会在两次测量之间改变视口偏移，rect 会把这段滚动也算成位移，
+// 卡片就会朝错误方向飞；布局坐标只反映真正的重排。
 async function flipCards(mutate) {
   const grid = gridEl.value
   if (!grid) {
@@ -689,13 +713,14 @@ async function flipCards(mutate) {
     return
   }
   const cards = [...grid.querySelectorAll('.ch-card')]
-  const before = new Map(cards.map(el => [el, el.getBoundingClientRect()]))
+  const posOf = el => ({ left: el.offsetLeft, top: el.offsetTop })
+  const before = new Map(cards.map(el => [el, posOf(el)]))
   mutate()
   await nextTick()
   for (const el of cards) {
     const from = before.get(el)
     if (!from) continue
-    const to = el.getBoundingClientRect()
+    const to = posOf(el)
     const dx = from.left - to.left
     const dy = from.top - to.top
     if (!dx && !dy) continue
@@ -706,20 +731,11 @@ async function flipCards(mutate) {
   }
 }
 
-// 拖拽过程中只改内存顺序，落手时才写 localStorage —— 否则每划过一张卡就写一次盘。
-// 但落手事件不保证到来（拖出窗口/Electron 标题栏时 dragover/dragend 可能都不发），
-// 所以换位后再补一次去抖落盘：拖拽被系统打断也不会丢顺序。
+// 拖拽过程中只改内存顺序，松手时才写 localStorage —— 否则每划过一张卡就写一次盘
 function persistOrder() {
   if (!orderDirty) return
   orderDirty = false
-  clearTimeout(persistTimer)
   localStorage.setItem(ORDER_KEY, JSON.stringify(cardOrder.value))
-}
-
-let persistTimer = null
-function schedulePersist() {
-  clearTimeout(persistTimer)
-  persistTimer = setTimeout(persistOrder, 300)
 }
 
 function resetCardOrder() {
@@ -730,81 +746,196 @@ function resetCardOrder() {
   localStorage.removeItem(ORDER_KEY)
 }
 
-function onDragStart(id, e) {
-  dragId.value = id
+function onGripPointerDown(id, e) {
+  if (e.button !== 0 || drag) return
+  const grip = e.currentTarget
+  const card = grip.closest('.ch-card')
+  if (!card) return
+  // 从按下起这次交互就归拖拽控制器：别让指针去选卡片里的文字
+  e.preventDefault()
+  // 捕获指针：拖到窗口外再松手也能收到 pointerup，不会留下一个卡住的浮层。
+  // 个别环境会拒绝捕获（pointerId 已失效等），失败了不影响窗口监听
+  try {
+    grip.setPointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+  drag = {
+    id,
+    card,
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    lastX: e.clientX,
+    lastY: e.clientY,
+    active: false,
+    preview: null,
+    scroller: null,
+    savedAtStart: [...savedOrder.value]
+  }
+  window.addEventListener('pointermove', onGripPointerMove)
+  window.addEventListener('pointerup', onGripPointerUp)
+  window.addEventListener('pointercancel', onGripPointerCancel)
+  window.addEventListener('blur', onWindowBlur)
+  window.addEventListener('keydown', onDragKeyDown)
+}
+
+function activateDrag() {
+  const { card } = drag
+  drag.active = true
+  const rect = card.getBoundingClientRect()
+  // 浮层是卡片节点的深克隆（事件监听不会被复制，天然只读）。尺寸锁死在起手那一刻，
+  // 后面无论卡片内容怎么变，浮层都不会跟着抖。
+  const preview = card.cloneNode(true)
+  preview.classList.add('ch-drag-preview')
+  preview.removeAttribute('data-card-id')
+  preview.setAttribute('aria-hidden', 'true')
+  // 克隆里有按钮/下拉，别让键盘 Tab 进到一个没有事件监听的影子节点里
+  preview.inert = true
+  preview.style.width = rect.width + 'px'
+  preview.style.height = rect.height + 'px'
+  preview.style.left = rect.left + 'px'
+  preview.style.top = rect.top + 'px'
+  document.body.appendChild(preview)
+  drag.preview = preview
+  drag.scroller = findScrollParent(card)
   orderDirty = false
-  lastSwapPoint = null
-  e.dataTransfer.effectAllowed = 'move'
-  // Firefox 不 setData 就不认这次拖拽
-  e.dataTransfer.setData('text/plain', id)
-  // 手柄只有十几像素，不换拖影的话用户拖动时看到的是一个小图标而不是卡片
-  const card = e.currentTarget.closest('.ch-card')
-  if (card) e.dataTransfer.setDragImage(card, 24, 24)
+  dragId.value = drag.id // 原卡片变成虚线占位槽
+  document.body.classList.add('ch-drag-active')
+  movePreview(drag.lastX, drag.lastY)
 }
 
-// 卡片在**布局**里的盒子（不受 FLIP 动画的 transform 影响）。
-// 用 offsetLeft/offsetTop 而不是 getBoundingClientRect()：动画期间 rect 是
-// 「飞行中」的位置，拿它算落点会丢步，或者在两张卡之间反复横跳。
-function layoutBoxOf(el) {
-  const parent = el.offsetParent || gridEl.value
-  if (!parent) return null
-  const base = parent.getBoundingClientRect()
-  const left = base.left + el.offsetLeft - parent.scrollLeft
-  const top = base.top + el.offsetTop - parent.scrollTop
-  return { left, top, right: left + el.offsetWidth, bottom: top + el.offsetHeight }
+// 浮层始终跟着指针：起点是卡片原位 + 按下点到起手时的偏移，所以抓哪儿就一直在哪儿
+function movePreview(x, y) {
+  if (!drag?.preview) return
+  drag.preview.style.transform = `translate3d(${x - drag.startX}px, ${y - drag.startY}px, 0)`
 }
 
-// 命中判定挂在网格上而不是每张卡上：卡片在动画中会跑到指针下面，事件目标不可信；
-// 这里只认「指针的布局坐标落在哪张卡的布局盒子里」。
-function onDragOver(e) {
-  if (!dragId.value) return
-  e.preventDefault() // 不拦截就没有 drop 事件
-  e.dataTransfer.dropEffect = 'move'
+// 单列布局里只按「其他卡片的中线」决定插入位：指针越过了谁的中线，占位槽就排到谁前面。
+// 和「指针落在哪张卡的盒子里」相比，中线判定没有卡片间隙的死区，也不会因为换位后
+// 整列上下挪动而反复横跳（指针没动，越过的中线数量就不会变）。
+function updateDropSlot(pointerY) {
   const grid = gridEl.value
-  if (!grid) return
-  // 指针没动过就不换位：只可能是上一步换位把整列挪了，不是用户的操作
-  if (lastSwapPoint) {
-    if (Math.abs(e.clientX - lastSwapPoint.x) < 4 && Math.abs(e.clientY - lastSwapPoint.y) < 4) return
-  }
-  let targetId = ''
+  if (!grid || !drag) return
+  const others = []
   for (const el of grid.querySelectorAll('.ch-card')) {
-    const id = el.dataset.cardId
-    // 落在被拖的卡片自己的槽位上 = 回到原位，不用动
-    if (!id || id === dragId.value) continue
+    if (el.dataset.cardId === drag.id) continue
     const box = layoutBoxOf(el)
-    if (!box) continue
-    if (e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) {
-      targetId = id
-      break
-    }
+    if (box) others.push(box)
   }
-  if (!targetId) return
-  const list = [...cardOrder.value]
-  const from = list.indexOf(dragId.value)
-  const to = list.indexOf(targetId)
-  if (from < 0 || to < 0 || from === to) return
-  // 换位后把被拖的卡片放到目标的槽位，指针下面立刻变成被拖的卡片自己 ——
-  // 下一次 dragover 命中它就被上面那行挡掉，所以不需要额外的「防抖目标」记录；
-  // 反过来，那个记录会让「划回去」失效（目标 id 还没变），拖拽忽灵忽不灵就是这么来的
-  list.splice(to, 0, list.splice(from, 1)[0])
-  lastSwapPoint = { x: e.clientX, y: e.clientY }
+  others.sort((a, b) => a.top - b.top || a.left - b.left)
+  let index = 0
+  for (const box of others) {
+    if (pointerY > (box.top + box.bottom) / 2) index += 1
+    else break
+  }
+  if (cardOrder.value.indexOf(drag.id) === index) return
+  const list = cardOrder.value.filter(id => id !== drag.id)
+  list.splice(index, 0, drag.id)
   flipCards(() => {
     savedOrder.value = list
   })
   orderDirty = true
-  schedulePersist()
 }
 
-function onDrop() {
-  persistOrder()
+function autoScrollStep() {
+  if (!drag?.active || !drag.scroller) return 0
+  const rect = drag.scroller.getBoundingClientRect()
+  if (drag.lastY < rect.top + SCROLL_EDGE) {
+    const ramp = Math.min(1, (rect.top + SCROLL_EDGE - drag.lastY) / SCROLL_EDGE)
+    return -Math.ceil(ramp * SCROLL_MAX_STEP)
+  }
+  if (drag.lastY > rect.bottom - SCROLL_EDGE) {
+    const ramp = Math.min(1, (drag.lastY - (rect.bottom - SCROLL_EDGE)) / SCROLL_EDGE)
+    return Math.ceil(ramp * SCROLL_MAX_STEP)
+  }
+  return 0
 }
 
-function onDragEnd() {
-  // 拖到卡片外面松手也算数：预览出来的顺序就是最终顺序，不再回滚。
-  // （没有「按 Esc 撤销」：原生拖拽期间拿不到 keydown，硬做只会半吊子）
-  persistOrder()
+// 拖到列表上下边缘时自动滚动：很多用户的卡片顺序是跨屏调整的，
+// 不然得先松手、滚页面、再重新拖一次
+function pumpAutoScroll() {
+  scrollRaf = 0
+  if (!drag?.active) return
+  const step = autoScrollStep()
+  if (!step) return
+  const el = drag.scroller
+  const before = el.scrollTop
+  el.scrollTop = before + step
+  if (el.scrollTop === before) return // 已经到顶/到底，别空转 rAF
+  // 内容在指针下方滚过去了，插入位要按新的布局重算
+  updateDropSlot(drag.lastY)
+  scrollRaf = requestAnimationFrame(pumpAutoScroll)
+}
+
+function ensureAutoScroll() {
+  if (!scrollRaf) scrollRaf = requestAnimationFrame(pumpAutoScroll)
+}
+
+function onGripPointerMove(e) {
+  if (!drag || e.pointerId !== drag.pointerId) return
+  drag.lastX = e.clientX
+  drag.lastY = e.clientY
+  if (!drag.active) {
+    if (
+      Math.abs(e.clientX - drag.startX) < DRAG_THRESHOLD &&
+      Math.abs(e.clientY - drag.startY) < DRAG_THRESHOLD
+    ) return
+    activateDrag()
+  }
+  movePreview(e.clientX, e.clientY)
+  updateDropSlot(e.clientY)
+  ensureAutoScroll()
+}
+
+function onGripPointerUp(e) {
+  if (!drag || e.pointerId !== drag.pointerId) return
+  finishDrag()
+}
+
+// 指针被系统收走（切窗口、触控手势打断）时按当前顺序落定，别让浮层留在屏幕上
+function onGripPointerCancel(e) {
+  if (!drag || e.pointerId !== drag.pointerId) return
+  finishDrag()
+}
+
+function onWindowBlur() {
+  if (drag) finishDrag()
+}
+
+function onDragKeyDown(e) {
+  if (!drag || e.key !== 'Escape') return
+  e.preventDefault()
+  finishDrag({ cancel: true })
+}
+
+function finishDrag({ cancel = false } = {}) {
+  if (!drag) return
+  const { preview, active, savedAtStart } = drag
+  window.removeEventListener('pointermove', onGripPointerMove)
+  window.removeEventListener('pointerup', onGripPointerUp)
+  window.removeEventListener('pointercancel', onGripPointerCancel)
+  window.removeEventListener('blur', onWindowBlur)
+  window.removeEventListener('keydown', onDragKeyDown)
+  if (scrollRaf) {
+    cancelAnimationFrame(scrollRaf)
+    scrollRaf = 0
+  }
+  preview?.remove()
+  document.body.classList.remove('ch-drag-active')
   dragId.value = ''
-  lastSwapPoint = null
+  drag = null
+  if (!active) return // 只是按了一下手柄，没有真正开始拖
+  if (cancel) {
+    // 还原到拖拽前的顺序。要用 savedOrder 的快照，不能拿 cardOrder 还原：
+    // 用户从没排过序时 savedOrder 是空数组，cardOrder 却是完整的默认顺序。
+    flipCards(() => {
+      savedOrder.value = savedAtStart
+    })
+    orderDirty = false
+    return
+  }
+  persistOrder()
 }
 
 const tab = ref('accounts')
@@ -905,6 +1036,9 @@ async function reload() {
     loading.value = false
   }
 }
+
+// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
+usePageActions({ refresh: reload, loading })
 
 // 重新采集目录并同步进 channels 源。失败只在控制台留痕：这是页面自己发起的
 // 补同步，用户没点任何按钮，弹 toast 只会变成一条莫名其妙的报错
@@ -2095,6 +2229,8 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
   wbStopPolling()
+  // 拖拽中切走页面时把浮层和全局监听一并收掉，否则它会留在 body 上
+  finishDrag({ cancel: true })
   document.removeEventListener('pointerdown', onDocPointerDown)
   // 离开页面时把正在跑的模型测试也停掉：否则它会继续对着上游一个个打，
   // 用户已经在别的页面了，连「中止」按钮都看不见
@@ -2136,7 +2272,6 @@ onUnmounted(() => {
 
 
 .ch-heading {
-  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2164,9 +2299,12 @@ onUnmounted(() => {
 .ch-note-pop {
   position: absolute;
   top: calc(100% + 8px);
-  left: 0;
+  /* 以工具条整条为定位锚点（见 App.vue .page-toolbar）：右对齐向左铺开，
+     宽度同时受窗口与工具条限制，窄窗口下不会压到侧边栏 */
+  right: 0;
   z-index: 20;
   width: min(680px, calc(100vw - 64px));
+  max-width: 100%;
   max-height: 60vh;
   overflow: auto;
   padding: 12px 16px;
@@ -2207,6 +2345,9 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr;
   gap: 14px;
+  /* 卡片以网格为 offsetParent：拖拽落点用 offsetLeft/offsetTop 算布局坐标，
+     不受滚动与 FLIP 动画影响（见 layoutBoxOf） */
+  position: relative;
 }
 
 .ch-card {
@@ -2215,7 +2356,7 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-/* 拖拽排序手柄：只有这一小块是 draggable，卡片里的按钮/下拉/文本选中都不受影响 */
+/* 拖拽排序手柄：只有这一小块接手拖拽，卡片里的按钮/下拉/文本选中都不受影响 */
 .ch-grip {
   width: 16px;
   height: 16px;
@@ -2226,6 +2367,17 @@ onUnmounted(() => {
   color: var(--text-3);
   cursor: grab;
   user-select: none;
+  /* 指针事件拖拽：别让浏览器把这次拖动解释成滚动/触控手势 */
+  touch-action: none;
+  /* 图标只有 16px，抓起来太考手。用一层透明伪元素把命中区扩到 28px，
+     不占布局、不影响标题行的对齐 */
+  position: relative;
+}
+
+.ch-grip::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
 }
 
 .ch-grip:hover {
@@ -2237,11 +2389,41 @@ onUnmounted(() => {
   cursor: grabbing;
 }
 
-/* 正在拖的卡片留个虚影，让用户知道哪张在动；落点靠其他卡片即时让位表达，
-   不再额外描边（实时重排之后描边反而会和让位动作打架）。
-   拖拽期间不加过渡/动画：视觉位置必须等于布局位置，否则命中判定会落在飞行中的卡片上 */
+/* 拖拽中的原卡片变成占位槽：内容隐去、只留虚线框，明确告诉用户「松手就落这里」。
+   之前是整张卡半透明留在原地，和跟手的浮层叠在一起，看起来像两张卡在打架 */
 .ch-card.dragging {
-  opacity: 0.45;
+  background: var(--bg-hover);
+  border: 1px dashed var(--border-3);
+  box-shadow: none;
+}
+
+.ch-card.dragging > * {
+  visibility: hidden;
+}
+
+/* 跟手的拖拽浮层：卡片节点的克隆，固定定位、直接跟 translate 走，不参与布局。
+   起手后就贴在指针下方，和占位槽分工明确 —— 浮层表示「拿着的卡」，占位槽表示「落点」 */
+.ch-drag-preview {
+  position: fixed;
+  z-index: 1000;
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
+  cursor: grabbing;
+  border-color: var(--primary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  opacity: 0.96;
+  will-change: transform;
+}
+
+/* 拖拽期间整页光标都是「抓着」，并禁止选中文字（防止拖太快选中页面内容） */
+body.ch-drag-active {
+  cursor: grabbing;
+  user-select: none;
+}
+
+body.ch-drag-active * {
+  cursor: grabbing;
 }
 
 .ch-card-head {

@@ -87,6 +87,12 @@ async function rpc(body, signal) {
 }
 
 async function shutdown() {
+  // 初始化可能还在飞：先等它落定，否则关掉之后旧 promise 会把 runtime 又设回来
+  if (initializing) {
+    try {
+      await initializing
+    } catch {}
+  }
   if (!runtime) return
   const closing = runtime.close()
   runtime = null

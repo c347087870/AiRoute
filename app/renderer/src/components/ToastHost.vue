@@ -7,18 +7,74 @@
         class="toast"
         :class="`toast-${item.type}`"
         @click="dismissToast(item.id)"
+        @mouseenter="pauseToast(item.id)"
+        @mouseleave="resumeToast(item.id)"
       >
         <span class="toast-icon">{{ iconOf(item.type) }}</span>
         <span class="toast-message">{{ item.message }}</span>
+        <button
+          class="toast-copy"
+          :class="{ ok: copyState.id === item.id && copyState.state === 'ok', fail: copyState.id === item.id && copyState.state === 'fail' }"
+          type="button"
+          :title="copyLabel(item)"
+          :aria-label="copyLabel(item)"
+          @click.stop="copyToast(item)"
+        >
+          {{ copyLabel(item) }}
+        </button>
       </div>
     </TransitionGroup>
   </div>
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import { useToast } from '../composables/useToast.js'
 
-const { toasts, dismissToast } = useToast()
+const { toasts, dismissToast, pauseToast, resumeToast } = useToast()
+
+const copyState = ref({ id: 0, state: '' }) // 最近一次复制结果：'' | 'ok' | 'fail'
+let copyTimer = 0
+
+// 按钮文案兼作悬停提示：复制成功 / 失败在 1.6 秒后回到「复制」
+function copyLabel(item) {
+  if (copyState.value.id !== item.id) return '复制'
+  if (copyState.value.state === 'ok') return '已复制'
+  if (copyState.value.state === 'fail') return '复制失败'
+  return '复制'
+}
+
+function setCopyState(id, state) {
+  copyState.value = { id, state }
+  clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => {
+    copyState.value = { id: 0, state: '' }
+  }, 1600)
+}
+
+// 复制提示全文：错误信息常常太长，光靠眼睛抄不下来
+async function copyToast(item) {
+  try {
+    await navigator.clipboard.writeText(item.message)
+    setCopyState(item.id, 'ok')
+  } catch {
+    // 窗口无焦点或缺少剪贴板权限时 Clipboard API 会拒绝，降级到临时 textarea
+    const el = document.createElement('textarea')
+    el.value = item.message
+    el.style.position = 'fixed'
+    el.style.opacity = '0'
+    document.body.appendChild(el)
+    el.select()
+    let ok = false
+    try {
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    }
+    document.body.removeChild(el)
+    setCopyState(item.id, ok ? 'ok' : 'fail')
+  }
+}
 
 // 根据提示类型返回对应图标
 function iconOf(type) {
@@ -82,8 +138,48 @@ function iconOf(type) {
 }
 
 .toast-message {
+  flex: 1;
+  min-width: 0;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.toast-copy {
+  flex: none;
+  align-self: flex-start;
+  margin-left: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-3);
+  border-radius: var(--radius-xs);
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.toast:hover .toast-copy,
+.toast-copy:focus-visible {
+  opacity: 1;
+}
+
+.toast-copy:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.toast-copy.ok {
+  opacity: 1;
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.toast-copy.fail {
+  opacity: 1;
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .toast-enter-active,

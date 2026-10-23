@@ -28,6 +28,22 @@ let rt = null
 // 账号操作运行态（uid → 动作名；进程内状态，供面板显示「保活中」等）
 const runningActions = new Map()
 
+// 关停运行时：导入配置/账号后要按新文件重新 init，否则池里还是旧账号。
+// 与 __resetForTest 同一步骤，但语义是生产用的 —— 停定时器后再让 init 重建。
+function shutdown() {
+  if (!rt) return
+  try {
+    rt.scheduler?.stop?.()
+  } catch {}
+  try {
+    rt.session?.stopGC?.()
+  } catch {}
+  try {
+    rt.pool?.stopFlusher?.()
+  } catch {}
+  rt = null
+}
+
 // 初始化运行时（幂等）
 // opts: { dataDir, poolConfig, promptMode, promptFile, sanitizeFingerprints, log }
 function init(opts = {}) {
@@ -1969,6 +1985,7 @@ function errMsgOf(err) {
 
 module.exports = {
   init,
+  shutdown,
   getRuntime,
   updateConfig,
   // OAuth
