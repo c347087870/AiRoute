@@ -1,6 +1,7 @@
 name: Release
 
-# 打 tag（v1.6.1）自动构建双平台产物并创建 GitHub Release；也可手动触发只做构建（不建 Release）
+# 打 tag（v1.6.1）自动构建双平台产物并创建 GitHub Release 草稿；也可手动触发只做构建（不建 Release）
+# 草稿不会出现在 /releases/latest 与公开列表中，客户端 update 检查因此不受影响，确认无误后手动发布
 on:
   push:
     tags:
@@ -133,7 +134,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: 创建 Release
+    name: 创建草案 Release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -168,12 +169,13 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      # Release 已存在（重跑 workflow）时改为覆盖上传，避免 422
-      - name: 发布资产
+      # 产物进草稿 Release：不自动发布，人工确认后再点 Publish。
+      # 草稿也能按 tag 查到（gh 的 draft 查找走 GraphQL），重跑 workflow 时走覆盖上传，避免 422。
+      - name: 上传资产到草稿 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # tag 带后缀（v1.7.0-beta.1 这类）视为预发布，不打 latest
+          # tag 带后缀（v1.7.0-beta.1 这类）视为预发布，发布后不会成为 latest
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; else prerelease=""; fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist-assets/* --clobber
@@ -182,5 +184,18 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" dist-assets/* \
               --title "$GITHUB_REF_NAME" \
-              --generate-notes $prerelease
+              --generate-notes \
+              --draft $prerelease
           fi
+
+      # 草稿在 Actions 页面看不出来，明确告诉人去哪儿发布
+      - name: 提示人工发布
+        run: |
+          {
+            echo "### 草稿 Release 已就绪，等你发布"
+            echo
+            echo "- tag：\`$GITHUB_REF_NAME\`"
+            echo "- 入口：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases"
+            echo "- 草稿不会出现在 \`/releases/latest\`，发布后客户端才会检测到新版本"
+          } >> "$GITHUB_STEP_SUMMARY"
+

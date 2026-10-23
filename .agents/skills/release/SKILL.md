@@ -1,6 +1,6 @@
 ---
 name: release
-description: 用于 AiRoute 发版收尾——建 PR → 合并 → 打 tag 触发 CI 打包并创建 GitHub Release。当用户说「发版 / 发布 / release / create pr && merge && release」时使用。前提：改动已在分支上、本地构建与测试已通过。构建、测试、产物命名规则见 README 的「开发与打包」与 CHANGELOG。
+description: 用于 AiRoute 发版收尾——建 PR → 合并 → 打 tag 触发 CI 打包并创建 GitHub Release 草稿（草稿需手动发布）。当用户说「发版 / 发布 / release / create pr && merge && release」时使用。前提：改动已在分支上、本地构建与测试已通过。构建、测试、产物命名规则见 README 的「开发与打包」与 CHANGELOG。
 ---
 
 # AiRoute 发版（PR → 合并 → 发布）
@@ -94,9 +94,9 @@ git checkout main && git pull --ff-only \
 | --- | --- |
 | `测试与版本校验` | `npm test` + `npm run test:e2e` + tag ↔ `package.json` 校验（允许 tag 带 `-` 后缀，如 `-beta.1`） |
 | `构建 (mac)` / `构建 (win)` | `npm run build` → `verify-release.js` → 收集 `app/release` 的产物 |
-| `创建 Release` | 用 `AiRoute-<版本>-x64-portable.exe` 复制 `AiRoute.exe`（旧名兼容）→ `sha256sum *` 生成 `SHA256SUMS.txt` → `gh release create --generate-notes`（tag 含 `-` 则加 `--prerelease`） |
+| `创建草案 Release` | 用 `AiRoute-<版本>-x64-portable.exe` 复制 `AiRoute.exe`（旧名兼容）→ `sha256sum *` 生成 `SHA256SUMS.txt` → `gh release create --generate-notes --draft`（tag 含 `-` 则加 `--prerelease`） |
 
-Release 已存在时改为 `gh release upload --clobber` 覆盖资产。
+草稿同样能按 tag 查到（gh 走 GraphQL 查 draft），重跑 workflow 时改为 `gh release upload --clobber` 覆盖资产，**草稿状态不变**。草稿不会出现在 `/releases/latest` 与公开列表中，所以已发布的旧客户端检测不到它——这正是要人工确认后再发布的原因。
 
 `workflow_dispatch` 用**分支** ref 触发只构建；用 **tag** ref 触发仍会走 `创建 Release`。
 
@@ -110,7 +110,9 @@ curl -s -H "Authorization: token $TOKEN" \
   "https://api.github.com/repos/c347087870/AiRoute/actions/runs/<run_id>/jobs"
 ```
 
-完成判据：`创建 Release` 成功，Release 上有 8 个资产（4 个 Windows exe、2 个 dmg、`AiRoute.exe`、`SHA256SUMS.txt`），且 `SHA256SUMS.txt` 与其余资产一一对应。
+完成判据：`创建草案 Release` 成功，草稿上有 8 个资产（4 个 Windows exe、2 个 dmg、`AiRoute.exe`、`SHA256SUMS.txt`），且 `SHA256SUMS.txt` 与其余资产一一对应。
+
+**发布是人工的一步**：核对资产与 SHA256 后执行 `gh release edit "v$VERSION" --draft=false`（或网页点 Publish）。在此之前客户端不会看到新版本；不要为了「让更新生效」绕开草稿直接改发布状态，也不要重复上传。
 
 **校验一律以 Release 的 `SHA256SUMS.txt` 为准**——CI 会重新打包，本地 `verify-release.js` 算出的 SHA256 与线上必然不同。本地 SHA 只能证明配置正确，不能写进发布说明当线上值。
 
