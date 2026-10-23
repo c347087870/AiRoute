@@ -101,11 +101,13 @@ function getLogs(options = {}) {
     if (raw >= RAW_CAP) break
   }
 
-  // 组内新→旧，反转成旧→新后合并；与逐条记录一起按「末条完成时刻」倒序
+  // 组内新→旧，反转成旧→新后合并；与逐条记录一起按完成时刻倒序
+  // （timestamp 已是完成时刻，不能再叠加 responseTime —— 那会把慢请求算到更晚，
+  // 让真正最新的记录被挤出 limit）
   const merged = []
   for (const list of groups.values()) merged.push(mergeTaskEntries([...list].reverse()))
   merged.push(...standalone)
-  merged.sort((a, b) => Date.parse(b.timestamp || 0) + (b.responseTime || 0) - (Date.parse(a.timestamp || 0) + (a.responseTime || 0)))
+  merged.sort((a, b) => Date.parse(b.timestamp || 0) - Date.parse(a.timestamp || 0))
 
   const results = []
   for (const entry of merged) {
@@ -145,9 +147,11 @@ function deriveTokensPerSec(enriched) {
   return enriched
 }
 
-// 合并一组同任务记录（入参按时间升序）：时间/输入/模型取首条，Token 与积分累加，
+// 合并一组同任务记录（入参按时间升序）：输入/模型取首条，Token 与积分累加，
 // 耗时 = 末条完成 - 首条开始，任一失败即失败（状态取首个非 200、错误取首个错误），
-// 账号取末条、ttfb 取首条非空；calls 记录上游调用次数；taskKey 为内部字段不出现在输出
+// 账号取末条、ttfb 取首条非空；calls 记录上游调用次数；taskKey 为内部字段不出现在输出。
+// 时间取末条完成时刻（timestamp 即完成时刻）：与「耗时」的口径一致，
+// 也让列表的展示时间与排序键同源 —— 取首条会让任务结束时刻比显示时间晚一整个耗时
 function mergeTaskEntries(list) {
   const first = list[0]
   let acc = { ...first, calls: 1 }
@@ -175,11 +179,14 @@ function mergeTaskEntries(list) {
     }
   }
   // 耗时：末条完成时刻 - 首条开始时刻（timestamp 为完成时刻，responseTime 为本次耗时）
+  const last = list[list.length - 1]
   const firstStart = Date.parse(first.timestamp) - (first.responseTime || 0)
-  const lastEnd = Date.parse(list[list.length - 1].timestamp)
+  const lastEnd = Date.parse(last.timestamp)
   if (Number.isFinite(firstStart) && Number.isFinite(lastEnd) && lastEnd >= firstStart) {
     acc.responseTime = lastEnd - firstStart
   }
+  // 完成时刻取末条：展示时间与排序都用它，避免「按结束时间排序、却显示首条完成时间」
+  if (last.timestamp) acc.timestamp = last.timestamp
   delete acc.taskKey
   return deriveTokensPerSec(acc)
 }
