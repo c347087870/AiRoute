@@ -2,6 +2,39 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0-beta.1] - 2026-10-23
+
+这一版把「免费账号渠道」做成与通用上游并列的一等模型来源：十家渠道各带账号池、模型目录与登录续期，模型引用新增 `channels/<provider>/<model>` 形态；`Provider 管理` 随之收缩为只配通用上游，整包迁移改由设置页的导出 / 导入承担。大版本号来自这层结构变化，协议侧无破坏性改动。
+
+### 新增
+
+- **十个免费账号渠道**：vendored 渠道包（MIT，Jet/iJetLi）落在 `server/channels/`，跑在 worker 线程里；只建一个 `channels` Provider（`type=channel`），模型 id 形如 `provider/model`，配置里引用形如 `channels/gemini/gemini-2.5-pro`。补全、账号池、登录续期都在渠道包内闭环，router 只做协议收口与转帧（Anthropic / OpenAI / Responses 三条入口收敛成 OpenAI Chat 再回来）；凭据与运行态落在 `server/channels-data/`（明文 `channel-credentials.json`，已进 `.gitignore`）
+- **WorkBuddy 直通**：它的 payload 管线在主进程，补全走 `workbuddy.forwardChat`，渠道包只提供模型目录，避免两次有损转换
+- **auto / auto-fast / auto-cheap 伪模型**：`/v1/models` 暴露三个伪模型，客户端点名即按「综合 / 体验优先（中位延迟）/ 性价比优先（免费与低倍率）」挑模型，不改 `state.current`——否则客户端能替人改全局状态。一次请求最多按序试 4 个候选，配置的兜底模型垫底；排序只来自本机日志（最近两份各 4000 行，缓存 60s），冷启动退化成配置顺序。`credits=0` 记为免费、字段缺失记为无数据，两者不混
+- **「渠道账号」页**：一张卡一个渠道，登录态、账号数、模型数、跳转地址都在卡上；「模型」页分三段（已开启模型 / 全量目录 / 工具栏），长段说明收进问号浮层；模型测试按渠道分组并发（组内仍串行：400ms 间隔 + 抖动、8s 退避、连续 3 次限流熔断），卡片顺序可拖拽且只存本机
+- **配置导出 / 导入**（设置页）：一个 JSON 带走模型来源（含明文 apiKey）、路由规则、兜底与被激活模型、服务端设置，以及 WorkBuddy / 渠道账号目录整棵树。覆盖式导入，写盘前把当前配置快照到 `data/config-backups/`（只留最近 5 份），写坏可回滚；导入后重建 WorkBuddy 与渠道运行时，否则界面显示新账号、请求还在用旧池。日志、Token 统计、积分历史、评测记录属于历史数据，不在备份内
+- **Toast 可暂停、可复制**：鼠标移入暂停倒计时、移出按剩余时长继续；每条提示带「复制」按钮（Clipboard API 被拒时降级 `execCommand`），长错误信息不用再靠眼睛抄
+- **`dev:isolated` 脚本**：用独立 `--user-data-dir=.dev-userdata` 起 Electron，与正式版的单实例锁隔离
+
+### 变更
+
+- **页面标题统一到布局顶部栏**：标题由路由 `meta.title` 渲染、常驻不随内容滚动，二级页面带返回按钮；页面内不再写 `<h1 class="page-title">`。**刷新 /「实时」角标**也移到标题右侧，页面用 `usePageActions` 登记自己的刷新函数与 loading，布局统一渲染，切页自动清空
+- **`Provider 管理` 收缩为通用上游**：渠道与 WorkBuddy 的模型、账号改由渠道账号页管理
+- **侧边栏**：一级菜单统一四个字，路由规则 / 模型来源 / 日志查看 / 用量统计 / 模型测分收进「高级」并置底；图标改为内联 SVG；主题（亮色 / 暗色 / 跟随系统）收敛为侧边栏底部唯一入口，设置页不再重复放一份
+- **状态面板改版**：请求数 / 用量概览 / 最近请求三段式，实时角标跟随 5 秒轮询
+- **使用教程重写**：新增「让 AI 自己接入」提示词（端口从服务端配置读，可一键复制）与 auto 三档策略说明表
+- **CI**：Release 默认创建为草稿，确认无误后再手动发布（草稿不进 `/releases/latest`，客户端检查更新不受影响）
+
+### 修复
+
+- **渠道关停与初始化竞态**：`channels.shutdown()` 先等 `initializing` 落定再关，否则关掉之后旧 promise 会把 runtime 又设回来
+- **卡片拖拽命中改用布局坐标**：判定挪到网格上用 `offsetLeft/offsetTop` 算布局盒子（动画期间 `getBoundingClientRect()` 是飞行中的位置，按它判定会丢步或打转），并恢复拖拽期间的 FLIP 动画（120ms，非拖拽 160ms，保留 4px 位移闸）
+- **最近请求的时间与顺序错位**：`getLogs` 的排序键在 `timestamp` 上又加了一次 `responseTime`，而 `timestamp` 本身就是完成时刻，慢请求因此被排到更晚、会把最新记录挤出状态面板的 5 条；任务合并行的时间又取首条完成时刻，显示时间比任务真正结束早一整个耗时，列表看着像缺行。改为统一按完成时刻排序，合并行时间取末条完成时刻
+
+### 测试
+
+- `scripts/test-channels.js`（11 项）、`scripts/test-auto-strategy.js`（10 项）、`scripts/test-config-io.js`（6 项）并入 `npm test`；`npm run test:e2e` 54 项通过
+
 ## [1.9.0] - 2026-10-21
 
 Windows 从「只有一个免安装 exe」扩成两种分发形态：便携版继续免安装，另外新增可一键升级的安装版。
