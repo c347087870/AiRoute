@@ -2017,15 +2017,30 @@ async function main() {
       assert.strictEqual(logs[0].totalTokens, 6)
     })
 
-    test('失败合并：任一非 200 即失败、错误取首个', () => {
+    test('合并结果取末条：模型 / 状态跟随最终上游，错误保留首个（供重试/降级判定）', () => {
       loggerMod.clearLogs()
       loggerMod.log({ taskKey: 'T2', model: 'm1', status: 500, error: '首个错误', responseTime: 50 })
-      loggerMod.log({ taskKey: 'T2', model: 'm1', status: 200, responseTime: 60, totalTokens: 5 })
+      loggerMod.log({ taskKey: 'T2', model: 'm2', status: 200, responseTime: 60, totalTokens: 5 })
       const logs = loggerMod.getLogs({ limit: 10 })
       assert.strictEqual(logs.length, 1)
-      assert.strictEqual(logs[0].status, 500)
-      assert.strictEqual(logs[0].error, '首个错误')
+      assert.strictEqual(logs[0].status, 200, '状态取末条：中途失败后恢复应显示成功')
+      assert.strictEqual(logs[0].model, 'm2', '模型取末条：显示真正服务这次请求的上游')
+      assert.strictEqual(logs[0].error, '首个错误', '错误保留首个非空，供重试/降级判定')
+      assert.strictEqual(logs[0].degraded, true, '中途失败后恢复应标记重试/降级')
       assert.strictEqual(logs[0].totalTokens, 5)
+    })
+
+    test('fallback 合并：主源 502 + 备用 200 显示备用模型与成功（不再被主源吞掉）', () => {
+      loggerMod.clearLogs()
+      loggerMod.log({ taskKey: 'T4', model: 'primary', status: 502, error: '主源挂了', responseTime: 40 })
+      loggerMod.log({ taskKey: 'T4', model: 'backup', status: 200, fallback: true, fallbackFrom: 'primary', responseTime: 90, totalTokens: 7 })
+      const logs = loggerMod.getLogs({ limit: 10 })
+      assert.strictEqual(logs.length, 1)
+      assert.strictEqual(logs[0].model, 'backup', '显示真正服务的备用模型')
+      assert.strictEqual(logs[0].status, 200, '备用模型成功即任务成功')
+      assert.strictEqual(logs[0].fallback, true)
+      assert.strictEqual(logs[0].fallbackFrom, 'primary', '降级链路保持 主源 → 备用')
+      assert.strictEqual(logs[0].degraded, true)
     })
 
     test('不同 taskKey 互不影响；getTotalSize 统计与清空', () => {

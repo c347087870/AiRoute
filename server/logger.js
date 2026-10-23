@@ -147,9 +147,11 @@ function deriveTokensPerSec(enriched) {
   return enriched
 }
 
-// 合并一组同任务记录（入参按时间升序）：输入/模型取首条，Token 与积分累加，
-// 耗时 = 末条完成 - 首条开始，任一失败即失败（状态取首个非 200、错误取首个错误），
-// 账号取末条、ttfb 取首条非空；calls 记录上游调用次数；taskKey 为内部字段不出现在输出。
+// 合并一组同任务记录（入参按时间升序）：输入取首条、Token 与积分累加，
+// 耗时 = 末条完成 - 首条开始；模型与状态取末条 —— 反映真正服务这次请求的上游
+// （fallback 成功时显示备用模型与 200，而不是停在主源的 502），错误取首个非空，
+// 供「重试/降级」判定；账号取末条、ttfb 取首条非空；calls 记录上游调用次数；
+// taskKey 为内部字段不出现在输出。
 // 时间取末条完成时刻（timestamp 即完成时刻）：与「耗时」的口径一致，
 // 也让列表的展示时间与排序键同源 —— 取首条会让任务结束时刻比显示时间晚一整个耗时
 function mergeTaskEntries(list) {
@@ -159,7 +161,11 @@ function mergeTaskEntries(list) {
     const entry = list[i]
     acc = {
       ...acc,
-      status: acc.status !== 200 ? acc.status : entry.status,
+      // 最终结果取末条：模型与状态都跟着真正服务这次请求的上游走。
+      // 若沿用首条，主源失败 + 备用成功的任务会整行显示成主源的 502，
+      // 备用模型（如 workbuddy）的请求在最近请求里被完全吞掉
+      model: entry.model || acc.model,
+      status: entry.status === undefined ? acc.status : entry.status,
       error: acc.error || entry.error,
       fallback: acc.fallback || entry.fallback || undefined,
       fallbackFrom: acc.fallbackFrom || entry.fallbackFrom,

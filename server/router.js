@@ -883,6 +883,24 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
       } catch {
         /* 客户端已断开 */
       }
+      // 已对客户端输出过内容：不换源，但必须留一条失败日志 —— 否则「流式中途失败」
+      // 的请求在日志与用量里整条消失（渠道链路同位置有 logFailure）
+      logFailure({
+        ...wbBaseLog,
+        model: entry.ref,
+        status: err.status || 502,
+        error: err.message,
+        detail: err.body || undefined,
+        kind: err.kind || undefined,
+        code: err.code || undefined,
+        gatewayHint: err.gatewayHint || undefined,
+        responseTime: Date.now() - startTime,
+        fallback: isFallback,
+        fallbackFrom: isFallback ? primaryRef : undefined,
+        taskKey: err.taskKey || wbBaseLog.taskKey,
+        input: err.input || wbBaseLog.input,
+        stream: true
+      })
       return
     }
 
