@@ -64,7 +64,9 @@
 
     <!-- ==================== Tab 1：账号 ==================== -->
     <template v-if="tab === 'accounts'">
-      <div ref="gridEl" class="ch-grid">
+      <!-- 拖拽的命中判定挂在网格上（不是每张卡）：动画里的卡片视觉位置会偏移，
+           按事件目标判定会丢步，见 onDragOver 的注释 -->
+      <div ref="gridEl" class="ch-grid" @dragover="onDragOver" @drop.prevent="onDrop()">
         <!-- WorkBuddy：渠道包里的第 11 家（模型目录由 worker 里的适配器代理到主进程，
              补全由 router 直通主进程的 forwardChat）。积分构成 / 成长任务 / 定时任务
              那些低频页面留在 /workbuddy 子页面，不往卡片里塞。 -->
@@ -72,8 +74,7 @@
           class="card ch-card"
           :class="cardClass('workbuddy')"
           :style="{ order: cardOrderIndex('workbuddy') }"
-          @dragover="onDragOver('workbuddy', $event)"
-          @drop.prevent="onDrop()"
+          :data-card-id="'workbuddy'"
         >
           <div class="ch-card-head">
             <div class="ch-title">
@@ -206,8 +207,7 @@
           class="card ch-card"
           :class="cardClass(p.id)"
           :style="{ order: cardOrderIndex(p.id) }"
-          @dragover="onDragOver(p.id, $event)"
-          @drop.prevent="onDrop()"
+          :data-card-id="p.id"
         >
           <!-- 卡头：渠道名 + 状态徽标 + 渠道级开关 -->
           <div class="ch-card-head">
@@ -411,7 +411,7 @@
                   「快速开启」按模型家族一次打开被关掉的 Flash。
                 </li>
                 <li>
-                  测试是逐个真实调用（串行 + 间隔，避免触发上游风控），绿点通过、红点失败，
+                  测试是逐个真实调用（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控），绿点通过、红点失败，
                   悬停看延迟、错误与测试时间；传输层抖动会重试一次，业务错误和超时不重试。
                   结论存在本机，刷新和重启都还在，「清除标记」可以清空。
                 </li>
@@ -424,7 +424,7 @@
           <button
             class="btn-ghost btn-sm"
             :disabled="!!testRun || modelsLoading"
-            :title="`把每个渠道里已启动的模型逐个真实调用一次，通过的标绿点、失败的标红点（串行 + 间隔，避免触发上游风控）`"
+            :title="`把每个渠道里已启动的模型逐个真实调用一次，通过的标绿点、失败的标红点（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）`"
             @click="runModelTests('all')"
           >
             {{ testRun && testRun.scope === 'all' ? `测试中 ${testRun.done}/${testRun.total}` : '测试全部' }}
@@ -666,17 +666,22 @@ function cardOrderIndex(id) {
   return i < 0 ? DEFAULT_ORDER.length : i
 }
 
-// 拖动时实时重排（不是等放手才变）：划到哪张卡上，那张卡就让位。配合下面的 FLIP
-// 动画，看到的效果是卡片被「挤开」，而不是只给落点描个边。
+// 拖动时实时重排（不是等放手才变）：划到哪张卡上，那张卡立刻让位。
+// 拖拽期间不做 FLIP 动画（原因见 flipCards），卡片瞬时落位，命中判定才和看到的一致。
 const gridEl = ref(null)
 const dragId = ref('')
-let lastOverId = ''
 let orderDirty = false
+// 上一次真正换位时指针的位置：卡片高度不一致时，换位会让整列上下挪，
+// 指针原地不动也会落到另一张卡上 —— 不设这道闸就会自己往下窜好几格
+let lastSwapPoint = null
 
 const cardClass = id => ({ dragging: dragId.value === id })
 
 // FLIP：改 order 前先量一遍每张卡的位置，改完再量一遍，用差值做一次反向位移动画。
 // CSS grid 的重排是瞬间跳变的，没有这一步就只剩「闪一下」。
+//
+// 动画期间卡片的视觉位置与布局位置会短暂不一致，所以命中判定不能用事件目标或
+// getBoundingClientRect()（见 layoutBoxOf）；拖拽时动画短一点，跟手比好看重要。
 async function flipCards(mutate) {
   const grid = gridEl.value
   if (!grid) {
@@ -696,16 +701,25 @@ async function flipCards(mutate) {
     if (!dx && !dy) continue
     el.animate(
       [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
-      { duration: 160, easing: 'ease-out' }
+      { duration: dragId.value ? 120 : 160, easing: 'ease-out' }
     )
   }
 }
 
-// 拖拽过程中只改内存顺序，落手时才写 localStorage —— 否则每划过一张卡就写一次盘
+// 拖拽过程中只改内存顺序，落手时才写 localStorage —— 否则每划过一张卡就写一次盘。
+// 但落手事件不保证到来（拖出窗口/Electron 标题栏时 dragover/dragend 可能都不发），
+// 所以换位后再补一次去抖落盘：拖拽被系统打断也不会丢顺序。
 function persistOrder() {
   if (!orderDirty) return
   orderDirty = false
+  clearTimeout(persistTimer)
   localStorage.setItem(ORDER_KEY, JSON.stringify(cardOrder.value))
+}
+
+let persistTimer = null
+function schedulePersist() {
+  clearTimeout(persistTimer)
+  persistTimer = setTimeout(persistOrder, 300)
 }
 
 function resetCardOrder() {
@@ -718,8 +732,8 @@ function resetCardOrder() {
 
 function onDragStart(id, e) {
   dragId.value = id
-  lastOverId = ''
   orderDirty = false
+  lastSwapPoint = null
   e.dataTransfer.effectAllowed = 'move'
   // Firefox 不 setData 就不认这次拖拽
   e.dataTransfer.setData('text/plain', id)
@@ -728,23 +742,57 @@ function onDragStart(id, e) {
   if (card) e.dataTransfer.setDragImage(card, 24, 24)
 }
 
-function onDragOver(id, e) {
+// 卡片在**布局**里的盒子（不受 FLIP 动画的 transform 影响）。
+// 用 offsetLeft/offsetTop 而不是 getBoundingClientRect()：动画期间 rect 是
+// 「飞行中」的位置，拿它算落点会丢步，或者在两张卡之间反复横跳。
+function layoutBoxOf(el) {
+  const parent = el.offsetParent || gridEl.value
+  if (!parent) return null
+  const base = parent.getBoundingClientRect()
+  const left = base.left + el.offsetLeft - parent.scrollLeft
+  const top = base.top + el.offsetTop - parent.scrollTop
+  return { left, top, right: left + el.offsetWidth, bottom: top + el.offsetHeight }
+}
+
+// 命中判定挂在网格上而不是每张卡上：卡片在动画中会跑到指针下面，事件目标不可信；
+// 这里只认「指针的布局坐标落在哪张卡的布局盒子里」。
+function onDragOver(e) {
   if (!dragId.value) return
   e.preventDefault() // 不拦截就没有 drop 事件
   e.dataTransfer.dropEffect = 'move'
-  // lastOverId 是防抖：换位后鼠标往往正好落在被拖的那张卡上，不记住上一站
-  // 就会在两张卡之间来回换位、抖成一片
-  if (id === dragId.value || id === lastOverId) return
-  lastOverId = id
+  const grid = gridEl.value
+  if (!grid) return
+  // 指针没动过就不换位：只可能是上一步换位把整列挪了，不是用户的操作
+  if (lastSwapPoint) {
+    if (Math.abs(e.clientX - lastSwapPoint.x) < 4 && Math.abs(e.clientY - lastSwapPoint.y) < 4) return
+  }
+  let targetId = ''
+  for (const el of grid.querySelectorAll('.ch-card')) {
+    const id = el.dataset.cardId
+    // 落在被拖的卡片自己的槽位上 = 回到原位，不用动
+    if (!id || id === dragId.value) continue
+    const box = layoutBoxOf(el)
+    if (!box) continue
+    if (e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) {
+      targetId = id
+      break
+    }
+  }
+  if (!targetId) return
   const list = [...cardOrder.value]
   const from = list.indexOf(dragId.value)
-  const to = list.indexOf(id)
+  const to = list.indexOf(targetId)
   if (from < 0 || to < 0 || from === to) return
+  // 换位后把被拖的卡片放到目标的槽位，指针下面立刻变成被拖的卡片自己 ——
+  // 下一次 dragover 命中它就被上面那行挡掉，所以不需要额外的「防抖目标」记录；
+  // 反过来，那个记录会让「划回去」失效（目标 id 还没变），拖拽忽灵忽不灵就是这么来的
   list.splice(to, 0, list.splice(from, 1)[0])
+  lastSwapPoint = { x: e.clientX, y: e.clientY }
   flipCards(() => {
     savedOrder.value = list
   })
   orderDirty = true
+  schedulePersist()
 }
 
 function onDrop() {
@@ -756,7 +804,7 @@ function onDragEnd() {
   // （没有「按 Esc 撤销」：原生拖拽期间拿不到 keydown，硬做只会半吊子）
   persistOrder()
   dragId.value = ''
-  lastOverId = ''
+  lastSwapPoint = null
 }
 
 const tab = ref('accounts')
@@ -1645,13 +1693,14 @@ async function setAllModelsEverywhere(disabled) {
 //
 // 风控是这段代码的主要约束：每一条测试都是真实打到上游的请求，同一个账号短时间内
 // 连着几十次调用，轻则限流冷却、重则把渠道账号打进风控（要等几小时）。
-// 所以硬性保守，不提供「并发/快速」选项：
-//   · 并发恒为 1，绝对串行；
-//   · 每个之间留 400ms 基础间隔 + 0~300ms 随机抖动 —— 固定节奏本身就是特征；
-//   · 命中限流/风控文案后退避 8s 再继续；「池中无号 / 账号冷却」按同一类处理
+// 但风控是按上游/按账号池算的：A 家被打爆不影响 B 家。所以节奏按渠道分组，而非全局一刀切：
+//   · 组间并发：各渠道同时测，互不等待（一家在退避 8s，别家照常推进）；
+//   · 组内串行：同一渠道并发恒为 1，绝不同时打两个请求；
+//   · 组内每个之间留 400ms 基础间隔 + 0~300ms 随机抖动 —— 固定节奏本身就是特征；
+//   · 组内命中限流/风控文案后退避 8s 再继续；「池中无号 / 账号冷却」按同一类处理
 //     —— 上游 429 之后账号池会把号冷却，紧接着的请求只会拿到 no healthy account，
 //     只认 429 文案会让后面的模型继续硬打一个正在冷却的池子；
-//   · 连续 3 次命中就直接停下，宁可漏测也不要为了跑完把账号打爆。
+//   · 组内连续 3 次命中就停下这个渠道，别的渠道继续跑：宁可漏测，也不为了跑完把账号打爆。
 const TEST_GAP_MS = 400
 const TEST_JITTER_MS = 300
 const TEST_BACKOFF_MS = 8000
@@ -1659,14 +1708,15 @@ const TEST_MAX_THROTTLE_STREAK = 3
 const TEST_THROTTLE_RE = /(429|rate.?limit|too.?many|限流|请求过[于快]|频繁|风控|流控|no healthy account|账号池中|冷却)/i
 
 // 只测「已启动」的模型：关闭的本来就没在跑；标「已失效」的是上游下线判定，
-// 打过去必然失败，一排红点只会把真正的坏消息淹掉
+// 打过去必然失败，一排红点只会把真正的坏消息淹掉。
+// 带上 provider：节奏控制要按渠道分组（组内串行、组间并发）
 function testTargetsOf(providerIds) {
   const targets = []
   for (const group of modelGroups.value) {
     if (providerIds && !providerIds.includes(group.id)) continue
     for (const m of group.models) {
       if (m.disabled || m.dead) continue
-      targets.push({ key: group.id + '/' + m.id })
+      targets.push({ provider: group.id, key: group.id + '/' + m.id })
     }
   }
   return targets
@@ -1698,36 +1748,47 @@ async function runModelTests(scope) {
   // 本次真正测到的 key。历史绿点不算进这一轮的汇总，否则「通过 8」会把
   // 上一轮留下、这一轮根本没碰的模型也数进去
   const tested = []
+  // 被限流打断的渠道（每家各自判定，互不牵连）
+  const throttled = []
+  let userAborted = false
 
-  let throttleStreak = 0
-  let stopped = '' // '' = 跑完；'user' = 手动中止；'throttle' = 被限流打断
+  // 按渠道分组后并发跑：每组内部是严格的串行循环，退避/间隔/连续命中断路都在组内算
+  const byProvider = new Map()
+  for (const target of targets) {
+    if (!byProvider.has(target.provider)) byProvider.set(target.provider, [])
+    byProvider.get(target.provider).push(target)
+  }
+
   try {
-    for (const target of targets) {
-      if (testAbort.value) { stopped = 'user'; break }
-      let res
-      try {
-        res = await channelsTest({ model: target.key })
-      } catch (err) {
-        res = { ok: false, error: err.message }
-      }
-      // 只覆盖这个模型自己的旧结论，不动别的渠道/别的模型的绿点
-      recordTestResult(target.key, {
-        ok: res.ok === true,
-        latency: res.latency,
-        error: res.ok === true ? '' : (res.error || '未知原因')
-      })
-      tested.push(target.key)
-      testRun.value = { ...testRun.value, done: testRun.value.done + 1 }
+    await Promise.all([...byProvider].map(async ([provider, list]) => {
+      let throttleStreak = 0
+      for (const target of list) {
+        if (testAbort.value) { userAborted = true; return }
+        let res
+        try {
+          res = await channelsTest({ model: target.key })
+        } catch (err) {
+          res = { ok: false, error: err.message }
+        }
+        // 只覆盖这个模型自己的旧结论，不动别的渠道/别的模型的绿点
+        recordTestResult(target.key, {
+          ok: res.ok === true,
+          latency: res.latency,
+          error: res.ok === true ? '' : (res.error || '未知原因')
+        })
+        tested.push(target.key)
+        testRun.value = { ...testRun.value, done: testRun.value.done + 1 }
 
-      if (res.ok !== true && TEST_THROTTLE_RE.test(res.error || '')) {
-        throttleStreak += 1
-        if (throttleStreak >= TEST_MAX_THROTTLE_STREAK) { stopped = 'throttle'; break }
-        await testSleep(TEST_BACKOFF_MS)
-        continue
+        if (res.ok !== true && TEST_THROTTLE_RE.test(res.error || '')) {
+          throttleStreak += 1
+          if (throttleStreak >= TEST_MAX_THROTTLE_STREAK) { throttled.push(provider); return }
+          await testSleep(TEST_BACKOFF_MS)
+          continue
+        }
+        throttleStreak = 0
+        await testSleep(TEST_GAP_MS + Math.random() * TEST_JITTER_MS)
       }
-      throttleStreak = 0
-      await testSleep(TEST_GAP_MS + Math.random() * TEST_JITTER_MS)
-    }
+    }))
   } finally {
     testRun.value = null
     testAbort.value = false
@@ -1735,14 +1796,14 @@ async function runModelTests(scope) {
 
   const passed = tested.filter(key => modelTestResults.value[key]?.ok).length
   const failed = tested.length - passed
-  if (stopped === 'throttle') {
+  if (userAborted) {
+    showToast(`已中止：测了 ${tested.length}/${targets.length}，通过 ${passed}，失败 ${failed}`, 'error', 8000)
+  } else if (throttled.length) {
     showToast(
-      `连续 ${TEST_MAX_THROTTLE_STREAK} 次被限流，已停下（已测 ${tested.length}/${targets.length}，通过 ${passed}）`
-      + '；等一会儿再测，别继续硬打',
+      `${throttled.join('、')} 连续 ${TEST_MAX_THROTTLE_STREAK} 次被限流，已停下这些渠道`
+      + `（已测 ${tested.length}/${targets.length}，通过 ${passed}）；等一会儿再测，别继续硬打`,
       'error', 12000
     )
-  } else if (stopped === 'user') {
-    showToast(`已中止：测了 ${tested.length}/${targets.length}，通过 ${passed}，失败 ${failed}`, 'error', 8000)
   } else if (failed === 0) {
     showToast(`全部通过：${passed} 个模型`, 'success', 6000)
   } else {
@@ -2176,8 +2237,9 @@ onUnmounted(() => {
   cursor: grabbing;
 }
 
-/* 正在拖的卡片留个虚影，让用户知道哪张在动；落点靠其他卡片让位的动画表达，
-   不再额外描边（实时重排之后描边反而会和让位动作打架） */
+/* 正在拖的卡片留个虚影，让用户知道哪张在动；落点靠其他卡片即时让位表达，
+   不再额外描边（实时重排之后描边反而会和让位动作打架）。
+   拖拽期间不加过渡/动画：视觉位置必须等于布局位置，否则命中判定会落在飞行中的卡片上 */
 .ch-card.dragging {
   opacity: 0.45;
 }
