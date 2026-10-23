@@ -24,7 +24,11 @@ const channels = require('./channels')
 const channelSse = require('./channels/sse')
 const autoStrategy = require('./auto-strategy')
 const configIO = require('./config-io')
-
+const modelHealth = require('./model-health')
+const modelHealthAudit = require('./model-health-audit')
+const accountHealth = require('./account-health')
+// 「这次失败算谁的」判定（客户端取消 vs 上游卡死），见 server/failure-class.js
+const { isAbortFailure, classifyChannelFailure, stallMessage, CHANNEL_FIRST_CHUNK_TIMEOUT_MS } = require('./failure-class')
 const {
   getConfig,
   saveConfig,
@@ -94,13 +98,36 @@ function saveFallback(fallback) {
 
 // 构建本次请求要尝试的模型链：主模型 + 兜底模型
 function buildProviderChain(config, state, fallbackData, body) {
-  // 客户端点名了 auto 伪模型（/v1/models 里那三个）：这次请求按它的策略挑模型，
-  // 与面板里的激活模型无关。其它 model 值照旧被忽略 —— 保持「切换只在 AiRoute 里做」。
+  // 失活的模型不参与建链：它在 /v1/models 里已经不播报了，这里再放进来只会让
+  // 每个请求先撞一次已知会失败的墙。被跳过的引用原样带出去 —— 建链为空时
+  // 错误文案要能说清「不是没配，是失活了」。
+  const dropOffline = chain => {
+    const live = []
+    const skippedOffline = []
+    for (const entry of chain) {
+      if (modelHealth.isOffline(entry.ref)) skippedOffline.push(entry.ref)
+      else live.push(entry)
+    }
+    return { live, skippedOffline }
+  }
+
+  // 客户端点名了 auto 伪模型（/v1/models 里的 auto / auto-fast / auto-cheap /
+  // auto-least-conn）：这次请求按它的策略挑模型，与面板里的激活模型无关。
+  // 其它 model 值照旧被忽略 —— 保持「切换只在 AiRoute 里做」。
   const requested = typeof body?.model === 'string' ? body.model.trim() : ''
   const autoModel = autoStrategy.findAutoModel(requested)
   if (autoModel) {
     const chain = autoStrategy.buildChain(config, autoModel, fallbackData.model)
-    if (chain.length) return { chain, primaryRef: chain[0].ref, autoModel }
+    if (chain.length) {
+      const { live, skippedOffline } = dropOffline(chain)
+      // 候选全失活时返回空链：不能让已失活的候选继续顶上去
+      return {
+        chain: live,
+        primaryRef: (live[0] || chain[0]).ref,
+        autoModel,
+        skippedOffline
+      }
+    }
   }
 
   const chain = []
@@ -119,12 +146,18 @@ function buildProviderChain(config, state, fallbackData, body) {
     if (fb && fb.ref !== primary?.ref) chain.push(fb)
   }
 
-  return { chain, primaryRef: primary ? primary.ref : requestedRef }
+  const { live, skippedOffline } = dropOffline(chain)
+  // primaryRef 保留原始请求的引用（哪怕它已失活）：日志里「从哪个模型兜底过来」
+  // 需要这个真实来源，而不是过滤后的第一个
+  return { chain: live, primaryRef: primary ? primary.ref : requestedRef, skippedOffline }
 }
 
 function logFailure(entry) {
   logger.log(entry)
   tokenStats.recordFailure(entry.model)
+  // 连续失败计数：只有真实转发失败才计入失活判定。
+  // 用户主动取消（关页面、点停止）不是模型的问题 —— 判据见 failure-class.js
+  if (!isAbortFailure(entry)) modelHealth.noteFailure(entry.model, entry.error)
 }
 
 app.get('/api/fallback', (req, res) => {
@@ -152,18 +185,20 @@ async function handleRequest(req, res) {
     input: wbSession.extractInputText(rawBody) || undefined
   }
 
-  const { chain, primaryRef } = buildProviderChain(config, state, fallbackData, req.body)
+  const { chain, primaryRef, skippedOffline = [] } = buildProviderChain(config, state, fallbackData, req.body)
 
   if (!chain.length) {
+    const noChainMsg = skippedOffline.length
+      ? `模型已失活（${skippedOffline.join('、')}），在 Provider / 渠道账号页恢复后重试`
+      : '没有可用的 Provider 或模型，请先在 Provider 管理中配置'
     tokenStats.recordFailure(primaryRef || '')
     logger.log({
       ...baseLog,
       model: primaryRef || '',
       status: 0,
-      error: '没有可用的 Provider 或模型，请先在 Provider 管理中配置',
+      error: noChainMsg,
       responseTime: 0
     })
-    const noChainMsg = '没有可用的 Provider 或模型，请先在 Provider 管理中配置'
     const noChainBody = clientIsAnthropic
       ? wbAnthropic.errorBody(noChainMsg)
       : clientIsResponses
@@ -175,9 +210,26 @@ async function handleRequest(req, res) {
   const startTime = Date.now()
   let lastError = null
   let activeUpstreamStream = null // 当前活跃的通用 Provider 上游响应流（流式分支注册，重试时覆盖）
-  // 下游断开（客户端取消/超时）：立即断开上游，释放上游连接与账号并发
+  // 在途计数（auto-least-conn 的唯一数据源）：派发给哪个候选就记在它头上，
+  // 换下一个候选或请求收尾时释放。必须覆盖**所有**转发请求 —— 只统计 auto 请求的话，
+  // 手动激活模型上正在跑的并发对策略就是隐形的。流式转发注册完回调就返回，
+  // 所以释放挂在 res close 上（那也正好是「连接」在这里的字面含义）
+  let releaseHeld = null
+  const releaseCurrent = () => {
+    if (!releaseHeld) return
+    releaseHeld()
+    releaseHeld = null
+  }
+  res.on('close', releaseCurrent)
+  // 下游断开时取消尚未返回响应头的请求，避免上游仍在生成却已被算作空闲。
+  // clientDisconnected 供失败记账用：断开引起的 abort / stream error 不是模型的锅，
+  // 不能因为它文案里没有「取消」两个字就记进连续失败
+  const upstreamController = new AbortController()
+  let clientDisconnected = false
   res.on('close', () => {
     if (res.writableEnded) return // 正常收尾不算断开
+    clientDisconnected = true
+    upstreamController.abort()
     const s = activeUpstreamStream
     activeUpstreamStream = null
     if (s) {
@@ -190,6 +242,10 @@ async function handleRequest(req, res) {
   })
 
   for (const entry of chain) {
+    releaseCurrent()
+    // close 之后不能再占用下一候选：此时不会有第二次 close 来释放它。
+    if (clientGone(req, res)) return
+    releaseHeld = autoStrategy.beginAttempt(entry.ref)
     const provider = entry.provider
     const isFallback = entry.ref !== primaryRef
 
@@ -216,7 +272,10 @@ async function handleRequest(req, res) {
           code: err.code || undefined,
           responseTime: Date.now() - startTime,
           fallback: isFallback,
-          fallbackFrom: isFallback ? primaryRef : undefined
+          fallbackFrom: isFallback ? primaryRef : undefined,
+          // 渠道转发自己判定的「客户端取消」（见 handleChannelRequest）：
+          // 只有这种情况不算模型的连续失败
+          clientCancelled: err.clientCancelled === true
         })
         continue
       }
@@ -293,6 +352,7 @@ async function handleRequest(req, res) {
       try {
         const upstreamRes = await axios.post(url, reqBody, {
           headers,
+          signal: upstreamController.signal,
           timeout: 300000,
           responseType: 'stream',
           validateStatus: () => true
@@ -432,6 +492,7 @@ async function handleRequest(req, res) {
             }
           }
           tokenStats.recordTokens(entry.ref, streamUsage)
+          modelHealth.noteSuccess(entry.ref)
           logger.log({
             ...baseLog,
             model: entry.ref,
@@ -457,6 +518,8 @@ async function handleRequest(req, res) {
             responseTime: Date.now() - startTime,
             fallback: isFallback,
             fallbackFrom: isFallback ? primaryRef : undefined,
+            // 下游先断 → 我们 destroy 了上游流，这个 error 是善后产物，不算模型失败
+            clientCancelled: clientDisconnected,
             stream: true
           })
           if (closed) return
@@ -479,19 +542,23 @@ async function handleRequest(req, res) {
           error: streamErr.message,
           responseTime: Date.now() - startTime,
           fallback: isFallback,
-          fallbackFrom: isFallback ? primaryRef : undefined
+          fallbackFrom: isFallback ? primaryRef : undefined,
+          // axios 因 signal 被 abort 抛的是 CanceledError（文案带 cancel），
+          // 这里再显式标一次，避免依赖文案
+          clientCancelled: clientDisconnected
         })
         continue
       }
     }
 
     try {
-      const response = await axios.post(url, reqBody, { headers, timeout: 60000 })
+      const response = await axios.post(url, reqBody, { headers, timeout: 60000, signal: upstreamController.signal })
       const elapsed = Date.now() - startTime
       const usage = upstream.extractUsage(response.data, clientIsAnthropic) || upstream.emptyUsage()
 
       tokenStats.recordTokens(entry.ref, usage)
 
+      modelHealth.noteSuccess(entry.ref)
       logger.log({
         ...baseLog,
         model: entry.ref,
@@ -520,6 +587,9 @@ async function handleRequest(req, res) {
       })
     }
   }
+
+  releaseCurrent()
+  if (clientGone(req, res)) return
 
   // 状态码：优先用运行时给出的 status（模型不可用 400、池中无号 503 等），
   // 否则 500。此前一律 500，把「换个模型就行」说成了网关故障。
@@ -572,20 +642,23 @@ function isTransientTestError(error) {
 
 // 渠道连通性测试（带一次抖动重试）：第二次仍失败就原样抛出，让界面看到真实原因。
 // 调用方不用关心重试，重试与否只看错误是传输层抖动还是业务结论。
-async function channelTestCompletion(model) {
+// signal：界面点「停止」时由调用方中止。测试请求要能真的断开在途上游调用 ——
+// 只置一个「别再试下一个」的标志，卡住的请求仍会占着连接直到超时。
+async function channelTestCompletion(model, signal) {
   try {
-    return await channelTestAttempt(model)
+    return await channelTestAttempt(model, signal)
   } catch (err) {
+    if (signal?.aborted) throw err // 用户按了停止：不重试
     if (!isTransientTestError(err)) throw err
     await new Promise(resolve => setTimeout(resolve, TEST_TRANSIENT_RETRY_MS))
-    return channelTestAttempt(model)
+    return channelTestAttempt(model, signal)
   }
 }
 
 // 一次尝试。WorkBuddy 的补全不走 worker（它的适配器只提供目录，
 // 见 worker.mjs），所以这里必须分流 —— 否则测试面板对 WorkBuddy 永远报
 // 「适配器未实现」，而真实请求其实是通的。
-async function channelTestAttempt(model) {
+async function channelTestAttempt(model, signal) {
   const bare = String(model || '').replace(/^[^/]+\//, '')
   const realm = channelWorkbuddyRealm(model)
   if (realm) {
@@ -598,6 +671,8 @@ async function channelTestAttempt(model) {
       isStream: false,
       model: bare,
       realm,
+      // WorkBuddy 的转发没有独立 signal，中止靠这个回调在换号/重试之间跳出
+      isAborted: () => signal?.aborted === true,
       onDone: payload => { aggregated = payload }
     })
     if (!aggregated) throw new Error('WorkBuddy 未返回有效响应')
@@ -610,7 +685,7 @@ async function channelTestAttempt(model) {
   await rt.complete({
     model,
     openAi: { messages: [{ role: 'user', content: 'ping' }], max_tokens: 64, stream: false }
-  }, chunk => collector.push(chunk))
+  }, chunk => collector.push(chunk), signal)
   return collector.completion()
 }
 
@@ -637,9 +712,16 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       : { ...(req.body || {}) }
 
   // 客户端断开即取消上游：渠道包内部会释放该次请求占用的并发额度，
-  // 不取消会让用户在界面里点了停止、上游却继续跑完
+  // 不取消会让用户在界面里点了停止、上游却继续跑完。
+  // clientClosed 要和「上游卡死」区分开：两者都会让这次调用以 AbortError 失败，
+  // 但只有前者是用户的选择，不该计入模型的连续失败
   const controller = new AbortController()
-  const onClose = () => { if (!res.writableEnded) controller.abort() }
+  let clientClosed = false
+  const onClose = () => {
+    if (res.writableEnded) return
+    clientClosed = true
+    controller.abort()
+  }
   res.on('close', onClose)
 
   const recordUsage = usage => {
@@ -653,6 +735,18 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
   let started = false
   let emitter = null
   let collector = null
+  // 首帧看门狗：stalled 决定这次失败怎么记账 ——「等满上限还一个字都没有」
+  // 是模型/上游的问题，不能用「用户取消」搪塞过去（那会让它永远不失活）
+  let stallTimer = null
+  let stalled = false
+  // 有没有收到过任何字节：看门狗与上游「擦边」时用它纠正判据 ——
+  // 计时器响的同时数据刚好到了，说明上游是活的，不能按卡死记账
+  let gotChunk = false
+  const clearStallTimer = () => {
+    if (!stallTimer) return
+    clearTimeout(stallTimer)
+    stallTimer = null
+  }
   const startSse = () => {
     if (started) return
     started = true
@@ -674,6 +768,16 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
     }
   }
 
+  // 首帧看门狗：流式与非流式共用一个判据 —— 上限内上游一个字节都没给，就是卡住了。
+  // 收到第一段内容立刻撤掉：之后的长生成不算超时，那是模型在正常干活。
+  // 中止理由走 abort reason：渠道包会把它原样抛出来，外层因此既知道「为什么失败」，
+  // 也不会把它误判成用户取消（旧实现对 AbortError 一律当取消，坏模型永远不失活）。
+  stallTimer = setTimeout(() => {
+    stalled = true
+    controller.abort(new Error(stallMessage(CHANNEL_FIRST_CHUNK_TIMEOUT_MS)))
+  }, CHANNEL_FIRST_CHUNK_TIMEOUT_MS)
+  if (stallTimer.unref) stallTimer.unref()
+
   try {
     if (isStream) {
       // Anthropic / Responses 客户端：把 OpenAI 帧喂给既有转换器；OpenAI 客户端直写
@@ -686,6 +790,9 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       collector = writer.collector
 
       await rt.complete({ model: entry.model.id, openAi }, chunk => {
+        // 有字节就说明上游活着；哪怕这一帧还拼不出完整帧（frames 为空）也撤掉看门狗
+        gotChunk = true
+        clearStallTimer()
         const frames = writer.write(chunk)
         if (!frames) return
         startSse()
@@ -700,6 +807,7 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
           res.write(frames)
         }
       }, controller.signal)
+      clearStallTimer()
 
       if (collector.failed) throw Object.assign(new Error('渠道流未正常收尾'), { status: 502 })
       startSse()
@@ -712,6 +820,7 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       res.end()
 
       const usage = recordUsage(collector.usage)
+      modelHealth.noteSuccess(entry.ref)
       logger.log({
         model: entry.ref,
         status: 200,
@@ -730,10 +839,16 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
 
     // 非流式：聚合后一次返回
     collector = channelSse.createCollector(entry.ref)
-    await rt.complete({ model: entry.model.id, openAi }, chunk => collector.push(chunk), controller.signal)
+    await rt.complete({ model: entry.model.id, openAi }, chunk => {
+      // 同样按「有没有字节」判活：非流式不代表上游可以在首帧上限内一声不吭
+      gotChunk = true
+      clearStallTimer()
+      collector.push(chunk)
+    }, controller.signal)
     if (collector.failed) throw Object.assign(new Error('渠道生成未正常收尾'), { status: 502 })
     const completion = collector.completion()
     const usage = recordUsage(collector.usage)
+    modelHealth.noteSuccess(entry.ref)
     logger.log({
       model: entry.ref,
       status: 200,
@@ -768,14 +883,29 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
         inputTokens: stat.input,
         outputTokens: stat.output,
         totalTokens: upstream.usageTotalOrNull(stat),
+        // 用户在生成中途点了停止：收尾归收尾，不该记成模型的连续失败
+        clientCancelled: clientClosed,
         stream: true
       })
       return
     }
-    // 渠道包把上游状态码放在 statusCode 上（模型不存在 404、无可用账号 503 等）；
-    // 一律压成 500 会让「换个模型就行」看起来像网关故障
-    throw Object.assign(err, { status: err.status || err.statusCode || 502 })
+    // 没发出任何帧就失败：交给 failure-class 判定归属（上游卡死 / 用户取消 / 真报错）。
+    // 归属决定两件事 —— 回给客户端的状态码，以及这次算不算模型的一次连续失败
+    const verdict = classifyChannelFailure({
+      started: false,
+      // 看门狗响了但期间其实收到过字节（擦边竞态）：上游是活的，不按卡死记账
+      stalled: stalled && !gotChunk,
+      clientClosed,
+      elapsedMs: Date.now() - startTime,
+      error: err
+    })
+    throw Object.assign(verdict.message ? new Error(verdict.message) : err, {
+      status: verdict.status,
+      ...(verdict.kind ? { kind: verdict.kind } : {}),
+      ...(verdict.clientCancelled ? { clientCancelled: true } : {})
+    })
   } finally {
+    clearStallTimer()
     res.removeListener('close', onClose)
   }
 }
@@ -911,6 +1041,7 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
       if (out) res.write(out)
     }
     tokenStats.recordTokens(entry.ref, streamUsage)
+    modelHealth.noteSuccess(entry.ref, fwd?.credits)
     logger.log({
       ...wbBaseLog,
       model: entry.ref,
@@ -958,6 +1089,7 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
 
   const usage = upstream.extractUsage(aggregated, false) || upstream.emptyUsage()
   tokenStats.recordTokens(entry.ref, usage)
+  modelHealth.noteSuccess(entry.ref, fwd?.credits)
   logger.log({
     ...wbBaseLog,
     model: entry.ref,
@@ -993,8 +1125,19 @@ app.get('/v1/models', (req, res) => {
   const seen = new Set()
   const configured = []
 
-  for (const { model } of listModelRefs(config)) {
+  // 失活模型不再播报：列表里出现它，客户端就会选中它，然后必然失败。
+  // 同一个模型 id 可能挂在多个源上（例如同一模型建两次），只要还有一个
+  // 可用的源就照常播报，只有「所有来源都失活」才隐藏。
+  const offlineRefs = modelHealth.offlineRefs()
+  const refs = listModelRefs(config)
+  const liveIds = new Set(refs.filter(item => !offlineRefs.has(item.ref)).map(item => item.model.id))
+  const offlineOnlyIds = new Set(
+    refs.filter(item => offlineRefs.has(item.ref) && !liveIds.has(item.model.id)).map(item => item.model.id)
+  )
+
+  for (const { model } of refs) {
     if (seen.has(model.id)) continue
+    if (offlineOnlyIds.has(model.id)) continue
     seen.add(model.id)
     configured.push({ id: model.id, object: 'model', created: 0, owned_by: 'airoute' })
   }
@@ -1010,7 +1153,7 @@ app.get('/v1/models', (req, res) => {
     id, object: 'model', created: 0, owned_by: 'airoute'
   }))
 
-  // 三个 auto 伪模型排在配置模型之后、别名之前：客户端能选到它们，
+  // 几个 auto 伪模型排在配置模型之后、别名之前：客户端能选到它们，
   // 但不会挤掉真实模型（有些客户端把列表第一项当默认值）
   const autoModels = autoStrategy.listAutoModels().filter(item => !seen.has(item.id))
 
@@ -1143,6 +1286,52 @@ app.post('/api/state', (req, res) => {
   }
   saveState({ current })
   res.json({ current })
+})
+
+// ==================== 模型失活 ====================
+//
+// 失活由两处写入：转发路径的连续失败（model-health.noteFailure），以及定时审计
+// （余额不足一次请求 / 渠道没有可用账号）。界面只读 + 手动恢复。
+// 恢复只清标记：配置、路由规则、兜底里的引用都没动过，恢复后立即重新参与路由。
+
+// 台账记录 + 配置里解析出的 modelId（界面按「渠道 id + 模型 id」分组匹配）。
+// 让前端自己拼 ref 会在用户改过源名时对不上。
+function healthListView() {
+  const config = getConfig()
+  return modelHealth.list().map(item => {
+    const resolved = resolveRef(config, item.ref)
+    if (!resolved) return item
+    return { ...item, modelId: resolved.modelId, providerType: resolved.provider.type || '' }
+  })
+}
+
+app.get('/api/model-health', (req, res) => {
+  res.json({
+    ok: true,
+    models: healthListView(),
+    auditIntervalMs: modelHealthAudit.AUDIT_INTERVAL_MS,
+    offlineAfterFailures: modelHealth.OFFLINE_AFTER_FAILURES
+  })
+})
+
+// 手动触发一轮审计：刚充完值/刚启用账号时，不必等下一轮定时器
+app.post('/api/model-health/audit', async (req, res) => {
+  const result = await modelHealthAudit.audit()
+  res.json({ ...result, models: healthListView() })
+})
+
+app.post('/api/model-health/revive', (req, res) => {
+  const ref = typeof req.body?.ref === 'string' ? req.body.ref.trim() : ''
+  if (!ref) return res.status(400).json({ error: '缺少模型引用' })
+  if (!resolveRef(getConfig(), ref)) return res.status(404).json({ error: `模型不存在: ${ref}` })
+  modelHealth.revive(ref)
+  res.json({ ok: true, ref, state: modelHealth.stateOf(ref) })
+})
+
+// 账号被上游禁用的原因（AiRoute 侧补记的）：渠道包的 account.update 只有
+// enabled，没有地方存「为什么停用」，所以界面上的标签文案从这里取。
+app.get('/api/account-health', (req, res) => {
+  res.json({ ok: true, accounts: accountHealth.list() })
 })
 
 // ==================== 更新检查与下载 ====================
@@ -1313,6 +1502,11 @@ app.post('/api/providers/:name/test', async (req, res) => {
   const requestedId = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
   const model = (requestedId && provider.models.find(m => m.id === requestedId)) || provider.models[0]
 
+  // 「停止」：前端 abort 请求 → res 关闭 → 中止在途上游调用。
+  // 不主动 removeListener：res 是一次性的，注册完随请求一起回收。
+  const controller = new AbortController()
+  res.on('close', () => { if (!res.writableEnded) controller.abort() })
+
   // Channel 类型：交给渠道包的适配器发一次真实短对话（换号与限流在包内闭环）
   if (models.isChannelProvider(provider)) {
     const start = Date.now()
@@ -1321,8 +1515,9 @@ app.post('/api/providers/:name/test', async (req, res) => {
     const candidates = requestedId ? [model.id] : provider.models.slice(0, 3).map(m => m.id)
     const tried = []
     for (const id of candidates) {
+      if (controller.signal.aborted) return
       try {
-        const completion = await channelTestCompletion(id)
+        const completion = await channelTestCompletion(id, controller.signal)
         const message = completion.choices?.[0]?.message || {}
         return res.json({
           ok: true,
@@ -1332,6 +1527,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
           tried
         })
       } catch (err) {
+        if (controller.signal.aborted) return
         tried.push({ model: id, error: err.message })
       }
     }
@@ -1351,6 +1547,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
         model: model.id,
         // 按该源区域测试：国内源不能用国际账号验证（反之亦然）
         realm: models.providerRegion(provider),
+        isAborted: () => controller.signal.aborted,
         onDone: payload => {
           aggregated = payload
         }
@@ -1370,6 +1567,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
         totalTokens: upstream.usageTotalOrNull(usage)
       })
     } catch (err) {
+      if (controller.signal.aborted) return
       return res.json({ ok: false, error: err.message, latency: Date.now() - start, model: model.id })
     }
   }
@@ -1390,7 +1588,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
       return res.json({ ok: false, error: '未配置可用的端点 URL', latency: 0 })
     }
     const headers = upstream.resolveHeaders(provider, testAnthropic)
-    const response = await axios.post(url, testBody, { headers, timeout: 30000 })
+    const response = await axios.post(url, testBody, { headers, timeout: 30000, signal: controller.signal })
     const latency = Date.now() - start
     const usage = upstream.extractUsage(response.data, testAnthropic) || upstream.emptyUsage()
 
@@ -1408,6 +1606,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
     })
   } catch (err) {
     const latency = Date.now() - start
+    if (controller.signal.aborted) return
     const status = err.response?.status || 0
     const message = err.response?.data?.error?.message || err.message || '连接失败'
     res.json({ ok: false, error: message, status, latency, model: model.id })
@@ -2604,6 +2803,11 @@ app.post('/api/channels/rpc', async (req, res) => {
     if (typeof body.method === 'string' && /^(?:account|login|provider|model|credits)\./.test(body.method)) {
       scheduleChannelSync()
     }
+    // 改账号/积分的动作（登录、删号、领积分）会让失活判定立刻变；只挑这类方法补跑
+    // 一轮审计 —— account.list / credits.balances 是轮询读取，触发它们等于每 5 秒审一次
+    if (typeof body.method === 'string' && /^(?:account\.(?:create|delete|reset|resetAll|update|reorder)|credits\.claimAll)$/.test(body.method)) {
+      modelHealthAudit.audit().catch(() => { /* 审计失败不影响这次 RPC 的结果 */ })
+    }
     res.json({ ok: true, result })
   } catch (err) {
     const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 400
@@ -2620,6 +2824,15 @@ app.post('/api/channels/rpc', async (req, res) => {
 // 立刻正常，次日该模型又恢复正常 —— 即失败可能是上游侧的临时状态）。只试第一个
 // 会把「某个模型此刻不可调用」误报成「这个渠道不通」，而用户没有别的手段分辨。
 const TEST_MODEL_CANDIDATES = 3
+
+// 渠道包的模型 id（gemini/x）→ AiRoute 引用（channels/gemini/x）。
+// 目录没同步上、或用户把渠道源改名时可能对不上；对不上就不记账，
+// 免得在台账里留下一个配置里根本不存在的孤儿引用。
+function channelModelRef(modelId) {
+  const ref = `${CHANNEL_PROVIDER_ID}/${modelId}`
+  return resolveRef(getConfig(), ref) ? ref : ''
+}
+
 app.post('/api/channels/test', async (req, res) => {
   const rt = channels.getRuntime()
   if (!rt) return res.status(503).json({ ok: false, error: '渠道运行时未初始化' })
@@ -2665,11 +2878,20 @@ app.post('/api/channels/test', async (req, res) => {
   }
   const start = Date.now()
   const tried = []
+  // 「停止」：前端 abort 请求 → res 关闭 → 中止在途上游调用，并在候选之间跳出。
+  // 两者都要有 —— 只跳出循环的话，正在跑的那次调用仍会占着连接直到超时。
+  const controller = new AbortController()
+  res.on('close', () => { if (!res.writableEnded) controller.abort() })
   for (const model of candidates) {
+    if (controller.signal.aborted) return
     const attemptStart = Date.now()
     try {
-      const completion = await channelTestCompletion(model)
+      const completion = await channelTestCompletion(model, controller.signal)
       const message = completion.choices?.[0]?.message || {}
+      // 测试通过 = 这个模型此刻真的能调：顺手清掉「连续失败」的失活标记，
+      // 否则用户只能去别处点恢复
+      const ref = channelModelRef(model)
+      if (ref) modelHealth.noteSuccess(ref)
       return res.json({
         ok: true,
         model,
@@ -2681,6 +2903,7 @@ app.post('/api/channels/test', async (req, res) => {
         tried
       })
     } catch (err) {
+      if (controller.signal.aborted) return
       tried.push({ model, error: err.message })
     }
   }
@@ -2702,3 +2925,5 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || engine.getServerConfig().port || 3000
 listen(PORT)
+// 启动即审一轮，之后按间隔轮转：进程重启后余额与账号状态可能已经变过
+modelHealthAudit.start()

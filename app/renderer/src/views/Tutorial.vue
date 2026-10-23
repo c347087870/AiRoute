@@ -1,6 +1,12 @@
 <template>
   <div class="tutorial">
-    <!-- 一键接入：最常用的动作，放在页面最上方 -->
+    <!-- 打赏区域：位于页面开头，居中展示二维码与说明文字 -->
+    <div class="donate">
+      <img class="donate-img" :src="donateImg" alt="微信打赏二维码" />
+      <p class="donate-text">如果 AiRoute 帮到了你，欢迎扫码打赏支持作者</p>
+    </div>
+
+    <!-- 一键接入：收款码下方，最常用的动作 -->
     <div class="quick-start">
       <div class="quick-start-text">
         <h2>大模型一键接入</h2>
@@ -9,12 +15,6 @@
       <button class="btn-primary copy-prompt-btn" @click="copySetupPrompt">
         {{ copyState === 'ok' ? '已复制，去粘贴给 AI' : copyState === 'fail' ? '复制失败，请检查剪贴板权限' : '复制一键接入提示词' }}
       </button>
-    </div>
-
-    <!-- 打赏区域：位于页面开头，居中展示二维码与说明文字 -->
-    <div class="donate">
-      <img class="donate-img" :src="donateImg" alt="微信打赏二维码" />
-      <p class="donate-text">如果 AiRoute 帮到了你，欢迎扫码打赏支持作者</p>
     </div>
 
     <div class="tutorial-content">
@@ -40,7 +40,7 @@
         <p class="note">API Key 不校验，任意非空字符串均可。多数客户端（如 Claude Code）地址填到端口即可，工具会自己拼路径；需要完整 URL 时用 <code>/v1/messages</code>（Anthropic）、<code>/v1/chat/completions</code> 或 <code>/v1/responses</code>（OpenAI）。其他设备请用「局域网」地址。端口在「设置」里改，点「重启 Server」生效。</p>
 
         <h3>2. 策略 pseudo 模型</h3>
-        <p>模型名填 <code>auto-fast</code>（延迟优先）、<code>auto-cheap</code>（成本优先）或 <code>auto</code>（两者加权），该请求就按策略自动挑模型，不必改 AiRoute 的激活模型。一次请求最多顺序试 4 个模型，全部失败后走兜底模型；没有历史数据时退化为配置顺序。</p>
+        <p>模型名填 <code>auto-fast</code>（延迟优先）、<code>auto-cheap</code>（成本优先）、<code>auto</code>（两者加权）或 <code>auto-least-conn</code>（并发优先，挑此刻在途最少的），该请求就按策略自动挑模型，不必改 AiRoute 的激活模型。一次请求最多顺序试 4 个模型，全部失败后走兜底模型；没有历史数据时退化为配置顺序。并发优先那一档不看历史日志，改用实时在途数——同时跑多个任务时前几档会把请求一起压给同一个「历史最快」的模型，这一档会摊开。</p>
       </section>
 
       <!-- 二、核心概念 -->
@@ -56,7 +56,7 @@
         <h2>三、功能详解</h2>
 
         <h3>状态面板</h3>
-        <p>当前模型、Router 状态、今日 / 近 35 天请求数；Token 用量（输入 / 缓存读 / 缓存写 / 输出）与各模型明细；按 Provider 分组的模型芯片「快速切换」；最近 5 条请求（含耗时、Token、Fallback）。</p>
+        <p>Router 状态、今日 / 近 35 天请求数；Token 用量（输入 / 缓存读 / 缓存写 / 输出）与各模型明细；按 Provider 分组的模型芯片「快速切换」；最近 5 条请求（含耗时、Token、Fallback）。</p>
 
         <h3>模型切换</h3>
         <p>四处任选，状态实时同步、对所有客户端立即生效：侧边栏底部下拉框、状态面板模型芯片、托盘右键菜单、Provider 页模型芯片上的「切换」。</p>
@@ -169,7 +169,7 @@ onMounted(loadConfig)
 <style scoped>
 
 
-/* 一键接入：页面最上方的操作单元，左侧说明、右侧按钮，窄窗口自动换行 */
+/* 一键接入：收款码下方的操作单元，左侧说明、右侧按钮，窄窗口自动换行 */
 .quick-start {
   display: flex;
   align-items: center;
@@ -219,7 +219,7 @@ onMounted(loadConfig)
   }
 }
 
-/* 打赏区域：标题下方居中展示二维码与说明文字 */
+/* 打赏区域：页面开头居中展示二维码与说明文字 */
 .donate {
   display: flex;
   flex-direction: column;

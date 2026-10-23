@@ -12,6 +12,7 @@ const path = require('path')
 const fs = require('fs-extra')
 const paths = require('../paths')
 const workbuddy = require('../workbuddy/runtime')
+const accountHealth = require('../account-health')
 const { createChannelRuntime } = require('./runtime')
 
 // 渠道数据目录与代码目录分开：server/channels 是随包分发的代码，
@@ -83,7 +84,56 @@ async function refreshModels() {
 
 async function rpc(body, signal) {
   if (!runtime) throw new Error('渠道运行时未初始化')
-  return runtime.rpc(body, signal)
+  const result = await runtime.rpc(body, signal)
+  // 等证据落定（最多一次池写入）再返回：界面测完账号立刻 reload，才看得到
+  // 「已停用」的新状态，而不是要等下一次轮询
+  await afterRpc(body, result)
+  return result
+}
+
+// 一次 RPC 之后顺手处理「账号被上游禁用」的证据。
+//
+// 为什么收口在这里：渠道包的调用方有好几处（界面上的测试、余额审计、账号列表），
+// 而证据只随其中几个方法的返回出现 —— 分散到各调用方去判，漏一处就等于
+// 「某种情况下不标记」。
+async function afterRpc(body, result) {
+  const method = typeof body?.method === 'string' ? body.method : ''
+  const payload = body?.payload && typeof body.payload === 'object' ? body.payload : {}
+  // 用户重新启用账号：清掉旧的禁用原因，否则标签会一直挂在他刚打开的那个号上
+  if (method === 'account.update' && payload.patch && payload.patch.enabled === true) {
+    accountHealth.clear(payload.accountId)
+    return
+  }
+  // 账号被删掉：台账里那条原因已经没有归属对象了
+  if (method === 'account.delete' && result && result.ok === true) {
+    accountHealth.clear(payload.accountId)
+    return
+  }
+  for (const { accountId, reason } of accountHealth.evidenceOf(method, payload, result)) {
+    try {
+      await markAccountDisabled(accountId, reason)
+    } catch (error) {
+      // 标记是补救动作：失败只记日志，不能把这次 RPC 的结果推翻
+      console.error(`[aiRoute] 自动停用账号 ${accountId} 失败:`, error.message)
+    }
+  }
+}
+
+// 在池里停用账号，并把原因记进 AiRoute 的台账（渠道包的 patch 没有原因字段）。
+// 用 runtime.rpc 直连而不走上面的 rpc：走 rpc 会让这次「停用」再触发一遍证据检查。
+// 先停用、后记账：停用失败就什么都不记，界面上不能出现「已禁用」但勾选框还开着。
+const pendingDisable = new Set()
+
+async function markAccountDisabled(accountId, reason) {
+  // 已经记过原因 / 正在停用就不重复做：账号列表、余额查询会被反复调用
+  if (accountHealth.reasonOf(accountId) || pendingDisable.has(accountId)) return
+  pendingDisable.add(accountId)
+  try {
+    await runtime.rpc({ method: 'account.update', payload: { accountId, patch: { enabled: false } } })
+    accountHealth.record(accountId, reason)
+  } finally {
+    pendingDisable.delete(accountId)
+  }
 }
 
 async function shutdown() {

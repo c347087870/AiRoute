@@ -237,6 +237,7 @@ import { ref, computed, onMounted } from 'vue'
 import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats, clearTokenStats } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
 import { formatNumber, toLocalDateKey } from '../utils/format.js'
 
 // 时间维度选项
@@ -486,9 +487,10 @@ function sumBy(list, key) {
   return list.reduce((sum, item) => sum + (Number(item[key]) || 0), 0)
 }
 
-// 加载时间段数据
-async function loadPeriodData(period) {
-  loading.value = true
+// 加载时间段数据。silent：轮询触发时不拉 loading（只用于禁用「清空」按钮，
+// 每 5 秒闪一下会让按钮看起来不可用）
+async function loadPeriodData(period, { silent = false } = {}) {
+  if (!silent) loading.value = true
   try {
     if (period === 'today') {
       // 今天：获取按小时的数据，必须用本地日期键，UTC 日期会与服务端统计口径错开一天
@@ -517,8 +519,9 @@ async function loadPeriodData(period) {
     modelStatsData.value = allStats
   } catch (err) {
     console.error('Failed to load token stats:', err)
+  } finally {
+    if (!silent) loading.value = false
   }
-  loading.value = false
 }
 
 // 刷新数据
@@ -526,8 +529,9 @@ async function refreshData() {
   await loadPeriodData(selectedPeriod.value)
 }
 
-// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
-usePageActions({ refresh: refreshData, loading })
+// 顶部栏的「实时」角标由布局渲染；数据靠 5 秒轮询保持最新
+usePageActions({ live: true })
+usePolling(() => loadPeriodData(selectedPeriod.value, { silent: true }))
 
 // 清空全部 Token 统计（二次确认，不可恢复；状态面板请求数同源一并归零）
 async function clearStats() {

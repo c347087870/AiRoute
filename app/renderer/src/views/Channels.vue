@@ -1,60 +1,41 @@
 <template>
   <div class="ch-page">
-    <!-- 页面工具条：说明入口 + 汇总统计（刷新在顶部栏） -->
+    <!-- 页面工具条：视图切换在左、汇总统计与一键签到在右（数据自动刷新） -->
     <div class="page-toolbar between">
-      <div class="ch-heading">
-        <button
-          class="ch-help"
-          :class="{ active: showNote }"
-          :aria-expanded="showNote"
-          title="页面说明"
-          @click.stop="showNote = !showNote"
-        >
-          <AppIcon name="help" />
-        </button>
-        <div v-if="showNote" class="ch-note-pop">
-          <ul class="ch-note-list">
-            <li>
-              登录后该渠道的模型会以 <code>provider/model</code> 的形式出现在 <code>channels</code> 源里
-              （配置引用形如 <code>channels/gemini/gemini-2.5-pro</code>）。
-            </li>
-            <li>
-              没登录账号的渠道不播报模型，所以登录完要在「状态面板」里选中它
-              （或让路由规则指向 <code>channels/…</code>）才会真正转发。
-            </li>
-            <li>
-              WorkBuddy 同样是这里的一家（两个 provider：<code>workbuddy</code> 国内版 /
-              <code>workbuddy-global</code> 国际版），模型引用形如 <code>channels/workbuddy/auto</code>；
-              它的账号与积分由主进程的账号池管理，所以卡片上的按钮走 <code>/api/workbuddy/*</code>。
-            </li>
-            <li>拖动卡片标题左侧的手柄可以调整顺序（拖动中按 Esc 取消），顺序只存在本机。</li>
-            <li>
-              账号行左侧的外链图标会用系统浏览器打开该渠道的个人中心 / 用量明细页（没填过的渠道用内置默认，
-              Raccoon 没有默认；点卡片上的齿轮可以改成任意地址，改过的链接也只存本机）。
-            </li>
-          </ul>
-        </div>
-      </div>
+      <SegmentedTabs
+        :model-value="tab"
+        :options="VIEW_TABS"
+        label="渠道账号页视图切换"
+        size="sm"
+        @update:model-value="switchTab"
+      />
       <div class="header-actions">
         <div class="ch-stats">
           <span class="stat">渠道 <b>{{ PROVIDERS.length }}</b></span>
           <span class="stat ok">账号 <b>{{ accounts.length + wbList.length }}</b></span>
           <span class="stat">模型 <b>{{ modelCount }}</b></span>
         </div>
-        <button v-if="isCustomOrder" class="btn-ghost btn-sm" title="回到渠道包自带的顺序" @click="resetCardOrder">
-          恢复默认顺序
+        <button
+          class="btn-primary btn-sm"
+          :disabled="checkinAll.running || creditBusy !== '' || wbBusyAll !== '' || checkinTotal === 0"
+          :title="checkinTotal === 0
+            ? '没有可签到的账号'
+            : `依次对支持签到的 ${checkinTotal} 处（渠道 + WorkBuddy 国内版）签到：逐渠道顺序执行，避免触发上游风控；没有签到端点的渠道自动跳过`"
+          @click="runCheckinAll"
+        >
+          {{ checkinAll.running ? `签到中… ${checkinAll.done}/${checkinAll.total}` : '一键签到' }}
         </button>
       </div>
+    </div>
+
+    <!-- 一键签到的汇总：明细在各卡片里（渠道是「领取结果」，WorkBuddy 在卡片底部） -->
+    <div v-if="checkinSummary" class="ch-checkin-tip" :class="{ bad: checkinFailed }">
+      {{ checkinSummary }}
     </div>
 
     <!-- 运行时没起来时所有 RPC 都会失败，先把原因摆出来，别让用户对着空列表猜 -->
     <div v-if="runtimeState !== 'ready'" class="ch-alert">
       渠道运行时未就绪（{{ runtimeState }}）{{ runtimeError ? '：' + runtimeError : '' }}
-    </div>
-
-    <div class="tabs">
-      <button class="tab" :class="{ active: tab === 'accounts' }" @click="switchTab('accounts')">账号</button>
-      <button class="tab" :class="{ active: tab === 'models' }" @click="switchTab('models')">模型</button>
     </div>
 
     <!-- ==================== Tab 1：账号 ==================== -->
@@ -85,6 +66,19 @@
             </div>
             <div class="ch-head-right">
               <span class="badge" :class="wbBadgeClass">{{ wbBadgeText }}</span>
+              <!-- 渠道级开关：与其它卡片同一个位置、同一套语义。
+                   WorkBuddy 走 /api/workbuddy/* 那套端点，没有批量接口，只能逐账号调，
+                   所以这里直接改「参不参与轮转」，冷却 / 熔断与模型开关都不动 -->
+              <label class="ch-switch" :title="wbSwitchTitle">
+                <input
+                  type="checkbox"
+                  class="ch-check"
+                  :checked="wbSwitchChecked"
+                  :disabled="wbBusyAll !== '' || !wbList.length"
+                  @change="wbToggleProvider($event)"
+                />
+                <span class="ch-switch-text">{{ !wbList.length ? '无账号' : wbAllDisabled ? '已停用' : '启用' }}</span>
+              </label>
             </div>
           </div>
 
@@ -92,6 +86,17 @@
           <div v-else-if="!wbList.length" class="empty">还没有账号</div>
           <div v-else class="ch-accounts">
             <div v-for="acct in wbList" :key="acct.uid" class="ch-account">
+              <!-- 行内启停：和其它渠道同一个勾选框、同一个位置，点一下即生效。
+                   冷却 / 熔断不算停用（那是上游暂时不可用），所以勾选框只看 disabled -->
+              <label class="ch-check-wrap" :title="acct.disabled ? '已停用：不参与选号' : '启用中'">
+                <input
+                  type="checkbox"
+                  class="ch-check"
+                  :checked="!acct.disabled"
+                  :disabled="wbBusyAll !== '' || wbBusy === acct.uid + ':enable'"
+                  @change="wbToggleAccount(acct, $event)"
+                />
+              </label>
               <div class="ch-account-main">
                 <div class="ch-account-name">
                   {{ acct.nickname || acct.uid.slice(0, 8) }}
@@ -114,7 +119,7 @@
                 </button>
                 <button
                   class="btn-ghost btn-sm"
-                  :disabled="wbBusy === acct.uid + ':checkin' || acct.realm === 'global'"
+                  :disabled="wbBusy === acct.uid + ':checkin' || acct.realm === 'global' || checkinAll.running"
                   :title="acct.realm === 'global' ? '国际版没有签到端点' : ''"
                   @click="wbCheckin(acct)"
                 >
@@ -127,9 +132,9 @@
                 >
                   {{ wbBusy === acct.uid + ':balance' ? '查询中…' : '余额' }}
                 </button>
+                <!-- 解冻与启停是两件事：冷却 / 熔断是上游暂时不可用，
+                     仍算「启用」，所以它单列一个按钮，不塞进勾选框 -->
                 <button v-if="acct.cooling" class="btn-ghost btn-sm" @click="wbRevive(acct)">解冻</button>
-                <button v-else-if="acct.disabled" class="btn-ghost btn-sm" @click="wbEnable(acct)">恢复</button>
-                <button v-else class="btn-ghost btn-sm" @click="wbDisable(acct)">禁用</button>
                 <button
                   class="btn-ghost btn-sm ch-danger"
                   :disabled="wbBusy === acct.uid + ':delete'"
@@ -178,7 +183,7 @@
             </select>
             <button
               class="btn-ghost btn-sm"
-              :disabled="wbBusyAll !== '' || !wbCnCount"
+              :disabled="wbBusyAll !== '' || !wbCnCount || checkinAll.running"
               :title="wbCnCount ? '逐账号顺序签到（并发易触发上游风控）' : '国际版账号不支持签到'"
               @click="wbCheckinAll"
             >
@@ -192,176 +197,217 @@
             </button>
             <router-link to="/workbuddy" class="ch-more">积分 / 成长任务 / 定时任务 →</router-link>
           </div>
+
+          <!-- 签到的结果只有一行汇总（调度器口径），逐账号明细在 /workbuddy -->
+          <div v-if="wbCheckinSummary" class="ch-result">
+            <div class="ch-result-line">{{ wbCheckinSummary }}</div>
+          </div>
         </div>
 
         <div
-          v-for="p in PROVIDERS"
-          :key="p.id"
+          v-for="group in CARD_GROUPS"
+          :key="group.id"
           class="card ch-card"
-          :class="cardClass(p.id)"
-          :style="{ order: cardOrderIndex(p.id) }"
-          :data-card-id="p.id"
+          :class="[cardClass(group.id), { 'ch-card-merged': group.providers.length > 1 }]"
+          :style="{ order: cardOrderIndex(group.id) }"
+          :data-card-id="group.id"
         >
-          <!-- 卡头：渠道名 + 状态徽标 + 渠道级开关 -->
+          <!-- 卡头：产品名 + 卡 id。徽标与「渠道级开关」属于单个渠道而不是产品，
+               所以它们跟着分段走：单渠道卡只有一段，就直接画在卡头里（不额外画段头），
+               合并卡每段各有自己的段头 -->
           <div class="ch-card-head">
             <div class="ch-title">
               <span
                 class="ch-grip"
                 title="拖动排序（Esc 取消）"
-                @pointerdown="onGripPointerDown(p.id, $event)"
+                @pointerdown="onGripPointerDown(group.id, $event)"
               >
                 <AppIcon name="gripVertical" />
               </span>
-              <span class="ch-name">{{ p.name }}</span>
-              <span class="ch-id mono">{{ p.id }}</span>
+              <span class="ch-name">{{ group.name }}</span>
+              <span class="ch-id mono">{{ group.providers.map(item => item.id).join(' / ') }}</span>
             </div>
-            <div class="ch-head-right">
-              <span class="badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
-              <label class="ch-switch" :title="switchTitle(p)">
-                <input
-                  type="checkbox"
-                  class="ch-check"
-                  :checked="!isClosed(p)"
-                  :disabled="busyKey === p.id + ':enable'"
-                  @change="toggleProvider(p, $event)"
-                />
-                <span class="ch-switch-text">{{ isClosed(p) ? '已关闭' : '启用' }}</span>
-              </label>
+            <!-- 单渠道卡：徽标 + 渠道级开关就在卡头，不额外画段头（合并卡见下面的段头） -->
+            <div v-if="group.providers.length === 1" class="ch-head-right">
+              <template v-for="p in group.providers" :key="p.id">
+                <span class="badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
+                <label class="ch-switch" :title="switchTitle(p)">
+                  <input
+                    type="checkbox"
+                    class="ch-check"
+                    :checked="hasAccounts(p) && !accountsAllDisabled(p)"
+                    :disabled="busyKey === p.id + ':enable' || !hasAccounts(p)"
+                    @change="toggleProvider(p, $event)"
+                  />
+                  <span class="ch-switch-text">{{ !hasAccounts(p) ? '无账号' : accountsAllDisabled(p) ? '已停用' : '启用' }}</span>
+                </label>
+              </template>
             </div>
           </div>
 
-          <!-- 账号列表 -->
-          <div v-if="!accountsOf(p).length" class="empty">还没有账号</div>
-          <div v-else class="ch-accounts">
-            <div v-for="acct in accountsOf(p)" :key="acct.id" class="ch-account">
-              <label class="ch-check-wrap" :title="acct.enabled === false ? '已停用：不参与选号' : '启用中'">
-                <input
-                  type="checkbox"
-                  class="ch-check"
-                  :checked="acct.enabled !== false"
-                  :disabled="busyKey === acct.id + ':enable'"
-                  @change="toggleAccount(acct, $event)"
-                />
-              </label>
-              <div class="ch-account-main">
-                <div class="ch-account-name">
-                  {{ acct.nickname || acct.id }}
-                  <span v-if="acct.accountName" class="ch-extra">{{ acct.accountName }}</span>
-                  <span v-if="acct.phone" class="ch-extra mono">{{ acct.phone }}</span>
-                </div>
-                <div class="ch-account-sub">
-                  <span>{{ expiryText(acct) }}</span>
-                  <span v-if="acct.refreshable" class="ch-tag">可续期</span>
-                  <span v-if="acct.refreshError" class="ch-tag bad" :title="acct.refreshError">刷新失败</span>
-                </div>
+          <!-- 一个渠道一段。合并卡（Qoder / Qoder 中国版）里两段各自带段头：
+               它们是同一个产品的两个区域，账号、登录、签到、余额各走各的 provider 端点，
+               但并排放在一张卡里才能直接对比两边 —— 这正是合并的目的 -->
+          <div v-for="p in group.providers" :key="p.id" class="ch-provider-seg">
+            <div v-if="group.providers.length > 1" class="ch-provider-head">
+              <div class="ch-title">
+                <!-- 卡头已经列了两个 provider id，段头只说区域名（照抄渠道包的 displayName） -->
+                <span class="ch-name">{{ p.name }}</span>
               </div>
-              <div class="ch-account-actions">
-                <button class="ch-icon-btn" :title="`用浏览器打开 ${p.name} 个人中心看明细`" @click="openConsole(p.id, 'default')">
-                  <AppIcon name="externalLink" />
-                </button>
-                <button class="btn-ghost btn-sm" :disabled="busyKey === acct.id + ':test'" @click="testAccount(acct)">
-                  {{ busyKey === acct.id + ':test' ? '测试中…' : '测试' }}
-                </button>
-                <button
-                  v-if="supportsOnboarding(p)"
-                  class="btn-ghost btn-sm"
-                  :disabled="busyKey === acct.id + ':onboarding'"
-                  :title="p.id === 'loomy' ? 'Loomy 新手任务（一次性）' : 'Raccoon 桌面端登录奖励'"
-                  @click="claimOnboarding(p, acct)"
-                >
-                  {{ busyKey === acct.id + ':onboarding' ? '领取中…' : '新手任务' }}
-                </button>
-                <button class="btn-ghost btn-sm ch-danger" :disabled="busyKey === acct.id + ':delete'" @click="removeAccount(acct)">
-                  删除
-                </button>
+              <div class="ch-head-right">
+                <span class="badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
+                <label class="ch-switch" :title="switchTitle(p)">
+                  <input
+                    type="checkbox"
+                    class="ch-check"
+                    :checked="hasAccounts(p) && !accountsAllDisabled(p)"
+                    :disabled="busyKey === p.id + ':enable' || !hasAccounts(p)"
+                    @change="toggleProvider(p, $event)"
+                  />
+                  <span class="ch-switch-text">{{ !hasAccounts(p) ? '无账号' : accountsAllDisabled(p) ? '已停用' : '启用' }}</span>
+                </label>
               </div>
             </div>
-          </div>
 
-          <!-- 个人中心链接：默认值只有官方域名，用户可以改成准确的明细页 -->
-          <ChannelLinkEditor
-            v-if="linkEditor === p.id"
-            :slots="slotsOf(p.id)"
-            :values="linkValuesOf(p.id)"
-            @submit="draft => saveLinks(p.id, draft)"
-            @reset="resetLinks(p.id)"
-            @close="linkEditor = ''"
-          />
-
-          <!-- 登录中：授权链接 + 轮询状态（页内区块，不弹窗） -->
-          <div v-if="login && login.provider === p.id" class="ch-login">
-            <div class="ch-login-title">在浏览器中完成 {{ p.name }} 授权</div>
-            <div class="ch-login-url" :title="login.url">{{ login.url }}</div>
-            <div class="ch-login-actions">
-              <button class="btn-primary btn-sm" @click="openLoginUrl">打开授权链接</button>
-              <button class="btn-ghost btn-sm" @click="copyLoginUrl">复制链接</button>
-              <button class="btn-ghost btn-sm" @click="cancelLogin">停止等待</button>
+            <!-- 账号列表 -->
+            <div v-if="!accountsOf(p).length" class="empty">还没有账号</div>
+            <div v-else class="ch-accounts">
+              <div v-for="acct in accountsOf(p)" :key="acct.id" class="ch-account">
+                <label class="ch-check-wrap" :title="acct.enabled === false ? '已停用：不参与选号' : '启用中'">
+                  <input
+                    type="checkbox"
+                    class="ch-check"
+                    :checked="acct.enabled !== false"
+                    :disabled="busyKey === acct.id + ':enable' || busyKey === p.id + ':enable'"
+                    @change="toggleAccount(acct, $event)"
+                  />
+                </label>
+                <div class="ch-account-main">
+                  <div class="ch-account-name">
+                    {{ acct.nickname || acct.id }}
+                    <span v-if="acct.accountName" class="ch-extra">{{ acct.accountName }}</span>
+                    <span v-if="acct.phone" class="ch-extra mono">{{ acct.phone }}</span>
+                  </div>
+                  <div class="ch-account-sub">
+                    <span>{{ expiryText(acct) }}</span>
+                    <span
+                      v-if="accountTagMap[acct.id]"
+                      class="ch-tag"
+                      :class="{ bad: accountTagMap[acct.id].bad }"
+                      :title="accountTagMap[acct.id].title"
+                    >{{ accountTagMap[acct.id].text }}</span>
+                    <span v-if="acct.refreshable" class="ch-tag">可续期</span>
+                    <span v-if="acct.refreshError" class="ch-tag bad" :title="acct.refreshError">刷新失败</span>
+                  </div>
+                </div>
+                <div class="ch-account-actions">
+                  <button class="ch-icon-btn" :title="`用浏览器打开 ${p.name} 个人中心看明细`" @click="openConsole(p.id, 'default')">
+                    <AppIcon name="externalLink" />
+                  </button>
+                  <button class="btn-ghost btn-sm" :disabled="busyKey === acct.id + ':test'" @click="testAccount(acct)">
+                    {{ busyKey === acct.id + ':test' ? '测试中…' : '测试' }}
+                  </button>
+                  <button
+                    v-if="supportsOnboarding(p)"
+                    class="btn-ghost btn-sm"
+                    :disabled="busyKey === acct.id + ':onboarding'"
+                    :title="p.id === 'loomy' ? 'Loomy 新手任务（一次性）' : 'Raccoon 桌面端登录奖励'"
+                    @click="claimOnboarding(p, acct)"
+                  >
+                    {{ busyKey === acct.id + ':onboarding' ? '领取中…' : '新手任务' }}
+                  </button>
+                  <button class="btn-ghost btn-sm ch-danger" :disabled="busyKey === acct.id + ':delete'" @click="removeAccount(acct)">
+                    删除
+                  </button>
+                </div>
+              </div>
             </div>
-            <div class="ch-login-status">
-              {{ login.message || '等待浏览器完成授权，每 2.5 秒自动检测一次…' }}
+
+            <!-- 个人中心链接：默认值只有官方域名，用户可以改成准确的明细页 -->
+            <ChannelLinkEditor
+              v-if="linkEditor === p.id"
+              :slots="slotsOf(p.id)"
+              :values="linkValuesOf(p.id)"
+              @submit="draft => saveLinks(p.id, draft)"
+              @reset="resetLinks(p.id)"
+              @close="linkEditor = ''"
+            />
+
+            <!-- 登录中：授权链接 + 轮询状态（页内区块，不弹窗） -->
+            <div v-if="login && login.provider === p.id" class="ch-login">
+              <div class="ch-login-title">在浏览器中完成 {{ p.name }} 授权</div>
+              <div class="ch-login-url" :title="login.url">{{ login.url }}</div>
+              <div class="ch-login-actions">
+                <button class="btn-primary btn-sm" @click="openLoginUrl">打开授权链接</button>
+                <button class="btn-ghost btn-sm" @click="copyLoginUrl">复制链接</button>
+                <button class="btn-ghost btn-sm" @click="cancelLogin">停止等待</button>
+              </div>
+              <div class="ch-login-status">
+                {{ login.message || '等待浏览器完成授权，每 2.5 秒自动检测一次…' }}
+              </div>
             </div>
-          </div>
 
-          <!-- 操作行 -->
-          <div class="ch-actions">
-            <button
-              class="btn-primary btn-sm"
-              :disabled="!!login || busyKey === p.id + ':login'"
-              @click="startLogin(p)"
-            >
-              + 登录账号
-            </button>
-            <!-- ZCode 有两个 OAuth 入口，凭据落点不同，登录前必须先选 -->
-            <select v-if="p.id === 'zcode'" v-model="zcodeRealm" class="ch-select" :disabled="!!login">
-              <option value="bigmodel">智谱开放平台（bigmodel.cn）</option>
-              <option value="zai">z.ai 国际版（chat.z.ai）</option>
-            </select>
-            <button
-              v-if="canClaim(p)"
-              class="btn-ghost btn-sm"
-              :disabled="creditBusy === p.id + ':claim'"
-              title="逐账号顺序领取（并发易触发上游风控）"
-              @click="claimCredits(p)"
-            >
-              {{ creditBusy === p.id + ':claim' ? '领取中…' : '领取积分' }}
-            </button>
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="creditBusy === p.id + ':balance'"
-              @click="loadBalances(p)"
-            >
-              {{ creditBusy === p.id + ':balance' ? '查询中…' : '余额' }}
-            </button>
-            <button class="ch-icon-btn" title="设置个人中心链接" @click="toggleLinkEditor(p.id)">
-              <AppIcon name="settings" />
-            </button>
-          </div>
-
-          <!-- 领取结果 -->
-          <div v-if="claimResults[p.id]" class="ch-result">
-            <div class="ch-result-line">{{ claimSummaryText(p, claimResults[p.id].summary) }}</div>
-            <div v-for="row in claimResults[p.id].results" :key="row.accountId" class="ch-result-row">
-              <span class="ch-result-name">{{ row.nickname }}</span>
-              <span :class="outcomeClass(row.outcome)">{{ outcomeText(row.outcome) }}</span>
+            <!-- 操作行 -->
+            <div class="ch-actions">
+              <button
+                class="btn-primary btn-sm"
+                :disabled="!!login || busyKey === p.id + ':login'"
+                @click="startLogin(p)"
+              >
+                + 登录账号
+              </button>
+              <!-- ZCode 有两个 OAuth 入口，凭据落点不同，登录前必须先选 -->
+              <select v-if="p.id === 'zcode'" v-model="zcodeRealm" class="ch-select" :disabled="!!login">
+                <option value="bigmodel">智谱开放平台（bigmodel.cn）</option>
+                <option value="zai">z.ai 国际版（chat.z.ai）</option>
+              </select>
+              <button
+                v-if="canClaim(p)"
+                class="btn-ghost btn-sm"
+                :disabled="creditBusy === p.id + ':claim' || checkinAll.running"
+                title="逐账号顺序领取（并发易触发上游风控）"
+                @click="claimCredits(p)"
+              >
+                {{ creditBusy === p.id + ':claim' ? '领取中…' : '领取积分' }}
+              </button>
+              <button
+                class="btn-ghost btn-sm"
+                :disabled="creditBusy === p.id + ':balance'"
+                @click="loadBalances(p)"
+              >
+                {{ creditBusy === p.id + ':balance' ? '查询中…' : '余额' }}
+              </button>
+              <button class="ch-icon-btn" title="设置个人中心链接" @click="toggleLinkEditor(p.id)">
+                <AppIcon name="settings" />
+              </button>
             </div>
-          </div>
 
-          <!-- 积分余额 -->
-          <div v-if="balances[p.id]" class="ch-result">
-            <div v-for="row in balances[p.id].accounts" :key="row.accountId" class="ch-result-row">
-              <span class="ch-result-name">
-                {{ row.nickname }}
-                <span v-if="row.extra && row.extra.accountTier" class="ch-tag" :title="row.extra.accountTier.title">
-                  {{ row.extra.accountTier.label }}
+            <!-- 领取结果 -->
+            <div v-if="claimResults[p.id]" class="ch-result">
+              <div class="ch-result-line">{{ claimSummaryText(p, claimResults[p.id].summary) }}</div>
+              <div v-for="row in claimResults[p.id].results" :key="row.accountId" class="ch-result-row">
+                <span class="ch-result-name">{{ row.nickname }}</span>
+                <span :class="outcomeClass(row.outcome)">{{ outcomeText(row.outcome) }}</span>
+              </div>
+            </div>
+
+            <!-- 积分余额 -->
+            <div v-if="balances[p.id]" class="ch-result">
+              <div v-for="row in balances[p.id].accounts" :key="row.accountId" class="ch-result-row">
+                <span class="ch-result-name">
+                  {{ row.nickname }}
+                  <span v-if="row.extra && row.extra.accountTier" class="ch-tag" :title="row.extra.accountTier.title">
+                    {{ row.extra.accountTier.label }}
+                  </span>
                 </span>
-              </span>
-              <span v-if="row.balance">
-                {{ formatCredit(row.balance.total) }}
-                <span v-if="row.balance.expiredTotal > 0" class="text-muted">
-                  （另有 {{ formatCredit(row.balance.expiredTotal) }} 已失效）
+                <span v-if="row.balance">
+                  {{ formatCredit(row.balance.total) }}
+                  <span v-if="row.balance.expiredTotal > 0" class="text-muted">
+                    （另有 {{ formatCredit(row.balance.expiredTotal) }} 已失效）
+                  </span>
                 </span>
-              </span>
-              <span v-else class="ch-bad">{{ row.error || '查询失败' }}</span>
+                <span v-else class="ch-bad">{{ row.error || '查询失败' }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -371,125 +417,32 @@
     <!-- ==================== Tab 2：模型 ==================== -->
     <template v-else>
       <div class="card ch-models-card">
-        <div class="ch-toolbar">
-          <!-- 开关与测试的规则收进问号里：那几条只在第一次用时读一遍，
-               常驻在页面上等于每次都在跟模型方块抢版面。
-               浮层挂在按钮自己的定位上下文里，所以按钮外面套一层 span。 -->
-          <span class="ch-help-wrap">
-            <button
-              class="ch-help"
-              :class="{ active: showModelNote }"
-              :aria-expanded="showModelNote"
-              title="模型开关与测试说明"
-              @click.stop="showModelNote = !showModelNote"
-            >
-              <AppIcon name="help" />
-            </button>
-            <div v-if="showModelNote" class="ch-note-pop">
-              <ul class="ch-note-list">
-                <li>
-                  关掉的模型不会出现在 <code>/v1/models</code> 与对话的模型选择里，但配置还在，随时能开回来。
-                  标「已失效」的是上游下线的系统推断，与你自己关掉是两回事 —— 点一下会清掉这条记录让它重新显示，
-                  上游真下线的话请求仍会 404。
-                </li>
-                <li>
-                  顶部「已开启模型」是拍平后的可调用清单（带渠道前缀），它们就是 <code>/v1/models</code>
-                  与对话模型选择里的全部，点一下即可关闭；下面的分组则是全量目录 ——
-                  一家渠道有几百条模型时，后者绝大多数是灰的。
-                </li>
-                <li>
-                  工具栏的「全部开启 / 全部关闭」作用于所有渠道，每个渠道组头右侧那一对只作用于本渠道；
-                  「快速开启」按模型家族一次打开被关掉的 Flash。
-                </li>
-                <li>
-                  测试是逐个真实调用（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控），绿点通过、红点失败，
-                  悬停看延迟、错误与测试时间；传输层抖动会重试一次，业务错误和超时不重试。
-                  结论存在本机，刷新和重启都还在，「清除标记」可以清空。
-                </li>
-              </ul>
-            </div>
-          </span>
-          <button class="btn-ghost btn-sm" :disabled="modelsLoading" @click="loadModels">
-            {{ modelsLoading ? '读取中…' : '重新读取目录' }}
-          </button>
-          <button
-            class="btn-ghost btn-sm"
-            :disabled="!!testRun || modelsLoading"
-            :title="`把每个渠道里已启动的模型逐个真实调用一次，通过的标绿点、失败的标红点（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）`"
-            @click="runModelTests('all')"
-          >
-            {{ testRun && testRun.scope === 'all' ? `测试中 ${testRun.done}/${testRun.total}` : '测试全部' }}
-          </button>
-          <button v-if="testRun" class="btn-ghost btn-sm" @click="testAbort = true">中止</button>
-          <button
-            v-else-if="testedModelCount"
-            class="btn-ghost btn-sm"
-            :title="`清除全部 ${testedModelCount} 个模型的测试标记，让下一次测试从干净状态开始`"
-            @click="clearTestResults"
-          >
-            清除标记（{{ testedModelCount }}）
-          </button>
-          <!-- 批量开关靠右，和每个渠道组头那一排（测试/全部打开/全部关闭）对齐：
-               它们是同一类操作，只是作用范围不同，位置一致才不会点错 -->
-          <span class="ch-toolbar-right">
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="modelsLoading || !!busyKey || !!testRun || !modelGroups.length"
-              :title="`打开所有渠道的全部模型（标「已失效」的不动，那是上游下线判定，要逐点点开才能复活）`"
-              @click="setAllModelsEverywhere(false)"
-            >
-              {{ busyKey === 'all:on' ? '开启中…' : '全部开启' }}
-            </button>
-            <div class="ch-dd">
-              <button
-                class="btn-ghost btn-sm"
-                :disabled="modelsLoading || !!busyKey"
-                :aria-expanded="flashMenuOpen"
-                :title="flashOffModels.length
-                  ? `按家族一次打开被关掉的 Flash 模型（当前共 ${flashOffModels.length} 个待开启）；标「已失效」的不动，那种是上游下线判定，点模型本身才能重新显示`
-                  : '当前没有处于关闭状态的 Flash 模型'"
-                @click="flashMenuOpen = !flashMenuOpen"
-              >
-                {{ busyKey === 'flash' ? '开启中…' : '快速开启' }}
-                <span class="ch-dd-caret" :class="{ open: flashMenuOpen }">▾</span>
-              </button>
-              <div v-if="flashMenuOpen" class="ch-dd-menu">
-                <button
-                  v-for="item in flashMenu"
-                  :key="item.key"
-                  class="ch-dd-item"
-                  :disabled="!item.off"
-                  @click="enableFlashFamily(item.key)"
-                >
-                  <span>{{ item.label }}</span>
-                  <span class="ch-dd-note">{{ item.off ? `${item.off} / ${item.total}` : `已全开（${item.total}）` }}</span>
-                </button>
-                <span v-if="!flashMenu.length" class="ch-dd-empty">目录里没有名字带 Flash 的模型</span>
-              </div>
-            </div>
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="modelsLoading || !!busyKey || !!testRun || !modelGroups.length"
-              :title="`关闭所有渠道的全部模型：关掉的模型会从 /v1/models 和对话的模型选择里消失，但配置还在，随时能再开回来`"
-              @click="setAllModelsEverywhere(true)"
-            >
-              {{ busyKey === 'all:off' ? '关闭中…' : '全部关闭' }}
-            </button>
-          </span>
-        </div>
-
-        <div v-if="!modelGroups.length" class="empty">
-          没有读到任何渠道模型目录 —— 点「重新读取目录」重试；长期为空说明渠道运行时没起来（见页头提示）。
-        </div>
-
-        <!-- 已开启模型：跨渠道拍平的好模型清单。
+        <!-- 已开启模型：跨渠道拍平的可调用清单，放在最上面。
              下面的分组是**全量目录**（cline 一家就 493 条，绝大多数是灰的），
              而用户真正要回答的问题只有一个：我的客户端现在能选到哪些模型。
-             这一块就是那个问题的答案，所以放在全量目录之前。 -->
+             放在工具栏之上还有个作用：过滤输入框在它下面，能一眼看出它没被筛 ——
+             这块是完整清单，被截断会让人以为模型掉线 -->
         <div v-if="modelGroups.length" class="ch-enabled-block">
           <div class="ch-model-group-head">
             <span class="ch-name">已开启模型</span>
             <span class="text-muted">共 <span class="ch-ok">{{ enabledModels.length }}</span> 个</span>
+            <!-- 这块自己的测试入口：只打这里列出的模型，也就是客户端现在真能调到的那些。
+                 和工具栏的「测试」不是一回事 —— 那个按渠道铺开、且受过滤收窄；
+                 这个不看过滤，关闭 / 已失效 / 已失活的本来就不在这张清单里 -->
+            <span class="ch-group-actions">
+              <!-- 测试中这个按钮变成「停止」：同一个位置点两次就是开始 / 取消，
+                   不用扫到工具栏另一端去找「中止」，也不会被误当成「再开一轮」 -->
+              <button
+                class="btn-ghost btn-sm"
+                :disabled="(!!testRun && !isTestRunning('enabled')) || !!busyKey || !enabledModels.length"
+                :title="isTestRunning('enabled')
+                  ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败`
+                  : `逐个真实调用这里列出的 ${enabledModels.length} 个已开启模型（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）；关闭的与已失效 / 已失活的本来就不在这张清单里`"
+                @click="toggleModelTests('enabled')"
+              >
+                {{ isTestRunning('enabled') ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
+              </button>
+            </span>
           </div>
           <div v-if="enabledModels.length" class="ch-models">
             <button
@@ -514,22 +467,111 @@
           </div>
         </div>
 
-        <div v-for="group in modelGroups" :key="group.id" class="ch-model-group">
+        <div class="ch-toolbar">
+          <!-- 模型过滤：全量目录动辄几百条，只按名称 / id 的子串匹配（不区分大小写）。
+               输入框留在工具栏里而不是每组头各放一个：过滤是页面级的视角，
+               放在组里会让人以为只作用于那一家。 -->
+          <span class="ch-model-filter" :class="{ active: modelFilterActive }">
+            <input
+              v-model="modelFilter"
+              type="text"
+              class="ch-model-filter-input"
+              :placeholder="`过滤 ${modelTotal} 个模型（名称 / id）`"
+              aria-label="按名称或 id 过滤模型"
+              @keydown.esc="clearModelFilter"
+            />
+            <button
+              v-if="modelFilterActive"
+              type="button"
+              class="ch-model-filter-clear"
+              title="清除过滤（Esc）"
+              @click="clearModelFilter"
+            >×</button>
+          </span>
+          <span v-if="modelFilterActive" class="text-muted ch-model-filter-hit">
+            匹配 <span class="ch-ok">{{ filteredModelTotal }}</span> / {{ modelTotal }} 个
+          </span>
+          <button
+            v-if="!testRun && testedModelCount"
+            class="btn-ghost btn-sm"
+            :title="`清除全部 ${testedModelCount} 个模型的测试标记，让下一次测试从干净状态开始`"
+            @click="clearTestResults"
+          >
+            清除标记（{{ testedModelCount }}）
+          </button>
+          <!-- 测试与批量开关同一侧、同一顺序（测试 / 全部开启 / 全部关闭），
+               与每个渠道组头那一排对齐：它们是同一类操作，只是作用范围不同，
+               位置一致才不会点错。测试按钮本身不受 testRun 禁用 ——
+               测试中它就地变成「停止 x/y」 -->
+          <span class="ch-toolbar-right">
+            <button
+              class="btn-ghost btn-sm"
+              :disabled="(!!testRun && !isTestRunning('all')) || modelsLoading"
+              :title="isTestRunning('all')
+                ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败`
+                : modelFilterActive
+                  ? `只把匹配当前过滤、且已启动的模型逐个真实调用一次（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）`
+                  : `把每个渠道里已启动的模型逐个真实调用一次，通过的标绿点、失败的标红点（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）`"
+              @click="toggleModelTests('all')"
+            >
+              {{ isTestRunning('all') ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
+            </button>
+            <button
+              class="btn-ghost btn-sm"
+              :disabled="modelsLoading || !!busyKey || !!testRun || !filteredModelGroups.length"
+              :title="modelFilterActive
+                ? `打开匹配当前过滤的 ${filteredModelTotal} 个模型（标「已失效」的不动，那是上游下线判定，要逐点点开才能复活）`
+                : `打开所有渠道的全部模型（标「已失效」的不动，那是上游下线判定，要逐点点开才能复活）`"
+              @click="setAllModelsEverywhere(false)"
+            >
+              {{ busyKey === 'all:on' ? '开启中…' : '全部开启' }}
+            </button>
+            <button
+              class="btn-ghost btn-sm"
+              :disabled="modelsLoading || !!busyKey || !!testRun || !filteredModelGroups.length"
+              :title="modelFilterActive
+                ? `关闭匹配当前过滤的 ${filteredModelTotal} 个模型：关掉的模型会从 /v1/models 和对话的模型选择里消失，但配置还在，随时能再开回来`
+                : `关闭所有渠道的全部模型：关掉的模型会从 /v1/models 和对话的模型选择里消失，但配置还在，随时能再开回来`"
+              @click="setAllModelsEverywhere(true)"
+            >
+              {{ busyKey === 'all:off' ? '关闭中…' : '全部关闭' }}
+            </button>
+          </span>
+        </div>
+
+        <!-- 按钮移除后没有别的读取中指示，这里补一句：否则空目录时会先闪一段「没读到」再出现列表 -->
+        <div v-if="modelsLoading && !modelGroups.length" class="empty">
+          正在读取渠道模型目录…
+        </div>
+        <div v-else-if="!modelGroups.length" class="empty">
+          没有读到任何渠道模型目录 —— 切走再回到「模型」页会自动重新读取；长期为空说明渠道运行时没起来（见页头提示）。
+        </div>
+
+        <div v-for="group in filteredModelGroups" :key="group.id" class="ch-model-group">
           <div class="ch-model-group-head">
             <span class="ch-name">{{ group.name }}</span>
             <span class="text-muted">
               {{ group.models.length }} 个，已开启 <span class="ch-ok">{{ group.enabledCount }}</span>，已关闭 {{ group.disabledCount }}<template
                 v-if="group.deadCount"
-              >，已失效 {{ group.deadCount }}</template>
+              >，已失效 {{ group.deadCount }}</template><template
+                v-if="group.offlineCount"
+              >，已失活 <span class="ch-bad">{{ group.offlineCount }}</span></template>
             </span>
             <span class="ch-group-actions">
+              <!-- 这几个按钮作用于当前过滤命中的模型；把范围写在按钮旁边，
+                   免得「筛出 3 条点全部关闭」时以为整家渠道都被关了（或反过来） -->
+              <span v-if="modelFilterActive" class="text-muted ch-filter-scope">作用于匹配的 {{ group.models.length }} 个</span>
               <button
                 class="btn-ghost btn-sm"
-                :disabled="!!testRun || !!busyKey"
-                :title="`逐个真实调用这个渠道里已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`"
-                @click="runModelTests(group.id)"
+                :disabled="(!!testRun && !isTestRunning(group.id)) || !!busyKey"
+                :title="isTestRunning(group.id)
+                  ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败`
+                  : modelFilterActive
+                    ? `只测本渠道里匹配当前过滤、且已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`
+                    : `逐个真实调用这个渠道里已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`"
+                @click="toggleModelTests(group.id)"
               >
-                {{ testRun && testRun.scope === group.id ? `测试中 ${testRun.done}/${testRun.total}` : '测试' }}
+                {{ isTestRunning(group.id) ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
               </button>
               <button class="btn-ghost btn-sm" :disabled="!!busyKey" @click="setAllModels(group.id, false)">全部打开</button>
               <button class="btn-ghost btn-sm" :disabled="!!busyKey" @click="setAllModels(group.id, true)">全部关闭</button>
@@ -540,7 +582,7 @@
               v-for="m in group.models"
               :key="m.id"
               class="ch-model"
-              :class="{ off: m.disabled, dead: m.dead }"
+              :class="{ off: m.disabled, dead: m.dead, offline: isOfflineModel(group.id, m) }"
               :title="modelTitle(group.id, m)"
               @click="toggleModel(group.id, m)"
             >
@@ -553,8 +595,21 @@
               ></span>
               <span v-if="m.isFree" class="ch-tag free">免费</span>
               <span v-if="m.dead" class="ch-tag bad">已失效</span>
+              <!-- 失活：点标签恢复（外层按钮的点击是开关模型，必须 stop） -->
+              <span
+                v-if="isOfflineModel(group.id, m)"
+                class="ch-tag bad ch-tag-action"
+                :title="`已失活：${healthOf(group.id, m)?.detail || healthOf(group.id, m)?.reason}；点击恢复`"
+                @click.stop="reviveHealth(group.id, m)"
+              >失活</span>
             </button>
           </div>
+        </div>
+
+        <!-- 过滤没有命中任何模型：分组区会整块消失，不给一句话就成了白屏 -->
+        <div v-if="modelGroups.length && modelFilterActive && !filteredModelGroups.length" class="empty">
+          没有匹配「{{ modelFilter.trim() }}」的模型（全量目录共 {{ modelTotal }} 个）。
+          <button class="btn-ghost btn-sm" @click="clearModelFilter">清除过滤</button>
         </div>
       </div>
     </template>
@@ -565,10 +620,12 @@
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { showToast } from '../composables/useToast.js'
 import AppIcon from '../components/AppIcon.vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
 import ChannelLinkEditor from '../components/ChannelLinkEditor.vue'
 import { slotsOf, linkKeyOf, readCustomLinks, saveCustomLinks } from '../utils/channel-links.js'
 import { usePageActions } from '../composables/usePageActions.js'
-import { channelsStatus, channelsRefresh, channelsRpc, channelsTest } from '../api.js'
+import { usePolling } from '../composables/usePolling.js'
+import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, reviveModel, getAccountHealth } from '../api.js'
 // WorkBuddy 走独立的一组端点（/api/workbuddy/*），和渠道包 RPC 是两套账号体系。
 // 函数名统一加 wb 前缀并与本页已有的 removeAccount / testAccount 等区分开。
 import {
@@ -604,8 +661,46 @@ const PROVIDERS = [
 
 // 只有这两家有「新手任务 / 登录奖励」端点（onboarding.status 只认这两个 provider）
 const ONBOARDING_PROVIDERS = ['loomy', 'raccoon']
-// Gemini 没有签到端点（credits.claimAll 里没有它的分支），别给它一个必然失败的按钮
-const NO_CLAIM_PROVIDERS = ['gemini']
+// 有签到端点的渠道：渠道包 credits.claimAll 里真正写了分支的这几家
+// （qoder / qodercn 共用 Qoder 家族那一段，WorkBuddy 走调度器，不在这里）。
+//
+// 用白名单而不是「排除 Gemini」的黑名单：渠道包对 Cline、Raccoon 是**显式**返回
+// 「不支持每日签到」，其余没写分支的一律 unsupported provider。黑名单得跟着上游一家家补，
+// 漏一家就变成「一键签到里多一条必然失败的渠道」，用户只能对着报错猜是哪家不支持。
+const CLAIM_PROVIDERS = ['lobsterai', 'qoder', 'qodercn', 'trae', 'loomy', 'minimax', 'zcode']
+
+// 同一产品的多个区域合成一张卡。Qoder 在渠道包里是两套独立凭据
+// （`qoder` → qoder.com、`qodercn` → qoder.cn），但它们是同一个产品：
+// 分成两张卡时用户要来回滚动才能对比两边的账号、余额和签到结果。
+//
+// 合并的只有**展示**：账号体系、启用开关、登录入口、签到/余额端点仍然按 provider 各自走，
+// 所以卡片内部按渠道分段，每段自带徽标与渠道级开关。
+// 卡 id 取第一个成员（`qoder`）：拖拽顺序是按卡 id 存在 localStorage 的，
+// 沿用旧 id 用户排好的位置就不会丢。
+const MERGED_CARDS = [
+  { id: 'qoder', name: 'Qoder', members: ['qoder', 'qodercn'] }
+]
+
+// 账号页的卡片清单：一个分组一张卡。名称照抄渠道包的 displayName，
+// 单成员分组的卡头与分段内标题都写这个名字，所以不另起叫法。
+const CARD_GROUPS = (() => {
+  const byId = new Map(PROVIDERS.map(provider => [provider.id, provider]))
+  const groups = []
+  for (const provider of PROVIDERS) {
+    const merged = MERGED_CARDS.find(card => card.members.includes(provider.id))
+    if (!merged) {
+      groups.push({ id: provider.id, name: provider.name, providers: [provider] })
+      continue
+    }
+    if (groups.some(group => group.id === merged.id)) continue
+    groups.push({
+      id: merged.id,
+      name: merged.name,
+      providers: merged.members.map(id => byId.get(id)).filter(Boolean)
+    })
+  }
+  return groups
+})()
 
 // WorkBuddy 在渠道包里是「只提供目录」的适配器（见 server/channels/worker.mjs），
 // 而那份目录就是它的**启用清单** —— 已关掉的模型根本没进渠道目录，所以模型页不能
@@ -627,12 +722,14 @@ const MODEL_GROUP_PROVIDERS = [
 // 「先看哪个来源」纯粹是这个用户的使用习惯，跟转发逻辑无关，所以存 localStorage
 // 而不是后端 state.json —— 那份是全局配置，换个客户端就被别人的顺序覆盖了。
 const ORDER_KEY = 'airoute.channels-card-order'
-const DEFAULT_ORDER = ['workbuddy', ...PROVIDERS.map(p => p.id)]
+// 顺序按**卡**存（不是按 provider）：合并卡的 id 是第一个成员的 provider id
+const DEFAULT_ORDER = ['workbuddy', ...CARD_GROUPS.map(group => group.id)]
 
 function loadSavedOrder() {
   try {
     const raw = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]')
-    // 过滤掉已经不存在的 id（渠道包升级删了某个 provider 时，旧顺序里会留着它）
+    // 过滤掉已经不存在的 id：渠道包升级删了某个 provider 时旧顺序里会留着它；
+    // Qoder 中国版并进 Qoder 卡之后，旧的 `qodercn` 也会在这里被丢掉
     if (Array.isArray(raw)) return raw.filter(id => DEFAULT_ORDER.includes(id))
   } catch {
     /* 存坏了就当没存过，不值得为一条排序偏好报错 */
@@ -649,10 +746,8 @@ const cardOrder = computed(() => {
   return [...savedOrder.value, ...DEFAULT_ORDER.filter(id => !seen.has(id))]
 })
 
-const isCustomOrder = computed(() => savedOrder.value.length > 0)
-
-// 用 CSS 的 order 属性排版，而不是把 11 张卡重构成一个 v-for：
-// 渠道卡片模板里引用了大量 provider 字段，重排 DOM 结构收益不大、风险不小
+// 用 CSS 的 order 属性排版，而不是按顺序重排 DOM：拖拽时只改一次数组，
+// 卡片节点不搬家，指针捕获、输入框焦点、滚动位置都不会被打断
 function cardOrderIndex(id) {
   const i = cardOrder.value.indexOf(id)
   return i < 0 ? DEFAULT_ORDER.length : i
@@ -736,14 +831,6 @@ function persistOrder() {
   if (!orderDirty) return
   orderDirty = false
   localStorage.setItem(ORDER_KEY, JSON.stringify(cardOrder.value))
-}
-
-function resetCardOrder() {
-  flipCards(() => {
-    savedOrder.value = []
-  })
-  orderDirty = false
-  localStorage.removeItem(ORDER_KEY)
 }
 
 function onGripPointerDown(id, e) {
@@ -939,13 +1026,11 @@ function finishDrag({ cancel = false } = {}) {
 }
 
 const tab = ref('accounts')
-const loading = ref(false)
-// 页面说明收在标题旁的问号后面：那段文字只有一个用途（第一次用时读一遍），
-// 常驻在页面上等于每次都在跟卡片抢地方
-const showNote = ref(false)
-// 模型页的问号另开一个：两个浮层说明的是不同的东西（这个页面/模型页的开关与测试），
-// 共用一个 ref 会出现「点开模型页的说明，页头那段也一起弹出来」
-const showModelNote = ref(false)
+// 视图切换的选项表放常量里：模板只需要绑一次，标签文案改动不必动结构
+const VIEW_TABS = [
+  { value: 'accounts', label: '账号' },
+  { value: 'models', label: '模型' }
+]
 const runtimeState = ref('ready')
 const runtimeError = ref('')
 const modelCount = ref(0)
@@ -966,17 +1051,91 @@ const modelsByProvider = ref({}) // provider → RpcModelListEntry[]
 const wbModelRows = ref({}) // provider id → RpcModelListEntry[]
 const wbUpstreamByRegion = ref({}) // region → 上游模型全量
 const modelsLoading = ref(false)
-const flashMenuOpen = ref(false) // 「快速开启」下拉的展开态
 // 模型测试：testRun 非空即「正在跑」，null 表示空闲
 //   { scope: 'all' | providerId, done, total }
 const testRun = ref(null)
 const testAbort = ref(false) // 「中止」标记：循环里只决定「还要不要开始下一个」
+// 在途请求的中止句柄：「中止」除了不再开始下一个，还要真的断开当前这一次 ——
+// 否则卡在上游的那一次要拖到 180s 超时才结束
+const testController = ref(null)
 // 键是 `provider/modelId` → { ok, latency, error, at }
 // 落本机 localStorage：跑通过一次就一直绿（直到下一次失败），刷新/重启都还在。
 // 它是「我这台机器上试过什么」的本地记录，不跟渠道包的数据目录走 ——
 // 渠道状态是账号池的事实，测试结论只是观察结果，两者混在同一个文档里迟早互相干扰。
 const modelTestResults = ref(readTestResults())
 const testedModelCount = computed(() => Object.keys(modelTestResults.value).length)
+
+// 失活台账：键是模型 id（gemini/gemini-2.5-pro）→ { ref, offline, reason, detail }
+// 与配置引用一一对应（服务端用 resolveRef 补的 modelId），界面按 modelId 匹配。
+// 失活是「网关不再把请求派给它」，与渠道包自己的 disabled / dead 是两件事。
+const modelHealthMap = ref({})
+
+// 读失败就当没有失活：这只是展示层，不能因为它挡住账号与目录的渲染
+async function loadModelHealth() {
+  try {
+    const data = await getModelHealth()
+    const map = {}
+    for (const item of data.models || []) {
+      if (item.modelId) map[item.modelId] = item
+    }
+    modelHealthMap.value = map
+  } catch {
+    /* 保留上一份：一次读取失败不该让「失活」标的显示跳变 */
+  }
+}
+
+function healthOf(providerId, m) {
+  return modelHealthMap.value[`${providerId}/${m.id}`] || null
+}
+
+function isOfflineModel(providerId, m) {
+  return !!healthOf(providerId, m)?.offline
+}
+
+// 点「失活」标签恢复：只清台账标记，不动配置与开关
+async function reviveHealth(providerId, m) {
+  const record = healthOf(providerId, m)
+  if (!record?.ref) return
+  try {
+    await reviveModel(record.ref)
+    await loadModelHealth()
+    showToast(`已恢复 ${m.name || m.id}`)
+  } catch (err) {
+    showToast('恢复失败：' + err.message, 'error', 6000)
+  }
+}
+
+// 账号停用原因：键是渠道账号 id → { accountId, reason, provider, since }。
+// 上游明确说「账号已被禁用」（如 LobsterAI 的 code=40302）时，服务端会在池里
+// 停用它，并把原话记在 AiRoute 自己的台账里 —— 渠道包的 account.update 只认
+// enabled，没有地方存「为什么停了」。
+const accountHealthMap = ref({})
+
+// 读失败就当没记过原因：标签退化成「已停用」，账号本身的启停状态仍来自渠道包
+async function loadAccountHealth() {
+  try {
+    const data = await getAccountHealth()
+    const map = {}
+    for (const item of data.accounts || []) map[item.accountId] = item
+    accountHealthMap.value = map
+  } catch {
+    /* 保留上一份：一次读取失败不该让标签闪烁 */
+  }
+}
+
+// 停用的账号在行上打标：有上游原话 → 红色「已禁用」，否则灰色「已停用」
+// （用户自己关的也是 enabled=false，两者要能分辨，否则「被禁用」会被当成「我关的」）
+const accountTagMap = computed(() => {
+  const map = {}
+  for (const acct of accounts.value) {
+    if (!acct || acct.enabled !== false) continue
+    const record = accountHealthMap.value[acct.id]
+    map[acct.id] = record
+      ? { text: '已禁用', bad: true, title: `上游已禁用该账号，AiRoute 已自动停用：${record.reason || '未记录原因'}` }
+      : { text: '已停用', bad: false, title: '该账号已停用，不参与选号' }
+  }
+  return map
+})
 
 let loginTimer = null
 let loginDeadline = 0
@@ -990,6 +1149,8 @@ const wbRealm = ref('cn') // 国内版 / 国际版：域名与 OAuth 入口不�
 const wbLogin = ref(null) // { state, url, realm, message }
 const wbBusy = ref('') // `${uid}:${action}`
 const wbBusyAll = ref('') // '' | 'checkin' | 'balance'
+// 最近一次「全部签到 / 一键签到」里 WorkBuddy 那一段的汇总（调度器只回一行文字）
+const wbCheckinSummary = ref('')
 const wbError = ref('')
 let wbLoginTimer = null
 
@@ -1008,10 +1169,11 @@ async function loadStatus() {
   statuses.value = list || {}
 }
 
-async function reload() {
-  loading.value = true
+async function reload({ silent = false } = {}) {
   try {
     await loadStatus()
+    await loadModelHealth()
+    await loadAccountHealth()
     const targets = PROVIDERS.filter(p => (statuses.value[p.id]?.accounts?.total || 0) > 0)
     const failed = []
     const lists = await Promise.all(targets.map(async p => {
@@ -1024,21 +1186,21 @@ async function reload() {
       }
     }))
     accounts.value = lists.flat()
-    if (failed.length) showToast(`部分渠道账号读取失败：${failed.join('、')}`, 'error', 6000)
+    if (failed.length && !silent) showToast(`部分渠道账号读取失败：${failed.join('、')}`, 'error', 6000)
     // WorkBuddy 是另一套后端，失败自己兜（见 loadWorkbuddy），不能连带整页报错
     await loadWorkbuddy()
     // 目录是服务启动时在后台采集的，首屏可能还没采完（此时 channels 源里的模型数还是 0）。
-    // 已有账号却报 0，说明采集没跟上 —— 补一次同步，让头部统计与 Provider 配置立刻对上
-    if (accounts.value.length > 0 && modelCount.value === 0) await syncCatalog()
+    // 已有账号却报 0，说明采集没跟上 —— 补一次同步，让头部统计与 Provider 配置立刻对上。
+    // 轮询不触发：否则目录真为空时会每 5 秒重新采集一次。
+    if (!silent && accounts.value.length > 0 && modelCount.value === 0) await syncCatalog()
   } catch (err) {
-    showToast('读取渠道状态失败：' + err.message, 'error', 6000)
-  } finally {
-    loading.value = false
+    if (!silent) showToast('读取渠道状态失败：' + err.message, 'error', 6000)
   }
 }
 
-// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
-usePageActions({ refresh: reload, loading })
+// 顶部栏的「实时」角标由布局渲染；数据靠 5 秒轮询保持最新
+usePageActions({ live: true })
+usePolling(() => reload({ silent: true }))
 
 // 重新采集目录并同步进 channels 源。失败只在控制台留痕：这是页面自己发起的
 // 补同步，用户没点任何按钮，弹 toast 只会变成一条莫名其妙的报错
@@ -1124,7 +1286,6 @@ async function loadWorkbuddyModels() {
 
 async function switchTab(next) {
   tab.value = next
-  flashMenuOpen.value = false
   if (next === 'models') await loadModels()
 }
 
@@ -1311,8 +1472,17 @@ function accountsOf(p) {
   return accounts.value.filter(a => a.provider === p.id)
 }
 
-function isClosed(p) {
-  return statuses.value[p.id]?.closed === true
+// 账号开关与模型开关是两回事：没有账号也能在「模型」页开启模型（转发时才失败，
+// 测试会标红点）。所以卡片右上角的开关只看账号状态，不读 provider.status 的 closed ——
+// 那是「模型是否全关」的判据。
+function hasAccounts(p) {
+  return accountsOf(p).length > 0
+}
+
+// 判据与账号行的勾选框一致：enabled !== false 视为启用（老账号可能没有该字段）
+function accountsAllDisabled(p) {
+  const rows = accountsOf(p)
+  return rows.length > 0 && rows.every(a => a.enabled === false)
 }
 
 function badgeText(p) {
@@ -1325,34 +1495,51 @@ function badgeText(p) {
 function badgeClass(p) {
   const st = statuses.value[p.id]
   if (!st || !st.accounts || st.accounts.total === 0) return 'warn'
-  if (isClosed(p)) return 'bad'
+  if (st.accounts.enabled === 0) return 'bad'
   return 'ok'
 }
 
 function switchTitle(p) {
-  const st = statuses.value[p.id]
-  const models = st ? st.models.total : 0
-  // 语义照渠道包：关闭 = 关掉全部模型 + 停用全部账号；打开 = 清空黑名单 + 启用全部账号
-  return `渠道级开关：关闭会关掉该渠道全部模型（当前 ${models} 个）并停用全部账号；`
-    + '打开会清空模型黑名单并启用全部账号'
+  const rows = accountsOf(p)
+  if (!rows.length) return '还没有账号：登录后这里控制该渠道全部账号的启用/停用；模型开关在「模型」页独立设置'
+  const enabled = rows.filter(a => a.enabled !== false).length
+  return `渠道级开关：停用/启用该渠道全部账号（当前 ${enabled}/${rows.length} 个启用）；`
+    + '模型开关在「模型」页独立设置，不受这里影响'
 }
 
+// 只逐号改 enabled，不用 provider.setEnabled：那个端点会连带关掉/打开全部模型，
+// 与「账号与模型相互独立」的约定冲突。
 async function toggleProvider(p, event) {
   const enabled = event.target.checked
-  busyKey.value = p.id + ':enable'
-  try {
-    const value = await channelsRpc('provider.setEnabled', { provider: p.id, enabled })
-    showToast(
-      `${p.name} 已${enabled ? '启用' : '关闭'}：`
-      + `${enabled ? '打开' : '关闭'} ${value.models} 个模型、`
-      + `${enabled ? '启用' : '停用'} ${value.accounts} 个账号`
-    )
-    await reload()
-    if (tab.value === 'models') await loadModels()
-  } catch (err) {
-    // 失败要把开关拨回去，否则界面会停在「看起来已生效」的状态
+  const rows = accountsOf(p)
+  if (!rows.length) {
     event.target.checked = !enabled
-    showToast(`${p.name} ${enabled ? '启用' : '关闭'}失败：` + err.message, 'error', 6000)
+    showToast(`${p.name} 还没有账号，先登录后再试`, 'error', 5000)
+    return
+  }
+  busyKey.value = p.id + ':enable'
+  const failed = []
+  let changed = 0
+  try {
+    for (const acct of rows) {
+      try {
+        await channelsRpc('account.update', { accountId: acct.id, patch: { enabled } })
+        changed++
+      } catch (err) {
+        failed.push(`${acct.nickname || acct.id}：${err.message}`)
+      }
+    }
+    if (failed.length) {
+      showToast(
+        `${p.name} ${enabled ? '启用' : '停用'} ${changed}/${rows.length} 个账号失败 ${failed.length} 个：${failed[0]}`,
+        'error',
+        6000
+      )
+    } else {
+      showToast(`${p.name} 已${enabled ? '启用' : '停用'} ${changed} 个账号`)
+    }
+    // 逐号改可能部分失败：以重新读取的结果为准，别让开关停在「看起来全生效」的猜测上
+    await reload()
   } finally {
     busyKey.value = ''
   }
@@ -1377,7 +1564,12 @@ async function testAccount(acct) {
   try {
     const value = await channelsRpc('account.test', { accountId: acct.id }, 180000)
     const label = acct.nickname || acct.id
-    if (value.ok) showToast(`${label} 可用（${value.modelId}）`)
+    // 服务端拿到「账号已被禁用」的证据时会在池里停用它，所以这里重新读一遍：
+    // 勾选框和「已禁用」标签要立刻对上，否则界面还显示可用，用户会再点一次
+    await reload({ silent: true })
+    const record = accountHealthMap.value[acct.id]
+    if (record) showToast(`${label} 已被上游禁用，已自动停用：${record.reason || '原因未知'}`, 'error', 10000)
+    else if (value.ok) showToast(`${label} 可用（${value.modelId}）`)
     else showToast(`${label} 不可用：${value.message || '未知原因'}`, 'error', 8000)
   } catch (err) {
     showToast('账号测试失败：' + err.message, 'error', 6000)
@@ -1425,7 +1617,7 @@ async function claimOnboarding(p, acct) {
 // ==================== 积分 ====================
 
 function canClaim(p) {
-  return !NO_CLAIM_PROVIDERS.includes(p.id)
+  return CLAIM_PROVIDERS.includes(p.id)
 }
 
 function supportsOnboarding(p) {
@@ -1493,6 +1685,25 @@ function outcomeClass(outcome) {
 
 // ==================== 模型 ====================
 
+// 分组计数。抽成函数是因为过滤后要按**命中的那部分模型**重算一遍：
+// 筛出 3 条却显示「共 493 个，已开启 0」会让人以为筛错了。
+//
+// 「已开启」是这个页面唯一要回答的问题（关掉的模型既不在 /v1/models，
+// 也不在对话的模型选择里），所以单独给出计数而不是让用户拿总数减已关闭：
+// cline 的目录有 493 条，一眼看不出「现在到底开着几个」。
+// 已失效既不算开启也不算关闭：它既可能带着 disabled 标记，也可能是上游
+// 下线后残留的条目，混进任何一边都会让三个数字对不上总数。
+// 失活（网关判定余额/账号/连续失败）同样不算开启 —— 它此刻不参与路由，
+// 与 /v1/models 的口径必须一致
+function groupCounts(providerId, models) {
+  return {
+    enabledCount: models.filter(m => !m.disabled && !m.dead && !isOfflineModel(providerId, m)).length,
+    disabledCount: models.filter(m => m.disabled && !m.dead).length,
+    deadCount: models.filter(m => m.dead).length,
+    offlineCount: models.filter(m => isOfflineModel(providerId, m)).length
+  }
+}
+
 const modelGroups = computed(() => MODEL_GROUP_PROVIDERS
   .map(p => {
     const models = modelsByProvider.value[p.id] || []
@@ -1500,24 +1711,67 @@ const modelGroups = computed(() => MODEL_GROUP_PROVIDERS
       id: p.id,
       name: p.name,
       models,
-      // 「已开启」是这个页面唯一要回答的问题（关掉的模型既不在 /v1/models，
-      // 也不在对话的模型选择里），所以单独给出计数而不是让用户拿总数减已关闭：
-      // cline 的目录有 493 条，一眼看不出「现在到底开着几个」。
-      // 已失效既不算开启也不算关闭：它既可能带着 disabled 标记，也可能是上游
-      // 下线后残留的条目，混进任何一边都会让三个数字对不上总数。
-      enabledCount: models.filter(m => !m.disabled && !m.dead).length,
-      disabledCount: models.filter(m => m.disabled && !m.dead).length,
-      deadCount: models.filter(m => m.dead).length
+      ...groupCounts(p.id, models)
     }
   })
   .filter(group => group.models.length > 0))
 
-// 「已开启模型」板块的数据源：跨渠道拍平，只留 !disabled && !dead。
+// 「已开启模型」板块的数据源：跨渠道拍平，只留 !disabled && !dead && !失活。
 // 判据与 /v1/models 的过滤完全一致，否则这块会和客户端里能选到的列表对不上。
 const enabledModels = computed(() => modelGroups.value.flatMap(group =>
   group.models
-    .filter(m => !m.disabled && !m.dead)
+    .filter(m => !m.disabled && !m.dead && !isOfflineModel(group.id, m))
     .map(m => ({ provider: group.id, model: m }))))
+
+// ==================== 模型过滤 ====================
+
+// 全量目录动辄几百条（cline 一家 493 条），靠肉眼在里头找模型不现实。
+// 只做不区分大小写的纯子串匹配（id 与显示名都算）：用户手里有的是「知道名字的
+// 一部分」这个信息，正则/模糊语法只会多一条要学的东西，不会更准。
+//
+// 范围只到下面的全量目录：上面「已开启模型」不过滤 —— 它回答的是「客户端现在能
+// 选到什么」，是一份完整清单，缺几条反而会让人以为模型掉线了。
+const modelFilter = ref('')
+
+const modelFilterActive = computed(() => modelFilter.value.trim() !== '')
+
+function matchModelFilter(m) {
+  const keyword = modelFilter.value.trim().toLowerCase()
+  if (!keyword) return true
+  return String(m.id || '').toLowerCase().includes(keyword)
+    || String(m.name || '').toLowerCase().includes(keyword)
+}
+
+// 过滤后的分组：计数按命中的模型重算，空组直接不显示
+const filteredModelGroups = computed(() => {
+  if (!modelFilterActive.value) return modelGroups.value
+  return modelGroups.value
+    .map(group => {
+      const models = group.models.filter(matchModelFilter)
+      return { ...group, models, ...groupCounts(group.id, models) }
+    })
+    .filter(group => group.models.length > 0)
+})
+
+// 命中总数：过滤时显示「匹配 N 个」，空结果时用它和总数区分「没读到目录」
+const filteredModelTotal = computed(() =>
+  filteredModelGroups.value.reduce((sum, group) => sum + group.models.length, 0))
+
+const modelTotal = computed(() =>
+  modelGroups.value.reduce((sum, group) => sum + group.models.length, 0))
+
+// 动作（测试 / 全部打开 / 全部关闭）作用于哪些模型：
+// 过滤生效时只碰命中的那些 —— 筛出 3 条再点「全部关闭」，用户要的是关掉这 3 条，
+// 而不是把整家渠道的几百条一起关掉。统一从 filteredModelGroups 取，
+// 动作范围与界面上看得见的集合永远是同一份（没有过滤时它就是全量）。
+function actionModelsOf(providerId) {
+  const group = filteredModelGroups.value.find(item => item.id === providerId)
+  return group ? group.models : []
+}
+
+function clearModelFilter() {
+  modelFilter.value = ''
+}
 
 // ==================== 模型测试结论的落盘 ====================
 
@@ -1592,72 +1846,13 @@ function modelTitle(providerId, m) {
       ? `｜测试通过（${result.latency ?? '-'}ms${age ? `，${age}` : ''}）`
       : `｜测试失败（${result.error || '未知原因'}${age ? `，${age}` : ''}）`
   }
+  // 失活优先说明：它此刻不参与路由，比「开关/上游失效」更影响用户判断
+  const health = healthOf(providerId, m)
+  if (health?.offline) return `已失活：${health.detail || health.reason || '原因未知'}（点「失活」标签恢复）${tested}`
   if (m.dead) return `已判定为上游下线（${m.id}），点击让它重新显示${tested}`
   const action = m.disabled ? '点击打开' : '点击关闭'
   return `${action}｜配置引用：channels/${providerId}/${m.id}${tested}`
 }
-
-// 「Flash」只能按名字判定：渠道包各家命名完全不统一（Qwen3.8-Flash、
-// deepseek-v4-flash、DeepSeek V4 Flash Official、GLM-5.3-Flash…），
-// 没有统一的档位字段可读，但都带这个词。
-//
-// 只收「被用户关掉」的：已失效（dead）是上游下线的系统推断，与用户开关是
-// 两回事（渠道包自己也刻意分开存），复活要走单点 model.clearDead。
-// 把这些混进来会让「快速开启」顺手把上游已经没有的模型塞回目录。
-const flashOffModels = computed(() => modelGroups.value.flatMap(group =>
-  group.models
-    .filter(m => !m.dead && m.disabled && isFlashModel(m))
-    .map(m => ({ provider: group.id, id: m.id, model: m }))))
-
-// Flash 的家族分组。渠道包各家对同一族模型的写法差得很远
-// （deepseek-v4-flash / DeepSeek-V4-Flash-Official / deepseek-v4.1-flash-free…），
-// 所以先把 id+name 拍平成「只含小写字母数字」再匹配，大小写、连字符、点、空格
-// 都不再影响结果。顺序有意义：DeepSeek V4 必须排在「其它 DeepSeek」之前，
-// 否则 v4 会被不带版本号的那条吞掉。
-//
-// 4.1 必须排在 V4 之前：拍平之后 `deepseek-v4.1-flash` 就是 `deepseekv41flash`，
-// 它同时命中 V4 那条的 `deepseekv4\d?flash`（`\d?` 正好吃掉这个 1），排后面就
-// 永远分不出来。反过来 `deepseekv41flash` 不会命中 V4 的写法之外的东西，故安全的。
-// 拍平还有个副作用正好帮我们：Raccoon 把版本写成 `sn-deepseek-v4-1-flash`
-// （用连字符不用点），拍平后同样是 `...v41flash`，与点号写法殊途同归。
-const FLASH_FAMILIES = [
-  { key: 'deepseek-v4.1', label: 'DeepSeek V4.1 Flash', re: /deepseekv41flash/ },
-  { key: 'deepseek-v4', label: 'DeepSeek V4 Flash', re: /deepseekv4\d?flash/ },
-  { key: 'deepseek', label: 'DeepSeek Flash', re: /deepseek.*flash/ },
-  { key: 'minimax', label: 'MiniMax Flash', re: /minimax.*flash|m3\d?flash/ },
-  { key: 'qwen', label: 'Qwen Flash', re: /qwen.*flash/ },
-  { key: 'glm', label: 'GLM Flash', re: /glm.*flash/ },
-  { key: 'gemini', label: 'Gemini Flash', re: /gemini.*flash/ },
-  { key: 'mimo', label: 'MiMo Flash', re: /mimo.*flash/ },
-  { key: 'sensenova', label: 'SenseNova Flash', re: /sensenova.*flash/ },
-  { key: 'other', label: '其它 Flash', re: /flash/ }
-]
-
-function isFlashModel(m) {
-  return /flash/i.test(`${m.id} ${m.name || ''}`)
-}
-
-function flashFamilyOf(m) {
-  const text = `${m.id} ${m.name || ''}`.toLowerCase().replace(/[^a-z0-9]/g, '')
-  return FLASH_FAMILIES.find(family => family.re.test(text)) || FLASH_FAMILIES[FLASH_FAMILIES.length - 1]
-}
-
-// 下拉里的家族清单：只列当前目录里真有的（没登录的渠道不占位），
-// 每项带「待开启 / 总数」，全开的禁用但仍显示 —— 菜单项忽隐忽现比灰着更难用
-const flashMenu = computed(() => {
-  const stats = new Map()
-  for (const group of modelGroups.value) {
-    for (const m of group.models) {
-      if (m.dead || !isFlashModel(m)) continue
-      const family = flashFamilyOf(m)
-      const entry = stats.get(family.key) || { key: family.key, label: family.label, total: 0, off: 0 }
-      entry.total += 1
-      if (m.disabled) entry.off += 1
-      stats.set(family.key, entry)
-    }
-  }
-  return FLASH_FAMILIES.map(family => stats.get(family.key)).filter(Boolean)
-})
 
 // 统一的模型开关写入口：两个渠道体系的存储语义不同。
 //   · 渠道包：每个 provider 一份「禁用 id 集合」，有 model.setDisabledMany
@@ -1681,10 +1876,10 @@ async function setModelsDisabled(provider, modelIds, disabled) {
   const byId = new Map(upstream.map(model => [model.id, model]))
   // 保存时要带上游的 displayName / 上下文长度，所以「打开」必须能查到上游定义。
   // 上游清单没拉到（该区域没账号、网络失败）时 byId 是空的，照原样保存会把这些
-  // 模型的元信息一起写丢 —— 宁可报错让人先刷新目录
+  // 模型的元信息一起写丢 —— 宁可报错让人先把目录拉回来
   const missing = [...enabled].filter(id => !byId.has(id))
   if (missing.length) {
-    throw new Error(`拿不到 ${missing.join('、')} 的上游定义，先点「重新读取目录」再试`)
+    throw new Error(`拿不到 ${missing.join('、')} 的上游定义（该区域的账号未登录或目录没拉到），切走再回到「模型」页会自动重新读取`)
   }
   // 空清单是合法的：全部关闭就是这个结果。恢复不靠后端「空=默认全开」的兜底
   // （后端并没有这个兜底），而是靠页面手里还留着上游全量 —— 再点「全部开启」即可
@@ -1697,55 +1892,6 @@ async function setModelsDisabled(provider, modelIds, disabled) {
       maxOutput: model.maxOutput
     }))
   await wbSaveEnabledModels(picked, region)
-}
-
-// 一次性打开一批 Flash 模型（targets 里每项带 provider / id）
-async function enableFlashTargets(targets, label) {
-  if (!targets.length) return
-  // 按渠道分组：一个渠道一次写入
-  const byProvider = new Map()
-  for (const item of targets) {
-    if (!byProvider.has(item.provider)) byProvider.set(item.provider, [])
-    byProvider.get(item.provider).push(item.id)
-  }
-  const batches = [...byProvider].map(([provider, modelIds]) => ({ provider, modelIds }))
-
-  busyKey.value = 'flash'
-  flashMenuOpen.value = false
-  try {
-    const results = await Promise.allSettled(batches.map(batch =>
-      setModelsDisabled(batch.provider, batch.modelIds, false)))
-    const failed = results
-      .map((result, i) => (result.status === 'rejected' ? { batch: batches[i], error: result.reason } : null))
-      .filter(Boolean)
-    const failedCount = failed.reduce((sum, item) => sum + item.batch.modelIds.length, 0)
-
-    await loadModels()
-    await loadStatus()
-
-    if (!failed.length) {
-      showToast(`已开启 ${targets.length} 个 ${label}`)
-    } else {
-      showToast(
-        `已开启 ${targets.length - failedCount} 个 ${label}，${failedCount} 个失败（${failed[0].batch.provider}：${failed[0].error?.message || '未知错误'}）`,
-        'error',
-        8000
-      )
-    }
-  } catch (err) {
-    showToast('批量开启 Flash 失败：' + err.message, 'error', 6000)
-  } finally {
-    busyKey.value = ''
-  }
-}
-
-// 只按家族开，没有「一次全开」—— 一键把所有 Flash 打开会把几十个模型一起塞进
-// /v1/models，用户回头还得逐个关；家族级是「够快又可控」的那一档
-function enableFlashFamily(key) {
-  const family = FLASH_FAMILIES.find(item => item.key === key)
-  if (!family) return
-  const targets = flashOffModels.value.filter(item => flashFamilyOf(item.model).key === key)
-  return enableFlashTargets(targets, family.label)
 }
 
 async function toggleModel(providerId, m) {
@@ -1767,13 +1913,20 @@ async function toggleModel(providerId, m) {
   }
 }
 
-// 某个渠道自己的「全部打开 / 全部关闭」
+// 某个渠道自己的「全部打开 / 全部关闭」。过滤生效时只作用于命中的模型
 async function setAllModels(providerId, disabled) {
+  const models = actionModelsOf(providerId)
+  if (!models.length) {
+    showToast('这个渠道里没有匹配当前过滤的模型', 'error', 5000)
+    return
+  }
   busyKey.value = providerId + ':models'
   try {
-    const ids = (modelsByProvider.value[providerId] || []).map(m => m.id)
+    const ids = models.map(m => m.id)
     await setModelsDisabled(providerId, ids, disabled)
-    showToast(`${disabled ? '已关闭' : '已打开'}该渠道全部模型`)
+    showToast(modelFilterActive.value
+      ? `已${disabled ? '关闭' : '打开'}匹配的 ${ids.length} 个模型`
+      : `已${disabled ? '关闭' : '打开'}该渠道全部模型`)
     await loadModels()
     await loadStatus()
   } catch (err) {
@@ -1788,15 +1941,17 @@ async function setAllModels(providerId, disabled) {
 //
 // 注意：开启不动 dead。dead 是上游下线的系统推断，只有逐点模型本身（clearDead）
 // 才能清掉，批量接口没有这个语义 —— 顺手开回来会把上游已经没有的模型塞回目录。
+//
+// 过滤生效时只作用于命中的模型（没有命中的渠道整批跳过，不为它发一次空写入）
 async function setAllModelsEverywhere(disabled) {
   if (busyKey.value) return
-  const batches = modelGroups.value.map(group => ({
+  const batches = filteredModelGroups.value.map(group => ({
     provider: group.id,
     modelIds: group.models.map(m => m.id)
   }))
   if (!batches.length) return
+  const total = batches.reduce((sum, batch) => sum + batch.modelIds.length, 0)
   busyKey.value = disabled ? 'all:off' : 'all:on'
-  flashMenuOpen.value = false
   try {
     const results = await Promise.allSettled(batches.map(batch =>
       setModelsDisabled(batch.provider, batch.modelIds, disabled)))
@@ -1808,8 +1963,9 @@ async function setAllModelsEverywhere(disabled) {
     await loadStatus()
 
     const action = disabled ? '关闭' : '打开'
+    const scope = modelFilterActive.value ? `匹配的 ${total} 个模型（${batches.length} 个渠道）` : `全部 ${batches.length} 个渠道的所有模型`
     if (!failed.length) {
-      showToast(`已${action}全部 ${batches.length} 个渠道的所有模型`)
+      showToast(`已${action}${scope}`)
     } else {
       showToast(
         `${batches.length - failed.length} 个渠道已${action}，${failed.length} 个失败（${failed[0].provider}：${failed[0].error?.message || '未知错误'}）`,
@@ -1843,10 +1999,11 @@ const TEST_THROTTLE_RE = /(429|rate.?limit|too.?many|限流|请求过[于快]|�
 
 // 只测「已启动」的模型：关闭的本来就没在跑；标「已失效」的是上游下线判定，
 // 打过去必然失败，一排红点只会把真正的坏消息淹掉。
+// 过滤生效时只测命中的模型（筛出 3 条却打了整渠道几百个请求，既慢又容易触发风控）。
 // 带上 provider：节奏控制要按渠道分组（组内串行、组间并发）
 function testTargetsOf(providerIds) {
   const targets = []
-  for (const group of modelGroups.value) {
+  for (const group of filteredModelGroups.value) {
     if (providerIds && !providerIds.includes(group.id)) continue
     for (const m of group.models) {
       if (m.disabled || m.dead) continue
@@ -1854,6 +2011,14 @@ function testTargetsOf(providerIds) {
     }
   }
   return targets
+}
+
+// 「已开启模型」那块的测试范围：清单本身就是范围 —— enabledModels 已经排除了
+// 关闭 / 已失效 / 已失活，不必再筛一遍。
+// 刻意不跟过滤走：那块的展示不受过滤影响，它旁边的按钮也就该测这份完整清单
+function testTargetsOfEnabled() {
+  return enabledModels.value.map(row =>
+    ({ provider: row.provider, key: row.provider + '/' + row.model.id }))
 }
 
 // 可被「中止」打断的等待：切成 100ms 一跳，否则点中止后还要干等满退避时间
@@ -1868,17 +2033,44 @@ function testSleep(ms) {
   })
 }
 
-// scope：'all' = 所有渠道；否则是单个 provider id
+// 「中止」：既让循环不再开始下一个，也断开当前在途请求
+function stopModelTests() {
+  testAbort.value = true
+  testController.value?.abort()
+}
+
+// 某一份范围是不是正在跑。测试中的按钮就地变成「停止」，所以要知道点的是自己还是别人
+function isTestRunning(scope) {
+  return !!testRun.value && testRun.value.scope === scope
+}
+
+// 测试中的按钮自己就是停止键：不用再去工具栏另一端找「中止」，
+// 也不至于让人以为「再点一次会重开一轮」
+function toggleModelTests(scope) {
+  if (isTestRunning(scope)) stopModelTests()
+  else runModelTests(scope)
+}
+
+// scope：'all' = 所有渠道；'enabled' = 「已开启模型」那张清单；否则是单个 provider id
 async function runModelTests(scope) {
   if (testRun.value) return
-  const targets = testTargetsOf(scope === 'all' ? null : [scope])
+  const targets = scope === 'enabled'
+    ? testTargetsOfEnabled()
+    : testTargetsOf(scope === 'all' ? null : [scope])
   if (!targets.length) {
-    showToast('没有可测的模型：这个范围里已启动的模型是空的', 'error', 5000)
+    showToast(scope === 'enabled'
+      ? '没有可测的模型：当前没有任何已开启的模型'
+      : modelFilterActive.value
+        ? '没有可测的模型：匹配的模型里没有已启动的（关掉的与已失效的都不测）'
+        : '没有可测的模型：这个范围里已启动的模型是空的', 'error', 5000)
     return
   }
 
   testAbort.value = false
   testRun.value = { scope, done: 0, total: targets.length }
+  // 本轮的在途请求句柄：每轮一个，上一轮的 abort 不该影响这一轮
+  const controller = new AbortController()
+  testController.value = controller
   // 本次真正测到的 key。历史绿点不算进这一轮的汇总，否则「通过 8」会把
   // 上一轮留下、这一轮根本没碰的模型也数进去
   const tested = []
@@ -1900,8 +2092,10 @@ async function runModelTests(scope) {
         if (testAbort.value) { userAborted = true; return }
         let res
         try {
-          res = await channelsTest({ model: target.key })
+          res = await channelsTest({ model: target.key }, controller.signal)
         } catch (err) {
+          // 用户点了中止：这次不算模型的失败，也不写测试标记
+          if (controller.signal.aborted) { userAborted = true; return }
           res = { ok: false, error: err.message }
         }
         // 只覆盖这个模型自己的旧结论，不动别的渠道/别的模型的绿点
@@ -1926,7 +2120,11 @@ async function runModelTests(scope) {
   } finally {
     testRun.value = null
     testAbort.value = false
+    testController.value = null
   }
+
+  // 测试通过会让服务端清掉「连续失败」的失活标记，这里同步一次标签
+  await loadModelHealth()
 
   const passed = tested.filter(key => modelTestResults.value[key]?.ok).length
   const failed = tested.length - passed
@@ -1980,6 +2178,19 @@ const wbBadgeClass = computed(() => {
   return c.healthy === 0 ? 'bad' : 'warn'
 })
 
+// 渠道级开关的口径与其它渠道卡片一致：只看「是否参与请求轮转」。
+// 冷却 / 熔断中的账号仍算「启用」—— 那是上游暂时不可用，不是用户关掉的；
+// 混进来会让开关自己跳来跳去
+const wbEnabledCount = computed(() => wbList.value.filter(acct => !acct.disabled).length)
+const wbAllDisabled = computed(() => wbList.value.length > 0 && wbEnabledCount.value === 0)
+const wbSwitchChecked = computed(() => wbList.value.length > 0 && !wbAllDisabled.value)
+
+const wbSwitchTitle = computed(() => {
+  if (!wbList.value.length) return '还没有账号：登录后这里控制 WorkBuddy 全部账号的启用 / 停用'
+  return `渠道级开关：停用 / 启用 WorkBuddy 全部账号（当前 ${wbEnabledCount.value}/${wbList.value.length} 个启用）；`
+    + '只改「参不参与请求轮转」，冷却 / 熔断与模型开关都不受影响'
+})
+
 // 失败不弹 toast：整页读取失败时 reload() 已经弹过一次，这里再弹就是两条重复提示。
 // 改用卡片上的 wbError 兜底，避免接口挂了却显示成「还没有账号」。
 async function loadWorkbuddy() {
@@ -1998,7 +2209,9 @@ function wbErrText(err) {
 }
 
 function wbStateLabel(acct) {
-  if (acct.disabled) return '已禁用'
+  // 「已停用」而不是「已禁用」：渠道卡片里「已禁用」专指上游封号（红标、带原话），
+  // 这里的停用都是人自己点的（行内勾选框 / 渠道级开关），两者不能混用一个词
+  if (acct.disabled) return '已停用'
   if (acct.cooling) {
     if (acct.coolKind === 'hard_credit') return '积分冷却'
     if (acct.coolKind === 'breaker') return '熔断'
@@ -2008,7 +2221,8 @@ function wbStateLabel(acct) {
 }
 
 function wbStateClass(acct) {
-  if (acct.disabled) return 'ch-bad'
+  // 自己关掉的账号用灰字，不用红字：红色留给「上游说这个号不能用了」
+  if (acct.disabled) return 'text-muted'
   if (acct.cooling) return 'ch-warn'
   return 'ch-ok'
 }
@@ -2128,25 +2342,77 @@ async function wbRevive(acct) {
   }
 }
 
-async function wbDisable(acct) {
+// 行内勾选框：与其它渠道的 toggleAccount 对齐 —— 点一下即生效，不弹确认框，
+// 失败时把勾选框拨回去（界面不能停在一个没生效的状态上）。
+//
+// 与渠道包的区别：WorkBuddy 走 /api/workbuddy/enable|disable，且用 { ok:false, message }
+// 表达业务失败 —— axios 不会抛错，得自己看 ok。
+// 停用原因写「人工禁用」：渠道级开关写的是「渠道级停用」，两者在账号详情里能分辨是谁关的
+async function wbToggleAccount(acct, event) {
+  const enabled = event.target.checked
   const name = acct.nickname || acct.uid.slice(0, 8)
-  if (!window.confirm(`确定禁用账号「${name}」吗？\n禁用后该账号不参与请求轮转，可随时恢复。`)) return
+  wbBusy.value = acct.uid + ':enable'
   try {
-    const res = await wbDisableApi(acct.uid, '人工禁用')
-    showToast(res.ok ? '账号已禁用' : res.message || '禁用失败', res.ok ? 'success' : 'error')
+    const res = enabled
+      ? await wbEnableApi(acct.uid)
+      : await wbDisableApi(acct.uid, '人工禁用')
+    if (res && res.ok === false) throw new Error(res.message || '操作失败')
     await loadWorkbuddy()
+    showToast(`${name} 已${enabled ? '恢复启用' : '停用'}`)
   } catch (err) {
-    showToast('禁用失败：' + wbErrText(err), 'error')
+    event.target.checked = !enabled
+    showToast('切换账号状态失败：' + wbErrText(err), 'error', 6000)
+  } finally {
+    wbBusy.value = ''
   }
 }
 
-async function wbEnable(acct) {
+// 渠道级开关：逐账号调用 WorkBuddy 自己的端点（/api/workbuddy/* 没有批量接口）。
+//
+// 只动真正需要改的那部分账号：对已启用的账号调 enable 会被服务端拒（「未被禁用」），
+// 对已禁用的账号重复 disable 只会把原来的停用原因覆盖成「渠道级停用」——
+// 那个原因可能正是自动标记写下的故障原文，覆盖掉就查不出当初为什么停的
+async function wbToggleProvider(event) {
+  const enabled = event.target.checked
+  if (!wbList.value.length) {
+    event.target.checked = !enabled
+    showToast('WorkBuddy 还没有账号，先登录后再试', 'error', 5000)
+    return
+  }
+  const rows = enabled
+    ? wbList.value.filter(acct => acct.disabled)
+    : wbList.value.filter(acct => !acct.disabled)
+  if (!rows.length) return // 已经是目标状态，没必要发一轮必然失败的请求
+
+  wbBusyAll.value = 'toggle'
+  const failed = []
+  let changed = 0
   try {
-    const res = await wbEnableApi(acct.uid)
-    showToast(res.ok ? '账号已恢复启用' : res.message || '恢复失败', res.ok ? 'success' : 'error')
+    for (const acct of rows) {
+      try {
+        const res = enabled
+          ? await wbEnableApi(acct.uid)
+          : await wbDisableApi(acct.uid, '渠道级停用')
+        // 服务端用 { ok:false, message } 表达业务失败，axios 不会抛错，得自己看
+        if (res && res.ok === false) throw new Error(res.message || '操作失败')
+        changed++
+      } catch (err) {
+        failed.push(`${acct.nickname || acct.uid.slice(0, 8)}：${wbErrText(err)}`)
+      }
+    }
+    if (failed.length) {
+      showToast(
+        `WorkBuddy ${enabled ? '启用' : '停用'} ${changed}/${rows.length} 个账号失败 ${failed.length} 个：${failed[0]}`,
+        'error',
+        7000
+      )
+    } else {
+      showToast(`WorkBuddy 已${enabled ? '启用' : '停用'} ${changed} 个账号`)
+    }
+    // 逐号改可能部分失败：以重新读取的结果为准，别让开关停在「看起来全生效」的猜测上
     await loadWorkbuddy()
-  } catch (err) {
-    showToast('恢复失败：' + wbErrText(err), 'error')
+  } finally {
+    wbBusyAll.value = ''
   }
 }
 
@@ -2170,12 +2436,99 @@ async function wbCheckinAll() {
   wbBusyAll.value = 'checkin'
   try {
     const res = await wbSchedulerRun('checkin')
+    wbCheckinSummary.value = `WorkBuddy 全部签到：${(res && res.summary) || '已执行'}`
     showToast(`全部签到完成：${(res && res.summary) || '已执行'}`)
     await loadWorkbuddy()
   } catch (err) {
     showToast('全部签到失败：' + wbErrText(err), 'error', 5000)
   } finally {
     wbBusyAll.value = ''
+  }
+}
+
+// ==================== 一键签到 ====================
+// 覆盖渠道包里能领积分的九个渠道 + WorkBuddy 国内版账号，逐渠道顺序执行：
+//   · 渠道包的 credits.claimAll 内部已经是逐账号顺序领取，这里再并发只会一起撞上游风控；
+//   · WorkBuddy 复用调度器的签到任务（自带全账号限速与连登管家），不另写一遍循环。
+// 单渠道失败不中断后面的渠道，原因写进该卡片的「领取结果」，顶部只汇总。
+const checkinAll = ref({ running: false, done: 0, total: 0 })
+const checkinSummary = ref('')
+const checkinFailed = ref(false)
+
+const claimableProviders = computed(() => PROVIDERS.filter(p => canClaim(p) && accountsOf(p).length > 0))
+const checkinTotal = computed(() => claimableProviders.value.length + (wbCnCount.value > 0 ? 1 : 0))
+
+function checkinSummaryText(totals, errors) {
+  const gains = []
+  if (totals.token > 0) gains.push(`+${formatToken(totals.token)} Token`)
+  if (totals.credit > 0) gains.push(`+${formatCredit(totals.credit)} 积分`)
+  const gained = gains.length ? `（${gains.join('，')}）` : ''
+  const parts = [`领取 ${totals.claimed}${gained}`]
+  if (totals.alreadyClaimed > 0) parts.push(`已领过 ${totals.alreadyClaimed}`)
+  if (totals.inactive > 0) parts.push(`未开通 ${totals.inactive}`)
+  if (totals.failed > 0) parts.push(`失败 ${totals.failed}`)
+  const failedTail = errors.length ? `；${errors.length} 个渠道出错：${errors.join('、')}` : ''
+  return `一键签到完成：${parts.join('，')}${failedTail}`
+}
+
+async function runCheckinAll() {
+  if (checkinAll.value.running || checkinTotal.value === 0) return
+  const targets = claimableProviders.value.map(p => ({ kind: 'channel', provider: p }))
+  if (wbCnCount.value > 0) targets.push({ kind: 'workbuddy' })
+  checkinAll.value = { running: true, done: 0, total: targets.length }
+  checkinSummary.value = ''
+  checkinFailed.value = false
+  wbCheckinSummary.value = ''
+  const totals = { claimed: 0, alreadyClaimed: 0, inactive: 0, failed: 0, token: 0, credit: 0 }
+  const errors = []
+  try {
+    for (const target of targets) {
+      if (target.kind === 'channel') {
+        const p = target.provider
+        try {
+          const value = await channelsRpc('credits.claimAll', { provider: p.id }, 600000)
+          claimResults.value = { ...claimResults.value, [p.id]: value }
+          const s = value.summary || {}
+          totals.claimed += Number(s.claimed) || 0
+          totals.alreadyClaimed += Number(s.alreadyClaimed) || 0
+          totals.inactive += Number(s.inactive) || 0
+          totals.failed += Number(s.failed) || 0
+          const byUnit = s.totalByUnit || { credit: s.totalCredit, token: 0 }
+          totals.credit += Number(byUnit.credit) || 0
+          totals.token += Number(byUnit.token) || 0
+        } catch (err) {
+          errors.push(p.name)
+          // 失败的渠道也占一张卡片的结果区：顶部只有渠道名，原因得留在这里
+          claimResults.value = {
+            ...claimResults.value,
+            [p.id]: {
+              summary: { claimed: 0, alreadyClaimed: 0, inactive: 0, failed: 1, totalByUnit: {} },
+              results: [{ accountId: '', nickname: p.name, outcome: { kind: 'failed', message: err.message } }]
+            }
+          }
+        }
+      } else {
+        try {
+          const res = await wbSchedulerRun('checkin')
+          wbCheckinSummary.value = `WorkBuddy 全部签到：${(res && res.summary) || '已执行'}`
+        } catch (err) {
+          errors.push('WorkBuddy')
+          wbCheckinSummary.value = 'WorkBuddy 全部签到失败：' + wbErrText(err)
+        }
+      }
+      checkinAll.value = { ...checkinAll.value, done: checkinAll.value.done + 1 }
+    }
+    checkinSummary.value = checkinSummaryText(totals, errors)
+    checkinFailed.value = errors.length > 0 || totals.failed > 0
+    showToast(checkinSummary.value, checkinFailed.value ? 'error' : 'success', 8000)
+    // 签到会改积分与账号状态，重读一次让卡片上的数字跟得上
+    await loadWorkbuddy()
+  } catch (err) {
+    checkinFailed.value = true
+    checkinSummary.value = '一键签到中断：' + (err?.message || '未知错误')
+    showToast(checkinSummary.value, 'error', 8000)
+  } finally {
+    checkinAll.value = { ...checkinAll.value, running: false }
   }
 }
 
@@ -2210,31 +2563,17 @@ function formatToken(value) {
   return String(Math.round(n))
 }
 
-// 说明浮层与 Flash 下拉都点外部任意处关闭。用 pointerdown 而不是 click：
-// 卡片上的按钮用 click，这里先于它触发才能做到「点哪儿都收起」，
-// 不会出现浮层挡住内容又关不掉的死角
-function onDocPointerDown(event) {
-  const target = event.target instanceof Element ? event.target : null
-  if (showNote.value && !(target && target.closest('.ch-heading'))) showNote.value = false
-  if (showModelNote.value && !(target && target.closest('.ch-help-wrap'))) showModelNote.value = false
-  // 用 closest('.ch-dd') 而不是只判按钮：菜单本身也在 .ch-dd 里，
-  // 否则点菜单项的那一下会先把菜单关掉（pointerdown 早于 click）
-  if (flashMenuOpen.value && !(target && target.closest('.ch-dd'))) flashMenuOpen.value = false
-}
-
 onMounted(() => {
   reload()
-  document.addEventListener('pointerdown', onDocPointerDown)
 })
 onUnmounted(() => {
   stopPolling()
   wbStopPolling()
-  // 拖拽中切走页面时把浮层和全局监听一并收掉，否则它会留在 body 上
+  // 拖拽中切走页面时把拖拽状态一并收掉，否则落点监听会留在 document 上
   finishDrag({ cancel: true })
-  document.removeEventListener('pointerdown', onDocPointerDown)
   // 离开页面时把正在跑的模型测试也停掉：否则它会继续对着上游一个个打，
-  // 用户已经在别的页面了，连「中止」按钮都看不见
-  testAbort.value = true
+  // 用户已经在别的页面了，连「停止」按钮都看不见
+  stopModelTests()
 })
 </script>
 
@@ -2267,72 +2606,29 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
 }
 
-
-
-
-
-.ch-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 标题旁的问号：说明文字收在它后面，不占版面 */
-.ch-help {
-  width: 20px;
-  height: 20px;
-  padding: 2px;
-  flex: none;
-  border: 1px solid var(--border-2);
-  border-radius: 50%;
-  background: none;
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.ch-help:hover,
-.ch-help.active {
-  color: var(--primary);
-  border-color: var(--primary);
-}
-
-.ch-note-pop {
-  position: absolute;
-  top: calc(100% + 8px);
-  /* 以工具条整条为定位锚点（见 App.vue .page-toolbar）：右对齐向左铺开，
-     宽度同时受窗口与工具条限制，窄窗口下不会压到侧边栏 */
-  right: 0;
-  z-index: 20;
-  width: min(680px, calc(100vw - 64px));
-  max-width: 100%;
-  max-height: 60vh;
-  overflow: auto;
-  padding: 12px 16px;
-  font-size: var(--fs-xs);
-  line-height: 1.7;
+/* 一键签到的汇总行：成功后保持中性色，只有出错时才转红（与上面的运行时警报同一口径） */
+.ch-checkin-tip {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  font-size: var(--fs-small);
   color: var(--text-2);
-  background: var(--bg-card);
+  background: var(--bg-subtle);
   border: 1px solid var(--border-1);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
-.ch-note-list {
-  margin: 0;
-  padding-left: 18px;
+.ch-checkin-tip.bad {
+  color: var(--bad-text);
+  background: var(--bad-bg);
+  border-color: var(--danger);
 }
 
-.ch-note-list li + li {
-  margin-top: 6px;
-}
-
-.ch-note-pop code {
-  padding: 1px 5px;
-  font-family: 'Courier New', Consolas, monospace;
-  font-size: var(--fs-mini);
-  color: var(--primary-text);
-  background: var(--bg-code);
-  border-radius: var(--radius-xs);
+/* 工具条：全局 .page-toolbar 是整条右对齐，而「账号 / 模型」是视图切换、
+   属于页面左侧的位置，右侧才留给本页操作（统计 + 一键签到）。
+   切换控件自身的外观（浅底激活项、键盘焦点）由 SegmentedTabs 负责，
+   这里不再覆盖它的按钮样式 */
+.page-toolbar {
+  justify-content: space-between;
 }
 
 /* ===== 渠道卡片 ===== */
@@ -2456,6 +2752,36 @@ body.ch-drag-active * {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+}
+
+/* ===== 合并卡里的「渠道分段」 ===== */
+/* 一段 = 一个渠道。单渠道卡只有一段，段内间距与原来的卡片间距一致（10px），
+   所以合并与否都不改变单渠道卡的样子 */
+.ch-provider-seg {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 段与段之间加一条分割线：两段各有账号列表和操作行，只靠间距会连成一片，
+   看起来像同一个渠道的两组账号 */
+.ch-card-merged .ch-provider-seg + .ch-provider-seg {
+  padding-top: 10px;
+  border-top: 1px solid var(--border-1);
+}
+
+/* 段头：卡头已经写了产品名，这里写 region 名（照抄渠道包的 displayName），
+   字号比卡头小一号，层级分明 */
+.ch-provider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.ch-provider-head .ch-name {
+  font-size: var(--fs-small);
+  font-weight: 500;
 }
 
 
@@ -2709,79 +3035,56 @@ body.ch-drag-active * {
   margin-left: auto;
 }
 
-/* 模型页问号的外层：给浮层提供定位上下文（.ch-help 本身是圆形按钮，
-   不设 position，浮层才能稳定挂在它正下方） */
-.ch-help-wrap {
+/* 模型过滤输入框：工具栏里唯一的文本控件。
+   宽度固定而不 flex:1 —— 拉满会把右侧那组动作（测试 / 全部开启 / 全部关闭）
+   推到最边上，和过滤的「作用范围」拉开距离，反而看不清筛完之后在操作什么 */
+.ch-model-filter {
   position: relative;
-  display: flex;
+  display: inline-flex;
   align-items: center;
 }
 
-/* 「快速开启」下拉：按钮与菜单共用定位上下文，菜单挂在按钮下方 */
-.ch-dd {
-  position: relative;
+.ch-model-filter-input {
+  width: 200px;
+  padding: 5px 24px 5px 10px;
+  font-size: var(--fs-small);
 }
 
-.ch-dd-caret {
-  margin-left: 4px;
-  font-size: 10px;
-  opacity: 0.6;
+/* 有过滤条件时给个可见的边界：几百个模型被筛掉之后，
+   输入框本身要保持「现在是过滤状态」这个信号 */
+.ch-model-filter.active .ch-model-filter-input {
+  border-color: var(--primary);
 }
 
-.ch-dd-caret.open {
-  opacity: 1;
-}
-
-.ch-dd-menu {
+/* 清除按钮压在输入框右侧，不额外占一格工具栏 */
+.ch-model-filter-clear {
   position: absolute;
-  top: calc(100% + 6px);
-  /* 按钮在工具栏右端，菜单向左展开：用 left: 0 会顶出卡片右边 */
-  right: 0;
-  z-index: 20;
-  min-width: 236px;
-  padding: 4px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-}
-
-.ch-dd-item {
+  right: 4px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  width: 100%;
-  padding: 6px 8px;
-  font-size: var(--fs-xs);
-  color: var(--text-1);
-  text-align: left;
-  background: none;
-  border: 0;
-  border-radius: var(--radius-xs);
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 15px;
+  line-height: 1;
   cursor: pointer;
 }
 
-.ch-dd-item:hover:not(:disabled) {
-  background: var(--bg-subtle);
+.ch-model-filter-clear:hover {
+  color: var(--text-1);
 }
 
-.ch-dd-item:disabled {
-  color: var(--text-3);
-  cursor: default;
+.ch-model-filter-hit {
+  white-space: nowrap;
 }
 
-.ch-dd-note {
+/* 过滤时标注组内按钮的作用范围（作用于匹配的 N 个）：小字，不抢按钮的注意力 */
+.ch-filter-scope {
   font-size: var(--fs-mini);
-  color: var(--text-3);
-}
-
-/* 一条 Flash 模型都没有时的兜底文案（菜单不能空着弹出来） */
-.ch-dd-empty {
-  display: block;
-  padding: 6px 8px;
-  font-size: var(--fs-xs);
-  color: var(--text-3);
 }
 
 .ch-model-group {
@@ -2789,8 +3092,8 @@ body.ch-drag-active * {
   border-top: 1px solid var(--border-2);
 }
 
-/* 「已开启模型」板块：它是全量目录的一个视图，结论却完全不同，
-   所以给一层底色 + 外框，滚到下面那一片灰里也不会看混 */
+/* 「已开启模型」板块：排在卡片最上方，给一层底色 + 外框把它和下面的
+   工具栏、全量目录分开 —— 它是结论，后面那两段是产生结论的材料 */
 .ch-enabled-block {
   padding: 10px 12px 12px;
   border: 1px solid var(--border-1);
@@ -2857,6 +3160,20 @@ body.ch-drag-active * {
 .ch-model.dead {
   color: var(--text-4);
   text-decoration: line-through;
+}
+
+/* 失活：网关不再把请求派给它（余额/账号/连续失败）。用描边区分于「关闭」的
+   虚线，避免用户以为是自己关掉了它 */
+.ch-model.offline {
+  border-color: var(--bad-text);
+}
+
+.ch-tag-action {
+  cursor: pointer;
+}
+
+.ch-tag-action:hover {
+  text-decoration: underline;
 }
 
 /* 测试结论的小圆点：绿=通过、红=失败。用圆点而不是给整块改色——

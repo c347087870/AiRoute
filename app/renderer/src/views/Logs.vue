@@ -146,6 +146,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { getLogs, getLogModels, clearLogs, getLogsSize, wbAccounts, wbCreditHistory } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
 import { formatNumber, formatTime, formatBytes } from '../utils/format.js'
 
 const logs = ref([]) // 当前加载出来的日志列表（服务端已按任务合并，一条 = 一个任务）
@@ -160,7 +161,6 @@ const CREDIT_PAGE_SIZE = 50 // 积分历史每页条数（服务端 limit）
 const creditUid = ref('') // 积分历史账号筛选，空表示全部
 const creditPage = ref(1) // 积分历史当前页（从 1 开始）
 const clearing = ref(false) // 清空日志请求进行中（防重入）
-const refreshing = ref(false) // 顶部栏「刷新」按钮的 loading 状态
 const creditTotal = ref(0) // 积分历史过滤后总条数（服务端返回）
 const creditNote = ref('') // 积分历史统计说明（总条数 · 净变动）
 
@@ -213,8 +213,9 @@ function accountLabel(uid) {
   return String(uid).slice(0, 8)
 }
 
-// 加载日志；服务端已按任务合并（一次输入 + 其工具循环 = 一条记录）
-async function loadLogs() {
+// 加载日志；服务端已按任务合并（一次输入 + 其工具循环 = 一条记录）。
+// silent：轮询触发时不弹错误 toast（没有用户手势，下一次轮询会自己重试）
+async function loadLogs({ silent = false } = {}) {
   try {
     logs.value = (await getLogs({
       limit: limit.value,
@@ -222,16 +223,16 @@ async function loadLogs() {
       status: statusFilter.value
     })) || []
   } catch (err) {
-    showToast('日志加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
+    if (!silent) showToast('日志加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
   }
 }
 
 // 加载模型下拉选项
-async function loadModels() {
+async function loadModels({ silent = false } = {}) {
   try {
     modelOptions.value = await getLogModels()
   } catch (err) {
-    showToast('模型列表加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
+    if (!silent) showToast('模型列表加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
   }
 }
 
@@ -313,17 +314,19 @@ function changeCreditPage(delta) {
 }
 
 // 全量刷新：日志 + 模型选项 + 目录占用 + 账号池昵称 + 积分历史
-async function refreshAll() {
-  refreshing.value = true
-  try {
-    await Promise.all([loadLogs(), loadModels(), loadSize(), loadAccounts(), loadCreditHistory()])
-  } finally {
-    refreshing.value = false
-  }
+async function refreshAll({ silent = false } = {}) {
+  await Promise.all([
+    loadLogs({ silent }),
+    loadModels({ silent }),
+    loadSize(),
+    loadAccounts(),
+    loadCreditHistory()
+  ])
 }
 
-// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
-usePageActions({ refresh: refreshAll, loading: refreshing })
+// 顶部栏的「实时」角标由布局渲染；数据靠 5 秒轮询保持最新
+usePageActions({ live: true })
+usePolling(() => refreshAll({ silent: true }))
 
 // 重置筛选条件，条数属于展示设置不参与重置
 function resetFilters() {
@@ -350,7 +353,7 @@ async function clearAllLogs() {
 }
 
 // 模型 / 状态 / 条数变化后立即重新加载
-watch([modelFilter, statusFilter, limit], loadLogs)
+watch([modelFilter, statusFilter, limit], () => loadLogs())
 
 // 积分历史账号筛选变化：回到第一页重新加载
 watch(creditUid, () => {

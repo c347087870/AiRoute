@@ -14,6 +14,8 @@ server/benchmark-runs.json
 server/fallback.json
 server/rules.json
 server/server-config.json
+server/model-health.json
+server/account-health.json
 
 # WorkBuddy 账号凭证与池状态（含明文 accessToken/refreshToken，严禁提交）
 server/workbuddy-auths/

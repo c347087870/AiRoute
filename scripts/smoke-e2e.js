@@ -117,18 +117,25 @@ function startMockUpstream() {
 
       // OpenAI chat/completions
       if (stream) {
-        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
-        res.write(
-          `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: '你好' }, finish_reason: null }] })}\n\n`
-        )
-        res.write(
-          `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: '，世界' }, finish_reason: null }] })}\n\n`
-        )
-        res.write(
-          `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 9, total_tokens: 29, prompt_tokens_details: { cached_tokens: 5 } } })}\n\n`
-        )
-        res.write('data: [DONE]\n\n')
-        res.end()
+        // 并发用例（auto-least-conn）需要一个「还没结束」的上游：请求体里带 hold
+        // 就先压 600ms 不写任何字节，好让第二个请求在它仍挂着时到达网关
+        const holdMs = /hold/.test(JSON.stringify(body.messages || [])) ? 600 : 0
+        const emit = () => {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+          res.write(
+            `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: '你好' }, finish_reason: null }] })}\n\n`
+          )
+          res.write(
+            `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: '，世界' }, finish_reason: null }] })}\n\n`
+          )
+          res.write(
+            `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 9, total_tokens: 29, prompt_tokens_details: { cached_tokens: 5 } } })}\n\n`
+          )
+          res.write('data: [DONE]\n\n')
+          res.end()
+        }
+        if (holdMs) setTimeout(emit, holdMs)
+        else emit()
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -336,6 +343,14 @@ async function main() {
       const ids = r.json.data.map(m => m.id)
       assert.ok(ids.includes('mock-large'))
       assert.ok(ids.includes('claude-opus-4-20250514'))
+    })
+
+    await check('GET /v1/models 暴露四档 auto 伪模型', async () => {
+      const r = await fetchJson(`${base}/v1/models`)
+      const ids = r.json.data.map(m => m.id)
+      for (const id of ['auto', 'auto-fast', 'auto-cheap', 'auto-least-conn']) {
+        assert.ok(ids.includes(id), `${id} 应出现在 /v1/models`)
+      }
     })
 
     // ==================== 配置写入校验 ====================
@@ -613,6 +628,65 @@ async function main() {
       }
     })
 
+    // ==================== 模型失活 ====================
+    group('6.5 模型失活（连续失败 → 下线 → 手动恢复）')
+
+    await check('连续 3 次失败 → 模型失活、不再出现在 /v1/models、恢复后回来', async () => {
+      const setState = ref => fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: ref })
+      })
+      try {
+        await setState('fail-provider/dead')
+        // 前面 Fallback 用例可能已经消耗掉 1 次失败，这里多打几次保证越过阈值
+        for (let i = 0; i < 3; i += 1) {
+          await fetchJson(`${base}/v1/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: `health-probe-${i}` }] })
+          })
+        }
+
+        const ledger = await fetchJson(`${base}/api/model-health`)
+        assert.strictEqual(ledger.status, 200)
+        const record = ledger.json.models.find(item => item.ref === 'fail-provider/dead')
+        assert.ok(record, `台账里应有 fail-provider/dead，实际：${JSON.stringify(ledger.json.models)}`)
+        assert.strictEqual(record.offline, true)
+        assert.strictEqual(record.reason, 'errors')
+
+        const listed = await fetchJson(`${base}/v1/models`)
+        assert.ok(!listed.json.data.some(item => item.id === 'dead'), '失活模型不该再被播报')
+
+        const blocked = await fetchJson(`${base}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'after-offline' }] })
+        })
+        assert.strictEqual(blocked.status, 500)
+        assert.match(blocked.json.error, /失活/, '错误文案要说清是失活，而不是「没配置」')
+
+        const revived = await fetchJson(`${base}/api/model-health/revive`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ref: 'fail-provider/dead' })
+        })
+        assert.strictEqual(revived.status, 200)
+        const listedAgain = await fetchJson(`${base}/v1/models`)
+        assert.ok(listedAgain.json.data.some(item => item.id === 'dead'), '恢复后应重新播报')
+      } finally {
+        await setState('mock-provider/mock-large')
+      }
+    })
+
+    // ==================== 账号禁用台账 ====================
+
+    await check('账号停用原因台账可读（无渠道账号时为空数组，不报错）', async () => {
+      const resp = await fetchJson(`${base}/api/account-health`)
+      assert.strictEqual(resp.status, 200)
+      assert.deepStrictEqual(resp.json, { ok: true, accounts: [] })
+    })
+
     // ==================== 智能路由 ====================
     group('7. 智能路由（auto）')
 
@@ -639,9 +713,32 @@ async function main() {
       })
     })
 
+    await check('auto-least-conn：并发的两个请求摊到不同模型上', async () => {
+      const before = mock.requests.filter(q => q.url.includes('/chat/completions')).length
+      const call = () => fetchJson(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'auto-least-conn',
+          messages: [{ role: 'user', content: 'hold 并发' }],
+          stream: true
+        })
+      })
+      // 两个请求同时发出：第一个还挂着（mock 压 600ms 不吐字节）时第二个才建链，
+      // 这时它必须看见「第一个已占用」而换一个模型
+      const [first, second] = await Promise.all([call(), call()])
+      assert.strictEqual(first.status, 200, first.text.slice(0, 200))
+      assert.strictEqual(second.status, 200, second.text.slice(0, 200))
+      const landed = mock.requests
+        .filter(q => q.url.includes('/chat/completions'))
+        .slice(before)
+        .map(q => q.body.model)
+      assert.strictEqual(landed.length, 2, `应有两次上游请求：${landed}`)
+      assert.notStrictEqual(landed[0], landed[1], `并发的两条请求应落到不同模型：${landed}`)
+    })
+
     // ==================== 无可用 Provider ====================
     group('8. 边界与错误处理')
-
     await check('缺少 API Key 的 Provider → 500 且日志记录', async () => {
       const sw = await fetchJson(`${base}/api/state`, {
         method: 'POST',

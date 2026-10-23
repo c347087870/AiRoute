@@ -2,9 +2,10 @@
 //
 //     node scripts/test-auto-strategy.js
 //
-// 三档 auto 的价值全在「排序对不对」上，而排序是纯函数 + 一份日志采样，
+// 四档 auto 的价值全在「排序对不对」上，而排序是纯函数 + 一份日志采样，
 // 所以这里直接给合成数据断言顺序。真正的延迟/倍率来自真实日志，
 // 那部分用一条合成日志验证「解析口径」（credits=0 是免费、缺字段才是没数据）。
+// 并发优先（auto-least-conn）不吃日志，只吃实时在途数，那块单独造计数验证。
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -35,6 +36,8 @@ function statOf(ok, fail, latencies, credits, tokens, costSamples) {
 check('伪模型 id 判定', () => {
   assert.equal(auto.isAutoId('auto'), true)
   assert.equal(auto.isAutoId('auto-fast'), true)
+  assert.equal(auto.isAutoId('auto-cheap'), true)
+  assert.equal(auto.isAutoId('auto-least-conn'), true)
   assert.equal(auto.isAutoId(' AUTO-CHEAP '), true, '大小写与空白都不该影响判定')
   assert.equal(auto.isAutoId('auto-slow'), false)
   assert.equal(auto.isAutoId('claude-opus-4-20250514'), false)
@@ -44,13 +47,13 @@ check('伪模型 id 判定', () => {
 
 check('伪模型清单形状', () => {
   const list = auto.listAutoModels()
-  assert.equal(list.length, 3)
+  assert.equal(list.length, 4)
   for (const item of list) {
     assert.equal(item.object, 'model')
     assert.equal(item.owned_by, 'airoute')
     assert.ok(item.name && item.name.length > 0, '要带中文说明，能读到 name 的客户端才看得懂')
   }
-  assert.deepEqual(list.map(item => item.id), ['auto', 'auto-fast', 'auto-cheap'])
+  assert.deepEqual(list.map(item => item.id), ['auto', 'auto-fast', 'auto-cheap', 'auto-least-conn'])
 })
 
 check('中位数', () => {
@@ -111,6 +114,54 @@ check('综合：不是纯延迟也不是纯成本的复制品', () => {
   assert.deepEqual(order, ['b', 'a', 'c'])
 })
 
+check('并发优先：在途最少的先试，都很闲时按延迟排', () => {
+  const refs = [refOf('fast'), refOf('mid'), refOf('slow')]
+  const stats = new Map([
+    ['channels/fast', statOf(5, 0, [100])],
+    ['channels/mid', statOf(5, 0, [500])],
+    ['channels/slow', statOf(5, 0, [2000])]
+  ])
+  auto.resetInFlight()
+  const idle = auto.rankCandidates(refs, 'connections', stats).map(item => item.entry.model.id)
+  assert.deepEqual(idle, ['fast', 'mid', 'slow'], '人人空闲时应退化成延迟序，而不是配置顺序')
+
+  // mid 正被两个请求占着：即使它比 slow 快，也该排到 slow 后面
+  const releaseA = auto.beginAttempt('channels/mid')
+  const releaseB = auto.beginAttempt('channels/mid')
+  const busy = auto.rankCandidates(refs, 'connections', stats).map(item => item.entry.model.id)
+  assert.deepEqual(busy, ['fast', 'slow', 'mid'])
+  releaseA()
+  releaseB()
+  assert.deepEqual(auto.rankCandidates(refs, 'connections', stats).map(item => item.entry.model.id), idle)
+})
+
+check('并发优先：近期全失败的候选即使最闲也沉底', () => {
+  const refs = [refOf('dead'), refOf('alive')]
+  const stats = new Map([
+    ['channels/dead', statOf(0, 5, [50])],
+    ['channels/alive', statOf(5, 0, [900])]
+  ])
+  auto.resetInFlight()
+  const releaseA = auto.beginAttempt('channels/alive')
+  const releaseB = auto.beginAttempt('channels/alive')
+  // 闲着不等于能用：刚被限流的候选哪怕在途 0，也排在正在忙但健康的候选后面
+  assert.deepEqual(auto.rankCandidates(refs, 'connections', stats).map(item => item.entry.model.id), ['alive', 'dead'])
+  releaseA()
+  releaseB()
+  assert.deepEqual(auto.rankCandidates(refs, 'connections', stats).map(item => item.entry.model.id), ['alive', 'dead'])
+})
+
+check('在途计数：重复释放不会把计数塌成负数', () => {
+  auto.resetInFlight()
+  const release = auto.beginAttempt('channels/x')
+  assert.equal(auto.getInFlight('channels/x'), 1)
+  release()
+  release() // 换候选与 res close 都会调，第二次必须是无操作
+  assert.equal(auto.getInFlight('channels/x'), 0)
+  assert.equal(auto.getInFlight('channels/never-seen'), 0)
+  assert.equal(typeof auto.beginAttempt(''), 'function', '空引用也要给一个能调的释放函数')
+})
+
 check('日志采样：credits=0 是免费，缺字段才是没数据', () => {
   const lines = [
     { model: 'channels/x', status: 200, responseTime: 100, credits: 0, totalTokens: 1000 },
@@ -164,6 +215,28 @@ check('尝试链：兜底与候选重复时不重复追加', () => {
   auto.resetStatsCache()
   const chain = auto.buildChain(config, auto.findAutoModel('auto'), 'channels/only')
   assert.deepEqual(chain.map(item => item.ref), ['channels/only'])
+})
+
+check('尝试链：并发优先把最闲的排在第一位', () => {
+  const config = {
+    channels: {
+      type: 'channel',
+      models: [{ id: 'a', displayName: 'A · x1.0' }, { id: 'b', displayName: 'B · x1.0' }]
+    }
+  }
+  auto.resetStatsCache()
+  auto.resetInFlight()
+  // a 比 b 快（日志里 a 有延迟样本）但正忙：最闲的 b 才该排第一
+  fs.writeFileSync(
+    path.join(dataDir, 'logs', 'usage-2026-10-23.log'),
+    JSON.stringify({ model: 'channels/a', status: 200, responseTime: 100 }) + '\n'
+  )
+  auto.resetStatsCache()
+  const release = auto.beginAttempt('channels/a')
+  const chain = auto.buildChain(config, auto.findAutoModel('auto-least-conn'), '')
+  assert.equal(chain[0].ref, 'channels/b')
+  release()
+  assert.equal(auto.buildChain(config, auto.findAutoModel('auto-least-conn'), '')[0].ref, 'channels/a', 'a 闲下来就靠延迟胜出')
 })
 
 async function main() {

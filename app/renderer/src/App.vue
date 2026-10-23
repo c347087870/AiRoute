@@ -6,18 +6,14 @@
       <header class="top-bar">
         <BackButton v-if="route.meta.back" />
         <h1 class="top-title">{{ route.meta.title }}</h1>
-        <!-- 刷新 / 实时由页面登记（usePageActions），布局只负责摆在标题右侧 -->
-        <div v-if="actions.refresh" class="top-actions">
+        <!-- 「实时」角标由页面登记（usePageActions），布局只负责摆在标题右侧 -->
+        <div v-if="actions.live" class="top-actions">
           <span
-            v-if="actions.live"
             class="live-badge"
-            title="每 5 秒自动刷新；窗口隐藏时暂停，回到前台立即补一次"
+            title="数据自动刷新：窗口隐藏时暂停，回到前台立即刷新"
           >
             <span class="live-dot"></span>实时
           </span>
-          <button class="btn-ghost btn-sm" :disabled="actions.loading" @click="actions.refresh()">
-            {{ actions.loading ? '刷新中…' : '刷新' }}
-          </button>
         </div>
       </header>
       <div class="main-scroll">
@@ -430,11 +426,6 @@ button {
   align-items: center;
   gap: 10px;
   margin-bottom: 16px;
-}
-
-/* 两边各有内容时（例如渠道页：左侧说明入口、右侧统计与刷新） */
-.page-toolbar.between {
-  justify-content: space-between;
 }
 
 .header-actions {

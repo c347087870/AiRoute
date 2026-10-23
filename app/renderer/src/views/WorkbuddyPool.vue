@@ -1,6 +1,6 @@
 <template>
   <div class="wb-page">
-    <!-- 页面工具条：汇总统计（刷新在顶部栏） -->
+    <!-- 页面工具条：汇总统计（数据自动刷新） -->
     <div class="page-toolbar">
       <div class="wb-stats">
         <span class="stat">总计 <b>{{ counts.total }}</b></span>
@@ -1245,6 +1245,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { showToast } from '../composables/useToast.js'
 import { useEscClose } from '../composables/useEscClose.js'
 import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
 import {
   wbAccounts,
   wbOauthStart,
@@ -1325,8 +1326,6 @@ const tab = ref('accounts')
 const accounts = ref([])
 // 汇总统计（总计 / 可用 / 冷却 / 禁用 / 在途占满）
 const counts = ref({ total: 0, healthy: 0, cooling: 0, disabled: 0, inFlightFull: 0 })
-// 账号列表加载中标记
-const loading = ref(false)
 // 批量操作标记：'' 空闲 / 'checkin' 全部签到 / 'balance' 刷新余额
 const busyAll = ref('')
 // 单号操作进行中的 uid（避免重复点击）
@@ -1694,9 +1693,9 @@ watch(tab, key => {
 
 // ==================== 账号池 ====================
 
-// 加载账号列表与汇总统计，并维护各分区默认选中账号
-async function reload() {
-  loading.value = true
+// 加载账号列表与汇总统计，并维护各分区默认选中账号。
+// silent：轮询触发时不弹错误 toast（下一次轮询会自己重试）
+async function reload({ silent = false } = {}) {
   try {
     const data = await wbAccounts()
     accounts.value = data.accounts || []
@@ -1707,26 +1706,15 @@ async function reload() {
     const taskPool = accounts.value.filter(a => a.realm !== 'global')
     if (!taskPool.some(a => a.uid === taskUid.value)) taskUid.value = taskPool[0] ? taskPool[0].uid : ''
   } catch (err) {
-    showToast('账号列表加载失败: ' + errText(err), 'error')
-  } finally {
-    loading.value = false
+    if (!silent) showToast('账号列表加载失败: ' + errText(err), 'error')
   }
 }
 
-// 页面头部刷新：刷新账号列表并重载当前分区数据
-async function refreshPage() {
-  await reload()
-  if (tab.value === 'credits') await loadCredits()
-  else if (tab.value === 'usage') await loadUsage()
-  else if (tab.value === 'models') await loadModels(false)
-  else if (tab.value === 'tasks') await loadTasks()
-  else if (tab.value === 'scheduler') await loadScheduler()
-  else if (tab.value === 'logs') await loadLogs()
-  else if (tab.value === 'advanced') await loadAdvanced()
-}
-
-// 顶部栏右侧的「刷新」由布局渲染，这里只登记刷新函数与 loading
-usePageActions({ refresh: refreshPage, loading })
+// 顶部栏的「实时」角标由布局渲染；账号池快照靠 5 秒轮询保持最新。
+// 各分区里的上游数据（积分构成、成长任务等）仍由分区自己的按钮按需拉取 ——
+// 那些是真实上游请求，挂轮询会变成对上游的周期性轰炸。
+usePageActions({ live: true })
+usePolling(() => reload({ silent: true }))
 
 // 点击「+ 添加账号」：先展开区域选择（国际版与国内版的域名与 OAuth 入口不同）
 function startAddAccount() {

@@ -2,10 +2,6 @@
   <div class="dashboard">
     <div class="stats-grid">
       <div class="card stat-card">
-        <div class="stat-label">当前模型</div>
-        <div class="stat-value primary">{{ currentModelLabel }}</div>
-      </div>
-      <div class="card stat-card">
         <div class="stat-label">Router 状态</div>
         <div class="stat-value" :class="isOnline ? 'green' : 'red'">
           {{ isOnline ? '运行中' : '离线' }}
@@ -93,13 +89,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useModel } from '../composables/useModel.js'
+import { ref, computed, onMounted } from 'vue'
 import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
 import { getLogs, getStats, getHealth, getTokenStatsToday, getTokenStatsMonth } from '../api.js'
 import { formatNumber, formatTime } from '../utils/format.js'
-
-const { currentModelLabel, loadModelData } = useModel()
 
 // 总计单元格：上游未返回用量时服务端给 null，显示 '-'（与日志页口径一致），
 // 直接 formatNumber(null) 会显示 0，容易被误读成「真实用量为 0」
@@ -110,7 +104,6 @@ function tokenCell(v) {
 const recentLogs = ref([]) // 最近 5 条请求日志
 const isOnline = ref(false) // Router 是否在线，只由健康检查决定
 const stats = ref({ todayRequests: 0, todayFailed: 0, totalRequests: 0, totalFailed: 0, retentionDays: 0 }) // 请求数统计
-const refreshing = ref(false) // 顶部栏「刷新」按钮的 loading 状态
 
 // Token 统计只取今日 / 本月两个汇总：各模型明细与时间维度都在用量统计页
 const tokenStatsToday = ref(emptyTokenStats())
@@ -192,58 +185,17 @@ async function loadData() {
   await Promise.all([loadHealth(), loadStats(), loadLogs(), loadTokenStats()])
 }
 
-// 手动刷新页面上所有快照数据
-async function refresh() {
-  refreshing.value = true
-  try {
-    await loadData()
-  } finally {
-    refreshing.value = false
-  }
-}
+// 顶部栏的「实时」角标由布局渲染，5 秒轮询由 usePolling 统一负责
+usePageActions({ live: true })
+usePolling(loadData)
 
-// 顶部栏右侧的「实时」角标与「刷新」按钮由布局渲染，这里只登记刷新函数与 loading
-usePageActions({ refresh, loading: refreshing, live: true })
-
-// 自动刷新间隔：本地服务开销很小，5 秒足够让面板跟上正在跑的请求
-const POLL_INTERVAL = 5000
-let pollTimer = null
-
-// 窗口隐藏（最小化 / 切走）时不再请求，回到前台立即补一次，
-// 避免后台空转，同时保证切回来看到的不是旧数据
-async function poll() {
-  if (document.hidden) return
-  await loadData()
-}
-
-function handleVisibilityChange() {
-  if (!document.hidden) poll()
-}
-
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-}
-
-onMounted(async () => {
-  await loadModelData()
-  loadData()
-  pollTimer = setInterval(poll, POLL_INTERVAL)
-  document.addEventListener('visibilitychange', handleVisibilityChange)
-})
-
-onUnmounted(() => {
-  stopPolling()
-  document.removeEventListener('visibilitychange', handleVisibilityChange)
-})
+onMounted(() => { loadData() })
 </script>
 
 <style scoped>
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -264,14 +216,6 @@ onUnmounted(() => {
   font-size: var(--fs-display);
   font-weight: 700;
   color: var(--text-1);
-}
-
-/* 模型名可能很长（来源 / 渠道 · 模型 · 倍率），用次级字号并允许换行，避免把卡片撑高 */
-.stat-value.primary {
-  font-size: var(--fs-lg);
-  line-height: 1.5;
-  color: var(--primary);
-  overflow-wrap: anywhere;
 }
 
 .stat-value.green {

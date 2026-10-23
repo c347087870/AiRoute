@@ -60,13 +60,20 @@
                 v-for="model in visibleModels(provider, name)"
                 :key="model.id"
                 class="model-chip"
-                :class="{ current: currentModel === `${name}/${model.id}` }"
+                :class="{ current: currentModel === `${name}/${model.id}`, offline: !!healthOf(name, model)?.offline }"
                 :title="`${model.id}｜上下文 ${formatLimit(model.maxContext)}｜输出 ${formatLimit(model.maxOutput)}`"
               >
                 <span class="chip-name">{{ modelLabel(provider, model) }}</span>
                 <span class="chip-meta">
                   {{ formatLimit(model.maxContext) }} / {{ formatLimit(model.maxOutput) }}
                 </span>
+                <!-- 失活：网关不再把请求派给它；点标签恢复（不动配置） -->
+                <span
+                  v-if="healthOf(name, model)?.offline"
+                  class="chip-offline"
+                  :title="`已失活：${healthOf(name, model).detail || healthOf(name, model).reason || '原因未知'}；点击恢复`"
+                  @click.stop="reviveHealth(name, model)"
+                >失活</span>
                 <button
                   class="chip-use"
                   :class="{ 'is-current': currentModel === `${name}/${model.id}` }"
@@ -95,8 +102,9 @@
         </div>
 
         <div class="row-actions">
-          <button class="btn-ghost btn-sm" @click="runTest(name)" :disabled="testingName === name">
-            {{ testingName === name ? '测试中' : '测试' }}
+          <button v-if="testingName === name" class="btn-ghost btn-sm" @click="stopTest">停止</button>
+          <button v-else class="btn-ghost btn-sm" @click="runTest(name)" :disabled="!!testingName">
+            测试
           </button>
           <button class="btn-ghost btn-sm" @click="editProvider(name, provider)">编辑</button>
           <button class="btn-primary btn-sm" @click="setAsCurrent(name)">设为当前</button>
@@ -282,7 +290,9 @@ import {
   updateProvider,
   deleteProvider,
   testProvider,
-  fetchProviderModels
+  fetchProviderModels,
+  getModelHealth,
+  reviveModel
 } from '../api.js'
 import { formatNumber } from '../utils/format.js'
 import { modelLabel } from '../utils/models.js'
@@ -294,6 +304,10 @@ const { currentModel, providers, loadModelData, switchModel, notifyTray } = useM
 const showAdd = ref(false) // 是否显示新增弹窗
 const testingName = ref('') // 正在测试中的 provider 名
 const testResults = ref({}) // 连通性测试结果
+// 「停止」用的中止句柄：只置标志的话，卡在上游的测试还要拖到超时才结束
+const testController = ref(null)
+// 失活台账：键是引用（provider/model）→ { ref, offline, reason, detail }
+const modelHealth = ref({})
 const editingName = ref('') // 正在编辑的 provider 名
 const showKey = ref(false) // API Key 密码/明文切换
 const expanded = ref(new Set()) // 已展开全部模型的 provider 名
@@ -690,22 +704,71 @@ async function setAsCurrent(name) {
   await useModelRef(`${name}/${first.id}`)
 }
 
+// 失活台账只是展示层：读不到就按健康显示，不影响设置本身
+async function loadModelHealth() {
+  try {
+    const data = await getModelHealth()
+    const map = {}
+    for (const item of data.models || []) {
+      if (item.ref) map[item.ref] = item
+    }
+    modelHealth.value = map
+  } catch {
+    /* 保留上一份 */
+  }
+}
+
+function healthOf(name, model) {
+  return modelHealth.value[`${name}/${model.id}`] || null
+}
+
+async function reviveHealth(name, model) {
+  const record = healthOf(name, model)
+  if (!record) return
+  try {
+    await reviveModel(record.ref)
+    await loadModelHealth()
+    showToast(`已恢复 ${model.displayName || model.id}`)
+  } catch (err) {
+    showToast('恢复失败：' + err.message, 'error', 6000)
+  }
+}
+
 // 测试连通性：优先使用当前选中的模型（未选中该 Provider 的模型时回落第一个模型）
 async function runTest(name) {
+  if (testingName.value) return
+  const controller = new AbortController()
+  testController.value = controller
   testingName.value = name
   testResults.value[name] = null
   const ref = currentModel.value || ''
   const modelId = ref.startsWith(`${name}/`) ? ref.slice(name.length + 1) : ''
   try {
-    testResults.value[name] = await testProvider(name, modelId)
+    const result = await testProvider(name, modelId, controller.signal)
+    testResults.value[name] = result
+    // 测试通过会让服务端清掉「连续失败」的失活标记，tag 跟着更新
+    if (result?.ok) await loadModelHealth()
   } catch (err) {
-    testResults.value[name] = { ok: false, error: '请求失败', latency: 0 }
+    if (controller.signal.aborted) {
+      testResults.value[name] = null
+      showToast('已停止测试')
+    } else {
+      testResults.value[name] = { ok: false, error: '请求失败', latency: 0 }
+    }
+  } finally {
+    testingName.value = ''
+    testController.value = null
   }
-  testingName.value = ''
+}
+
+// 「停止」：断开在途请求，而不是等它自己超时
+function stopTest() {
+  testController.value?.abort()
 }
 
 onMounted(() => {
   loadModelData()
+  loadModelHealth()
 })
 </script>
 
@@ -891,6 +954,27 @@ onMounted(() => {
 .model-chip.current {
   border-color: var(--success);
   background: var(--tint-success-soft);
+}
+
+/* 失活：网关判定它此刻不能用（余额/账号/连续失败）。只改描边，不用灰度——
+   它可能仍是「当前模型」，用户需要一眼看出「当前选中的这个已经调不通了」 */
+.model-chip.offline {
+  border-color: var(--bad-text);
+}
+
+.chip-offline {
+  flex: none;
+  padding: 0 5px;
+  font-size: var(--fs-mini);
+  color: var(--bad-text);
+  background: var(--bad-bg);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip-offline:hover {
+  text-decoration: underline;
 }
 
 .chip-name {

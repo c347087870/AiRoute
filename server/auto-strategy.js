@@ -1,4 +1,4 @@
-// 三档「Auto」伪模型：让客户端在 /v1/models 里直接选「这条请求想怎么挑模型」。
+// 几档「Auto」伪模型：让客户端在 /v1/models 里直接选「这条请求想怎么挑模型」。
 //
 // ## 为什么做成「模型列表里的几个假模型」
 //
@@ -23,6 +23,9 @@
 //   两种口径不同，但方向一致，用它们比大小是安全的 —— 都是「越便宜越小」。
 //
 // 冷启动（没有任何日志）时全部是未知，排序退化成配置顺序：不会把请求打乱。
+//
+// 并发优先（`auto-least-conn`）是唯一不靠日志的一档：它看的是「此刻谁最闲」，
+// 而日志只在请求结束后才有记录，所以那份计数由转发路径实时维护（见「在途计数」）。
 
 const fs = require('fs-extra')
 const path = require('path')
@@ -34,7 +37,10 @@ const models = require('./models')
 const AUTO_MODELS = [
   { id: 'auto', strategy: 'balanced', name: 'Auto 综合（延迟与成本等权）' },
   { id: 'auto-fast', strategy: 'latency', name: 'Auto 体验优先（挑最近最快的）' },
-  { id: 'auto-cheap', strategy: 'cost', name: 'Auto 性价比优先（免费与低倍率先行）' }
+  { id: 'auto-cheap', strategy: 'cost', name: 'Auto 性价比优先（免费与低倍率先行）' },
+  // 「最小连接」：同一时刻只挑当前在途请求最少的那个候选 —— 前几档都只看历史
+  // 平均，并发上来时会把几条请求一起压给同一个「历史最快」的模型
+  { id: 'auto-least-conn', strategy: 'connections', name: 'Auto 并发优先（挑此刻在途最少的）' }
 ]
 
 const CANDIDATE_LIMIT = 4 // 一次请求最多按顺序试几个模型：再长就不是「挑模型」而是硬扛故障了
@@ -154,6 +160,38 @@ function resetStatsCache() {
   cache = { at: 0, stats: new Map() }
 }
 
+// ==================== 在途计数（最小连接）====================
+
+// 「此刻有多少请求在跑」没有任何静态来源：日志只在请求结束后才有一行。
+// 所以这份计数只能由转发路径实时维护——派发给某个候选时 +1，换下一个候选
+// 或整个请求收尾时 -1。进程内的 Map 够用：AiRoute 是单进程本地服务，
+// 不存在「多台均衡器各看一半连接数」那种误差。
+const inflight = new Map()
+
+// 返回释放函数，而不是让调用方自己配一次 -1：转发路径上散落着一堆 return /
+// continue，把「谁加谁减」绑在一起才漏不掉，而漏减的后果是某个候选永远显得忙。
+function beginAttempt(ref) {
+  if (!ref) return () => {}
+  inflight.set(ref, (inflight.get(ref) || 0) + 1)
+  let released = false
+  return () => {
+    if (released) return // 收尾路径（next 候选 / res close）都会调，重复释放会把计数塌成负数
+    released = true
+    const next = (inflight.get(ref) || 0) - 1
+    if (next > 0) inflight.set(ref, next)
+    else inflight.delete(ref) // 落到 0 就删键，避免 Map 随着历史模型无限长
+  }
+}
+
+function getInFlight(ref) {
+  return inflight.get(ref) || 0
+}
+
+// 清计数：写测试用
+function resetInFlight() {
+  inflight.clear()
+}
+
 // ==================== 打分 ====================
 
 // 单个模型的成本估算：实测口径优先，其次配置里的倍率，最后按 1.0 兜底。
@@ -190,6 +228,10 @@ function scoreOf(entry, stats) {
     // 失败惩罚乘在两项指标上：一个刚被限流的免费模型，不该因为「免费」被一直选中
     latencyKey: (latency === null ? UNKNOWN_LATENCY_MS : latency) * (1 + 2 * failRate),
     costKey: cost * (1 + 2 * failRate),
+    // 实时在途数：唯一不来自日志的指标
+    conn: getInFlight(entry.ref),
+    // 同分时的次序（目前只有并发优先用）：留 0 让其它策略保持「同分即配置顺序」
+    tie: 0,
     hopeless: attempts >= HOPELESS_MIN_ATTEMPTS && failRate >= HOPELESS_FAIL_RATE ? 1 : 0
   }
 }
@@ -206,7 +248,7 @@ function normalizer(list, field) {
  * 按策略给候选模型排序。
  *
  * @param {Array} refs models.listModelRefs(config) 的结果
- * @param {string} strategy 'latency' | 'cost' | 'balanced'
+ * @param {string} strategy 'latency' | 'cost' | 'balanced' | 'connections'
  * @param {Map} stats readStats() 的结果
  * @returns {Array} 按尝试顺序排好的 [{ entry, ... }]
  */
@@ -221,12 +263,20 @@ function rankCandidates(refs, strategy, stats) {
     for (const item of scored) item.key = 0.5 * lat(item) + 0.5 * cost(item)
   } else if (strategy === 'cost') {
     for (const item of scored) item.key = item.costKey
+  } else if (strategy === 'connections') {
+    // 在途最少的先试。绝大多数时候只有一个客户端在跑、人人都是 0，
+    // 这时按延迟分先后（等价于 auto-fast）——否则空闲系统里的顺序会退化成配置顺序，
+    // 而配置顺序与「谁更快」无关
+    for (const item of scored) {
+      item.key = item.conn
+      item.tie = item.latencyKey
+    }
   } else {
     for (const item of scored) item.key = item.latencyKey
   }
 
-  // hopeless 先沉底，再按指标；Array#sort 稳定，同分时保留配置顺序
-  scored.sort((a, b) => a.hopeless - b.hopeless || a.key - b.key)
+  // hopeless 先沉底，再按指标，最后按同分次序；Array#sort 稳定，全平手时保留配置顺序
+  scored.sort((a, b) => a.hopeless - b.hopeless || a.key - b.key || a.tie - b.tie)
   return scored
 }
 
@@ -264,6 +314,9 @@ module.exports = {
   listAutoModels,
   rankCandidates,
   buildChain,
+  beginAttempt,
+  getInFlight,
+  resetInFlight,
   readStats,
   resetStatsCache,
   median,

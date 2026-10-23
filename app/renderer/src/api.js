@@ -127,8 +127,8 @@ export function updateRules(rules) {
 }
 
 // model 为空时测试该 Provider 的默认模型（WorkBuddy 类型走真实对话，超时放宽）
-export function testProvider(name, model = '') {
-  return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000 }).then(r => r.data)
+export function testProvider(name, model = '', signal) {
+  return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000, signal }).then(r => r.data)
 }
 
 // 用 URL + Key 直接探测上游模型清单（无状态：表单未保存也能用）
@@ -470,16 +470,43 @@ export async function channelsRpc(method, payload = {}, timeout = 120000) {
 
 // 渠道连通性测试：拿账号池里第一个可用模型发一次真实短对话
 // payload: { provider?, model? } —— 都不给时服务端依次试前几个候选模型
-export async function channelsTest(payload = {}) {
+// signal：调用方中止（界面「停止」）时同时中止服务端的在途上游调用
+export async function channelsTest(payload = {}, signal) {
   try {
-    const { data } = await api.post('/api/channels/test', payload, { timeout: 180000 })
+    const { data } = await api.post('/api/channels/test', payload, { timeout: 180000, signal })
     return data
   } catch (err) {
+    // 主动中止不是测试结果：交给调用方按 abort 处理
+    if (signal?.aborted) throw err
     // 「账号池里还没有可用模型」这类失败服务端回 400 + { ok:false, error }，
     // 它是一次测试结果而不是网络异常，交给调用方按结果渲染
     if (err.response && err.response.data) return err.response.data
     throw err
   }
+}
+
+// ==================== 模型失活 ====================
+
+// 失活台账（含原因与连续失败次数）；界面据此在模型上打「失活」标
+export function getModelHealth() {
+  return api.get('/api/model-health').then(r => r.data)
+}
+
+// 手动跑一轮余额/账号审计（刚充完值 / 刚启用账号时不用等下一轮定时器）
+export function auditModelHealth() {
+  return api.post('/api/model-health/audit', {}, { timeout: 120000 }).then(r => r.data)
+}
+
+export function reviveModel(ref) {
+  return api.post('/api/model-health/revive', { ref }).then(r => r.data)
+}
+
+// ==================== 渠道账号停用原因 ====================
+
+// 账号被上游禁用的原话（渠道包的 account.update 只有 enabled，原因存在
+// AiRoute 自己的台账里）；界面据此在账号行上打标签
+export function getAccountHealth() {
+  return api.get('/api/account-health').then(r => r.data)
 }
 
 // ==================== 更新检查 ====================

@@ -30,6 +30,16 @@ function getLogDir() {
   return path.join(getDataDir(), 'logs')
 }
 
+// 模型失活台账：连续失败 / 余额不足 / 账号全禁用 的判定结果
+function getModelHealthPath() {
+  return path.join(getDataDir(), 'model-health.json')
+}
+
+// 账号被上游禁用（40302 之类）的停用原因台账
+function getAccountHealthPath() {
+  return path.join(getDataDir(), 'account-health.json')
+}
+
 // 读取服务端口，供 Electron 主进程与托盘在没有启动 server 的情况下使用
 function getServerPort() {
   try {
@@ -51,5 +61,7 @@ module.exports = {
   getRulesPath,
   getServerConfigPath,
   getLogDir,
+  getModelHealthPath,
+  getAccountHealthPath,
   getServerPort
 }
