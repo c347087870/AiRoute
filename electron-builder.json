@@ -53,7 +53,7 @@
       }
     ],
     "category": "public.app-category.developer-tools",
-    "icon": "app/renderer/public/icon.png",
+    "icon": "assets/icon-mac.png",
     "artifactName": "AiRoute-${version}-${arch}.${ext}",
     "darkModeSupport": true,
     "identity": "-",
