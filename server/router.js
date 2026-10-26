@@ -113,20 +113,20 @@ function buildProviderChain(config, state, fallbackData, body) {
     return { live, skippedOffline }
   }
 
-  // 客户端点名了 auto 伪模型（/v1/models 里的 auto / auto-fast / auto-cheap /
-  // auto-least-conn）：这次请求按它的策略挑模型，与面板里的激活模型无关。
-  // 其它 model 值照旧被忽略 —— 保持「切换只在 AiRoute 里做」。
+  // 客户端点名了 auto 伪模型（/v1/models 只播报 auto 一个）：这次请求按
+  // 服务端配置的策略挑模型，与面板里的激活模型无关。其它 model 值照旧被忽略
+  // —— 保持「切换只在 AiRoute 里做」。
   const requested = typeof body?.model === 'string' ? body.model.trim() : ''
-  const autoModel = autoStrategy.findAutoModel(requested)
-  if (autoModel) {
-    const chain = autoStrategy.buildChain(config, autoModel, fallbackData.model)
+  if (autoStrategy.isAutoId(requested)) {
+    const strategy = autoStrategy.getStrategy()
+    const chain = autoStrategy.buildChain(config, strategy, fallbackData.model)
     if (chain.length) {
       const { live, skippedOffline } = dropOffline(chain)
       // 候选全失活时返回空链：不能让已失活的候选继续顶上去
       return {
         chain: live,
         primaryRef: (live[0] || chain[0]).ref,
-        autoModel,
+        autoModel: autoStrategy.AUTO_MODELS[0],
         skippedOffline
       }
     }

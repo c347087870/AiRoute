@@ -1,7 +1,7 @@
-// TRAE（字节跳动 TRAE IDE）协议：端点、凭据、请求头、SOLO 请求体与目录解析
+// Trae（字节跳动 Trae IDE）协议：端点、凭据、请求头、SOLO 请求体与目录解析
 //
-// 协议来源：trae2api / traework2api 的逆向分析，与 dsh 渠道包的
-// `vendor/channel-pack/src/trae*.ts` 逐条对齐（那张实现经过大量实测修正，
+// 协议来源：Trae2api / Traework2api 的逆向分析，与 dsh 渠道包的
+// `vendor/channel-pack/src/Trae*.ts` 逐条对齐（那张实现经过大量实测修正，
 // 注释里每条 ⚠️ 都是踩过的坑，搬运时不要「简化」掉）。
 //
 // 与 AiRoute 的分工：本文件只做**纯函数与常量**，不发请求、不碰磁盘。
@@ -41,7 +41,7 @@ const DEFAULT_MODEL = 'glm-5.2'
 const DEFAULT_FUNCTION = 'solo_work_lite'
 
 // 版本号是**模型准入条件**：上游按 X-Ide-Version 决定返回哪些模型，
-// 版本过低时 glm-5.3 等新模型会报 4001。跟随 TRAE 更新时一起动这两个值。
+// 版本过低时 glm-5.3 等新模型会报 4001。跟随 Trae 更新时一起动这两个值。
 const IDE_VERSION = '0.1.52'
 const IDE_VERSION_CODE = '20260811'
 // 登录门户认的是插件版本，与上面的 IDE 版本是两个独立字段
@@ -277,7 +277,7 @@ function traceId(machineId, deviceId) {
   return joined.length >= 16 ? joined.slice(-16) : joined.padStart(16, '0')
 }
 
-// 登录 URL 的 17 个参数一个都不能少：参数名写成 callback_url 时 TRAE 拿不到
+// 登录 URL 的 17 个参数一个都不能少：参数名写成 callback_url 时 Trae 拿不到
 // 回调地址，登录页会永远停在「认证中」。
 function buildLoginUrl(machineId, deviceId, callbackUrl) {
   const params = new URLSearchParams({
@@ -303,7 +303,7 @@ function buildLoginUrl(machineId, deviceId, callbackUrl) {
   return `${CONSOLE_HOST}/authorization?${params.toString()}`
 }
 
-// 回调参数是 URL 编码的 JSON；TRAE 的中文昵称存在**双重编码**（实测乱码
+// 回调参数是 URL 编码的 JSON；Trae 的中文昵称存在**双重编码**（实测乱码
 // 「Óû§8847309959」），故再容错解一层
 function parseJsonParam(raw) {
   if (raw === null || raw === undefined || raw.length === 0) return undefined
@@ -325,7 +325,7 @@ function jsonString(source, key) {
   return typeof value === 'string' ? value : ''
 }
 
-// 解析登录回调。TRAE 授权页有**两套并列流程**：老流程直接回传 refreshToken，
+// 解析登录回调。Trae 授权页有**两套并列流程**：老流程直接回传 refreshToken，
 // 新流程（PKCE）回传 code。只认后者会把合法回调误判成失败，症状与「一直认证中」
 // 一样 —— 所以这里把 PKCE 形态单独识别出来并给出精确原因。
 function parseCallback(rawUrl) {

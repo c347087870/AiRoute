@@ -1,16 +1,22 @@
-// 几档「Auto」伪模型：让客户端在 /v1/models 里直接选「这条请求想怎么挑模型」。
+// 一个「Auto」伪模型 + 若干档排序策略：让客户端在 /v1/models 里直接选「这条请求想怎么挑模型」。
 //
-// ## 为什么做成「模型列表里的几个假模型」
+// ## 为什么做成「模型列表里的假模型」
 //
 // 客户端的模型选择只有一个入口：/v1/models 返回的 id。Claude Code、Cursor、
 // 各类 SDK 都没有「给 AiRoute 换个模型」的能力 —— 它们只能把某个 id 写进请求。
 // 所以「按延迟挑 / 按性价比挑」这种策略，唯一不用改客户端就能用的形态，
-// 就是让它们看起来像三个模型。
+// 就是让它看起来像一个模型。
+//
+// 伪模型只剩 `auto` 一个。原来是四档（auto / auto-fast / auto-cheap / auto-least-conn），
+// 靠「客户端写哪个 id」来选策略 —— 但客户端往往只有一个模型名可填（写在 json / toml /
+// yaml 里），改一次配置就多一次出错机会，而且四档同时出现在 /v1/models 里会让
+// 某些客户端把列表第一项当默认值。现在策略改由「渠道账号 → 模型」页统一选，
+// 客户端永远只需要填 `auto`。
 //
 // ## 为什么不塞进 state.current
 //
 // `state.current` 是给人用的全局开关，一次只能有一个值；策略是「这条请求想怎么
-// 挑」，粒度小得多。混在一起的话，任何客户端只要带上 auto-fast 就会把你在面板里
+// 挑」，粒度小得多。混在一起的话，任何客户端只要带上 auto 就会把你在面板里
 // 选的激活模型改掉，等于让客户端替人做决定。
 //
 // ## 数据从哪来
@@ -24,7 +30,7 @@
 //
 // 冷启动（没有任何日志）时全部是未知，排序退化成配置顺序：不会把请求打乱。
 //
-// 并发优先（`auto-least-conn`）是唯一不靠日志的一档：它看的是「此刻谁最闲」，
+// 并发优先是唯一不靠日志的一档：它看的是「此刻谁最闲」，
 // 而日志只在请求结束后才有记录，所以那份计数由转发路径实时维护（见「在途计数」）。
 
 const fs = require('fs-extra')
@@ -35,13 +41,59 @@ const models = require('./models')
 // 伪模型的 id 用纯 ASCII：它们会被客户端写进 json / toml / yaml，
 // 中文和空格在那些格式里要转义，改一次配置就多一次出错机会。
 const AUTO_MODELS = [
-  { id: 'auto', strategy: 'balanced', name: 'Auto 综合（延迟与成本等权）' },
-  { id: 'auto-fast', strategy: 'latency', name: 'Auto 体验优先（挑最近最快的）' },
-  { id: 'auto-cheap', strategy: 'cost', name: 'Auto 性价比优先（免费与低倍率先行）' },
-  // 「最小连接」：同一时刻只挑当前在途请求最少的那个候选 —— 前几档都只看历史
-  // 平均，并发上来时会把几条请求一起压给同一个「历史最快」的模型
-  { id: 'auto-least-conn', strategy: 'connections', name: 'Auto 并发优先（挑此刻在途最少的）' }
+  { id: 'auto', strategy: 'balanced', name: 'Auto 自动路由（按当前策略挑模型）' }
 ]
+
+// 四档排序策略。id 是落盘与接口里用的稳定标识，label 面向界面（tab 上的短名），
+// note 是这一档在做什么（界面放在悬停提示里，不占版面）。
+// 顺序即界面上的展示顺序：先综合，再按诉求分档。
+const STRATEGIES = [
+  { id: 'balanced', label: '综合', note: '延迟与成本等权' },
+  { id: 'latency', label: '延迟优先', note: '挑最近跑得最快的' },
+  { id: 'cost', label: '成本优先', note: '免费与低倍率先行' },
+  { id: 'connections', label: '并发优先', note: '挑此刻在途最少的' }
+]
+
+const DEFAULT_STRATEGY = 'balanced'
+
+// 界面上给出的一档与落盘里写的一档要对上：配置被手改过或来自旧版本时，
+// 拿到一个不认识的 id 就退回默认档，而不是让排序逻辑走空。
+function normalizeStrategy(value) {
+  const id = typeof value === 'string' ? value.trim() : ''
+  return STRATEGIES.some(item => item.id === id) ? id : DEFAULT_STRATEGY
+}
+
+function listStrategies() {
+  return STRATEGIES.map(item => ({ id: item.id, label: item.label, note: item.note }))
+}
+
+// 策略落在 server-config.json 里：它已经是「网关自身的行为配置」（端口等），
+// 放这里不用再加一份数据文件，导入导出也自动带上。
+const STRATEGY_KEY = 'autoStrategy'
+
+function readServerConfig() {
+  const file = paths.getServerConfigPath()
+  if (!fs.existsSync(file)) return {}
+  try {
+    const data = fs.readJsonSync(file)
+    return data && typeof data === 'object' ? data : {}
+  } catch {
+    return {}
+  }
+}
+
+// 读取当前策略。配置缺失、被手改坏或来自旧版本时都退回默认档。
+function getStrategy() {
+  return normalizeStrategy(readServerConfig()[STRATEGY_KEY])
+}
+
+function saveStrategy(value) {
+  const id = normalizeStrategy(value)
+  const config = readServerConfig()
+  config[STRATEGY_KEY] = id
+  fs.writeJsonSync(paths.getServerConfigPath(), config, { spaces: 2 })
+  return id
+}
 
 const CANDIDATE_LIMIT = 4 // 一次请求最多按顺序试几个模型：再长就不是「挑模型」而是硬扛故障了
 const STATS_TTL_MS = 60 * 1000 // 日志扫描结果的缓存时长
@@ -56,14 +108,9 @@ const FREE_RE = /·\s*免费/
 const MULTIPLE_RE = /·\s*x\s*([\d.]+)/i
 const LOG_FILE_RE = /^usage(-\d{4}-\d{2}-\d{2})?\.log$/
 
-function findAutoModel(value) {
-  const id = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  if (!id) return null
-  return AUTO_MODELS.find(item => item.id === id) || null
-}
-
 function isAutoId(value) {
-  return !!findAutoModel(value)
+  const id = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return AUTO_MODELS.some(item => item.id === id)
 }
 
 // OpenAI 形态的模型条目：多带 name/description 两个字段，
@@ -265,7 +312,7 @@ function rankCandidates(refs, strategy, stats) {
     for (const item of scored) item.key = item.costKey
   } else if (strategy === 'connections') {
     // 在途最少的先试。绝大多数时候只有一个客户端在跑、人人都是 0，
-    // 这时按延迟分先后（等价于 auto-fast）——否则空闲系统里的顺序会退化成配置顺序，
+    // 这时按延迟分先后（等价于延迟优先档）——否则空闲系统里的顺序会退化成配置顺序，
     // 而配置顺序与「谁更快」无关
     for (const item of scored) {
       item.key = item.conn
@@ -285,11 +332,11 @@ function rankCandidates(refs, strategy, stats) {
  * 尾巴上按配置的兜底模型补一位 —— 用户显式配了「主模型挂了用哪个」，
  * 策略挑了 4 个都挂的时候没理由把它丢掉。
  */
-function buildChain(config, autoModel, fallbackRef) {
+function buildChain(config, strategy, fallbackRef) {
   const refs = models.listModelRefs(config)
   if (!refs.length) return []
 
-  const ranked = rankCandidates(refs, autoModel.strategy, readStats())
+  const ranked = rankCandidates(refs, normalizeStrategy(strategy), readStats())
   const chain = []
   const seen = new Set()
   for (const item of ranked) {
@@ -309,9 +356,14 @@ function buildChain(config, autoModel, fallbackRef) {
 
 module.exports = {
   AUTO_MODELS,
+  STRATEGIES,
+  DEFAULT_STRATEGY,
   isAutoId,
-  findAutoModel,
   listAutoModels,
+  listStrategies,
+  normalizeStrategy,
+  getStrategy,
+  saveStrategy,
   rankCandidates,
   buildChain,
   beginAttempt,

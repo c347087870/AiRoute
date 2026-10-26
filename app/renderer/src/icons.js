@@ -51,6 +51,14 @@ export const ICONS = {
   help: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0m9 5v.01"/><path d="M12 13.5a1.5 1.5 0 0 1 1-1.5a2.6 2.6 0 1 0-3-4"/></g>',
   // tabler:route（侧边栏「新手引导」：一条带起终点的路径，对应引导的分步流程）
   onboarding: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 19a2 2 0 1 0 4 0a2 2 0 1 0-4 0m14-14a2 2 0 1 0 4 0a2 2 0 1 0-4 0"/><path d="M5 17V9a4 4 0 0 1 4-4h8"/><path d="M19 7v8a4 4 0 0 1-4 4H7"/></g>',
+  // 主题切换的三枚图标：跟随系统（半圆）/ 亮色（太阳）/ 暗色（月牙）
+  // 之前用的是 Unicode 字形（◐☀☾），各系统字体渲染差异大，月牙尤其歪，
+  // 所以改成内联 SVG，和其它图标一样随 currentColor 走
+  themeSystem: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/></g>',
+  themeLight: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4l1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g>',
+  themeDark: '<path fill="currentColor" stroke="none" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  // tabler:trash（渠道账号行的「删除」：图标-only 的危险按钮）
+  trash: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M10 4v-.5a1.5 1.5 0 0 1 3 0V4M6 7v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7M10 11v6m4-6v6"/>',
   // tabler:copy / tabler:check / tabler:x（提示条的复制按钮，三个状态共用同一处）
   copy: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></g>',
   check: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l5 5L20 7"/>',

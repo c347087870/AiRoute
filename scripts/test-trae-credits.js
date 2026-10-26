@@ -1,4 +1,4 @@
-// TRAE 签到 / 积分响应的离线回归：不联网、不需要真实账号。
+// Trae 签到 / 积分响应的离线回归：不联网、不需要真实账号。
 //
 //     node scripts/test-trae-credits.js
 //
@@ -6,7 +6,7 @@
 // 而早期实现按 `body.data.checked_in` / `body.data.credits` / `body.data.total_credits`
 // 去读，于是三个症状同时出现（用户报障，2026-10-26）：
 //
-//   · 已签到的账号判不出来 → 重复发 claim。TRAE 的 claim 对已签到是幂等的，
+//   · 已签到的账号判不出来 → 重复发 claim。Trae 的 claim 对已签到是幂等的，
 //     照样回 `{"code":0}`，与真正领到无法区分；
 //   · 领取金额恒为 undefined → 面板显示「+? 积分」（formatCredit(NaN) = '?'）；
 //   · 余额恒为 null → 面板显示「上游未返回积分余额」。

@@ -3,7 +3,7 @@
 // 三条来路，互不耦合：
 //   - WorkBuddy 两区：账号池、会话、模型目录都在主进程 server/workbuddy/，
 //     本目录只为它注册目录、补全直通（见下面的 runtime facade）；
-//   - TRAE / Qoder / Qoder 国内版：**以插件形式装进来**（server/channels/plugins/），
+//   - Trae / Qoder / Qoder 国内版：**以插件形式装进来**（server/channels/plugins/），
 //     由 plugin-host 发现、加载，经 ./owned/runtime 聚合成与面板一致的那一套接口。
 //     装了什么、开没开在 channels-plugins.json（见 plugin-store.js）；
 //   - 渠道包（business.mjs）已整体移除 —— 那 2.6 MB 打包产物不可读也不可审，
@@ -49,7 +49,7 @@ function createHost() {
 }
 
 // 本模块对外暴露的运行时：WorkBuddy 两个区域的目录由主进程提供，
-// 其余交给 owned runtime（TRAE / Qoder）。
+// 其余交给 owned runtime（Trae / Qoder）。
 //
 // 为什么 WorkBuddy 不并进 owned：它的账号池、会话、调度器、任务体系都在
 // server/workbuddy/（1.4 万行，40+ 个 /api/workbuddy/* 接口），本目录只提供

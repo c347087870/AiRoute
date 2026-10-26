@@ -156,7 +156,7 @@ function finishOnboarding({ openSettings } = {}) {
   --font-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', 'Noto Sans CJK SC', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
-    'Courier New', monospace;
+    'Courier New', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', monospace;
 
   /* 字号阶梯：24 大数字 · 22 页面标题 · 18 面板标题 · 16 区块标题 ·
      14 正文 · 13 次要 · 12 辅助 · 11 标签 */
@@ -418,10 +418,9 @@ button {
   --btn-px: 10px;
   --btn-fs: 12px;
 
-  /* 表单控件与下拉菜单是大号：输入框、select、菜单项统一 36px。
-     按钮走小号（28px），两者刻意不是一个量级 —— 操作要紧凑，填写要宽松 */
-  --field-h: 36px;
-  --field-fs: 13px;
+  /* 表单控件与下拉菜单统一走小号（28px），与按钮同高：填写和操作一样紧凑 */
+  --field-h: 28px;
+  --field-fs: 12px;
 }
 
 .btn-primary,
@@ -957,7 +956,7 @@ body {
   padding: 24px;
 }
 
-/* 表单控件：36px 高与 6px 圆角对齐 shadcn 的 input；聚焦用中性 ring，
+/* 表单控件：小号（与按钮同高），圆角对齐 shadcn 的 input；聚焦用中性 ring，
    不用蓝色光圈 —— 主色已经从中性色来，蓝光圈会引入第二种强调色 */
 input,
 select,
@@ -966,6 +965,26 @@ textarea {
   padding: 0 11px;
   font-size: var(--field-fs);
   box-shadow: 0 1px 2px rgba(9, 9, 11, 0.025);
+}
+
+/* 勾选框按浏览器默认大小，不跟着表单控件变高 */
+input[type='checkbox'],
+input[type='radio'] {
+  min-height: 0;
+  height: auto;
+}
+
+/* 单行输入框与下拉高度锁定为小号，避免被局部 padding 撑高 */
+input:not([type='checkbox']):not([type='radio']),
+select {
+  height: var(--field-h);
+}
+
+/* 多行文本域：沿用小号字号，行距略放宽 */
+textarea {
+  padding: 6px 11px;
+  line-height: 1.5;
+  resize: vertical;
 }
 
 /* 下拉框：高度按大号统一，箭头改由自己画。

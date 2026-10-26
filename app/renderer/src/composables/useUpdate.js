@@ -41,6 +41,28 @@ const stageText = computed(() => {
 let inited = false        // 启动初始化只执行一次
 let notified = false      // 上次升级结果每次启动只提示一次
 let pollTimer = null      // 下载 / 安装进度轮询定时器
+let checkTimer = null     // 更新自动检测定时器（每分钟一次）
+
+// 自动检测间隔：1 分钟。服务端 /api/update/check 有 30 分钟缓存，所以
+// 真正打 GitHub 的频率远低于轮询频率，这里轮询只是让「已发布新版本」
+// 在半小时内被界面上看到，不需要用户手动点「检查更新」
+const AUTO_CHECK_INTERVAL = 60 * 1000
+
+// 每分钟自动检查一次更新：静默模式，失败不打扰（本地网络抖动不该弹提示）。
+// 升级进行中（busy）跳过本轮，避免下载/安装期间再发检查请求
+function startAutoCheck() {
+  stopAutoCheck()
+  checkTimer = setInterval(() => {
+    if (!busy.value && !checking.value) runCheck(true)
+  }, AUTO_CHECK_INTERVAL)
+}
+
+function stopAutoCheck() {
+  if (checkTimer) {
+    clearInterval(checkTimer)
+    checkTimer = null
+  }
+}
 
 // 平台判定：以服务端 /api/update/check 返回的 platform 为准——真正决定下载哪个资产的是服务端，
 // 前端只按它决定扩展名与安装提示，避免两处各判一次
@@ -337,7 +359,8 @@ function openReleasePage() {
   if (info.value?.pageUrl && window.electronAPI) window.electronAPI.openExternal(info.value.pageUrl)
 }
 
-// 应用启动初始化：同步升级状态 + 下载状态 + 5 秒后静默检查一次（全局只执行一次）
+// 应用启动初始化：同步升级状态 + 下载状态 + 5 秒后静默检查一次，
+// 之后每分钟自动轮询（全局只执行一次）
 function initUpdate() {
   if (inited) return
   inited = true
@@ -345,6 +368,7 @@ function initUpdate() {
   syncDownloadState()
   setTimeout(() => {
     if (!info.value) runCheck(true)
+    startAutoCheck()
   }, 5000)
 }
 
@@ -374,6 +398,7 @@ export function useUpdate() {
     openFolder,
     openReleasePage,
     initUpdate,
+    stopAutoCheck,
     refreshInstallStatus,
     isMacPlatform,
     isWinInstaller

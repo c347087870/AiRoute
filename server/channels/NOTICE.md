@@ -1,6 +1,6 @@
 # server/channels — 渠道的来源与实现
 
-本目录让 AiRoute 具备 **TRAE**、**Qoder**、**Qoder 国内版** 三个账号渠道的登录、
+本目录让 AiRoute 具备 **Trae**、**Qoder**、**Qoder 国内版** 三个账号渠道的登录、
 账号池、模型目录与推理。这三个渠道是**插件**（`plugins/` 下各一个包），
 由宿主发现并加载；WorkBuddy 两区不走这里（见下文「与 WorkBuddy 的分工」）。
 
@@ -8,9 +8,9 @@
 
 | 路径 | 来源 | 说明 |
 | --- | --- | --- |
-| `plugins/trae/index.js` | 本项目 | TRAE 插件清单 + ABI 适配 + 旧账号认领 |
-| `plugins/trae/protocol.js` | 本项目 | TRAE 协议常量、凭据、请求头、OpenAI → SOLO 请求体、目录解析（纯函数，可离线单测） |
-| `plugins/trae/provider.js` | 本项目 | TRAE 的登录回调控件、续期、选号、补全、签到、积分 |
+| `plugins/trae/index.js` | 本项目 | Trae 插件清单 + ABI 适配 + 旧账号认领 |
+| `plugins/trae/protocol.js` | 本项目 | Trae 协议常量、凭据、请求头、OpenAI → SOLO 请求体、目录解析（纯函数，可离线单测） |
+| `plugins/trae/provider.js` | 本项目 | Trae 的登录回调控件、续期、选号、补全、签到、积分 |
 | `plugins/qoder/index.js` | 本项目 | Qoder 插件清单（一个包两个 provider）+ ABI 适配 |
 | `plugins/qoder/protocol.js` | 本项目 | Qoder 产品配置、PKCE 设备码登录、续期、信封剥离 |
 | `plugins/qoder/wasm.js` | 上游 WASM + 本项目桥 | `qoder-auth-wasm.wasm` 的 wasm-bindgen 桥：构造加密请求 |
@@ -21,7 +21,7 @@
 | `plugin-api.js` | 本项目 | 宿主交给插件的 `ctx`（dataDir / logger / 凭据 / 登录回调）与 ABI 校验 |
 | `owned/runtime.js` | 本项目 | 把插件聚合为面板认识的那一套接口（目录 / RPC / 补全），**不含任何 provider 名字** |
 | `shared/accounts.js` | 本项目 | 凭据读写（`channel-credentials.json`）与账号标识 |
-| `shared/login-server.js` | 本项目 | 登录回调用的临时本地监听（TRAE 用） |
+| `shared/login-server.js` | 本项目 | 登录回调用的临时本地监听（Trae 用） |
 | `sse.js` | 本项目 | 内部 chunk → OpenAI Chat 的帧映射与用量口径换算 |
 | `index.js` | 本项目 | CJS 门面：`init` / `getRuntime` / `refreshModels` / `rpc` / `reloadPlugins` / `shutdown` |
 
@@ -42,8 +42,8 @@
 
 ## 协议来源
 
-- **TRAE**：trae2api / traework2api 的逆向分析；与 `dsh-our-free-model` 的
-  `vendor/channel-pack/src/trae*.ts` 逐条对齐（那份实现经过大量实测修正）。
+- **Trae**：Trae2api / Traework2api 的逆向分析；与 `dsh-our-free-model` 的
+  `vendor/channel-pack/src/Trae*.ts` 逐条对齐（那份实现经过大量实测修正）。
 - **Qoder**：Qoder 0.3.4 桌面端逆向；与 `dsh-our-free-model` 的
   `vendor/channel-pack/src/qoder*.ts` 对齐。加密推理调用的是 Qoder 自带的
   `qoder_auth_wasm` —— 按 wasm-bindgen 约定接起来直接调用，没有剥离任何混淆。
@@ -82,5 +82,5 @@ WorkBuddy 的账号池、会话、调度器、任务体系都在 `server/workbud
   两者不能互换；两个端点的 host 也不同。
 - 未登录任何账号时渠道不播报模型，因此 `channels` Provider 在全新环境下是空列表，
   这是设计而不是故障。
-- TRAE 的 `machine_id` / `device_id` 必须持久化：前者是设备身份（每次换可能触发
+- Trae 的 `machine_id` / `device_id` 必须持久化：前者是设备身份（每次换可能触发
   风控），后者是签到设备号（同一天两个账号共用会被判「该设备已签到」）。

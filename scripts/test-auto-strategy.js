@@ -2,10 +2,10 @@
 //
 //     node scripts/test-auto-strategy.js
 //
-// 四档 auto 的价值全在「排序对不对」上，而排序是纯函数 + 一份日志采样，
+// 四档策略的价值全在「排序对不对」上，而排序是纯函数 + 一份日志采样，
 // 所以这里直接给合成数据断言顺序。真正的延迟/倍率来自真实日志，
 // 那部分用一条合成日志验证「解析口径」（credits=0 是免费、缺字段才是没数据）。
-// 并发优先（auto-least-conn）不吃日志，只吃实时在途数，那块单独造计数验证。
+// 并发优先不吃日志，只吃实时在途数，那块单独造计数验证。
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -33,12 +33,13 @@ function statOf(ok, fail, latencies, credits, tokens, costSamples) {
   return { ok, fail, latencies: latencies || [], credits: credits || 0, tokens: tokens || 0, costSamples: costSamples || 0 }
 }
 
-check('伪模型 id 判定', () => {
+check('伪模型 id 判定：只剩 auto', () => {
   assert.equal(auto.isAutoId('auto'), true)
-  assert.equal(auto.isAutoId('auto-fast'), true)
-  assert.equal(auto.isAutoId('auto-cheap'), true)
-  assert.equal(auto.isAutoId('auto-least-conn'), true)
-  assert.equal(auto.isAutoId(' AUTO-CHEAP '), true, '大小写与空白都不该影响判定')
+  assert.equal(auto.isAutoId(' AUTO '), true, '大小写与空白都不该影响判定')
+  // 旧的三档伪模型已移除：策略改在「渠道-模型」页统一选，模型名里不该再有它们
+  assert.equal(auto.isAutoId('auto-fast'), false)
+  assert.equal(auto.isAutoId('auto-cheap'), false)
+  assert.equal(auto.isAutoId('auto-least-conn'), false)
   assert.equal(auto.isAutoId('auto-slow'), false)
   assert.equal(auto.isAutoId('claude-opus-4-20250514'), false)
   assert.equal(auto.isAutoId(''), false)
@@ -47,13 +48,35 @@ check('伪模型 id 判定', () => {
 
 check('伪模型清单形状', () => {
   const list = auto.listAutoModels()
-  assert.equal(list.length, 4)
+  assert.equal(list.length, 1)
+  assert.deepEqual(list.map(item => item.id), ['auto'])
   for (const item of list) {
     assert.equal(item.object, 'model')
     assert.equal(item.owned_by, 'airoute')
     assert.ok(item.name && item.name.length > 0, '要带中文说明，能读到 name 的客户端才看得懂')
   }
-  assert.deepEqual(list.map(item => item.id), ['auto', 'auto-fast', 'auto-cheap', 'auto-least-conn'])
+})
+
+check('策略档位：四档齐全，非法值退回默认', () => {
+  const list = auto.listStrategies()
+  assert.deepEqual(list.map(item => item.id), ['balanced', 'latency', 'cost', 'connections'])
+  assert.equal(auto.normalizeStrategy('cost'), 'cost')
+  assert.equal(auto.normalizeStrategy('nonsense'), 'balanced', '不认识的 id 退回默认档')
+  assert.equal(auto.normalizeStrategy(undefined), 'balanced')
+  assert.equal(auto.normalizeStrategy(''), 'balanced')
+})
+
+check('策略读写：落盘在 server-config.json，非法值不落盘', () => {
+  assert.equal(auto.getStrategy(), 'balanced', '没配置时是默认档')
+  assert.equal(auto.saveStrategy('cost'), 'cost')
+  assert.equal(auto.getStrategy(), 'cost')
+  const raw = JSON.parse(fs.readFileSync(path.join(dataDir, 'server-config.json'), 'utf8'))
+  assert.equal(raw.autoStrategy, 'cost')
+  // 非法值在读的时候就被挡掉，不会把排序逻辑带进空档
+  fs.writeFileSync(path.join(dataDir, 'server-config.json'), JSON.stringify({ autoStrategy: '不存在' }))
+  assert.equal(auto.getStrategy(), 'balanced')
+  assert.equal(auto.saveStrategy('connections'), 'connections')
+  assert.equal(auto.getStrategy(), 'connections')
 })
 
 check('中位数', () => {
@@ -200,7 +223,7 @@ check('尝试链：最多 4 个候选，兜底模型补在末尾', () => {
     }
   }
   auto.resetStatsCache()
-  const chain = auto.buildChain(config, auto.findAutoModel('auto-cheap'), 'channels/fb')
+  const chain = auto.buildChain(config, 'cost', 'channels/fb')
   assert.ok(chain.length <= 5, `候选不该无限长：${chain.length}`)
   assert.equal(chain[0].ref, 'channels/b', '免费模型应排第一')
   assert.equal(chain[chain.length - 1].ref, 'channels/fb', '兜底模型必须在末尾')
@@ -213,7 +236,7 @@ check('尝试链：最多 4 个候选，兜底模型补在末尾', () => {
 check('尝试链：兜底与候选重复时不重复追加', () => {
   const config = { channels: { type: 'channel', models: [{ id: 'only', displayName: 'Only · 免费' }] } }
   auto.resetStatsCache()
-  const chain = auto.buildChain(config, auto.findAutoModel('auto'), 'channels/only')
+  const chain = auto.buildChain(config, 'balanced', 'channels/only')
   assert.deepEqual(chain.map(item => item.ref), ['channels/only'])
 })
 
@@ -233,10 +256,10 @@ check('尝试链：并发优先把最闲的排在第一位', () => {
   )
   auto.resetStatsCache()
   const release = auto.beginAttempt('channels/a')
-  const chain = auto.buildChain(config, auto.findAutoModel('auto-least-conn'), '')
+  const chain = auto.buildChain(config, 'connections', '')
   assert.equal(chain[0].ref, 'channels/b')
   release()
-  assert.equal(auto.buildChain(config, auto.findAutoModel('auto-least-conn'), '')[0].ref, 'channels/a', 'a 闲下来就靠延迟胜出')
+  assert.equal(auto.buildChain(config, 'connections', '')[0].ref, 'channels/a', 'a 闲下来就靠延迟胜出')
 })
 
 async function main() {

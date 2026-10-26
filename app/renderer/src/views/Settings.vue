@@ -17,14 +17,15 @@
         <div class="config-row">
           <label class="config-label">开机自启</label>
           <div class="config-control">
-            <button
-              class="toggle-btn"
-              :class="{ active: autoLaunch }"
-              @click="toggleAutoLaunch"
-            >
-              {{ autoLaunch ? '已开启' : '已关闭' }}
-            </button>
-            <span class="config-hint inline">系统启动时自动打开 AiRoute</span>
+            <!-- key 绑定实际状态：设置失败时 autoLaunch 不变，靠重建把选中态拨回原位 -->
+            <SegmentedTabs
+              :key="String(autoLaunch)"
+              :model-value="autoLaunch ? 'on' : 'off'"
+              :options="autoLaunchOptions"
+              label="开机自启"
+              size="sm"
+              @update:model-value="onAutoLaunchChange"
+            />
           </div>
         </div>
       </div>
@@ -36,7 +37,7 @@
         <div class="config-row">
           <label class="config-label">服务端</label>
           <div class="config-control">
-            <span v-if="sysStatus" class="sys-value">运行中 · v{{ sysStatus.version }} · 端口 {{ sysStatus.port }}</span>
+            <span v-if="sysStatus" class="sys-value">运行中</span>
             <span v-else class="config-hint inline">未连接</span>
           </div>
         </div>
@@ -62,7 +63,6 @@
             </AppButton>
           </div>
         </div>
-        <div class="config-hint">清空后日志页历史一并删除，不影响账号池与用量统计</div>
       </div>
     </div>
 
@@ -80,30 +80,19 @@
               @change="onImportFile"
             />
             <AppButton variant="secondary" :disabled="exporting" @click="exportConfigFile">
-              {{ exporting ? '导出中…' : '导出到文件' }}
+              {{ exporting ? '导出中…' : '导出' }}
             </AppButton>
             <AppButton variant="secondary" :disabled="importing" @click="importInput?.click()">
-              {{ importing ? '导入中…' : '选择文件导入' }}
+              {{ importing ? '导入中…' : '导入' }}
             </AppButton>
-            <span class="config-hint inline">导出含账号凭据 · 导入整体覆盖并先备份</span>
           </div>
         </div>
-        <div class="config-hint">⚠ 导出文件含账号登录凭据（明文），只在自己信任的设备间传</div>
       </div>
     </div>
 
     <div class="section">
       <h2 class="section-title">关于与更新</h2>
       <div class="card">
-        <div class="config-row">
-          <label class="config-label">新手引导</label>
-          <div class="config-control">
-            <AppButton variant="secondary" @click="replayOnboarding">从头再放一遍</AppButton>
-            <span class="config-hint inline">
-              {{ onboardingDone ? '首次启动时已播放（或已跳过）' : '还没播放过，下次启动会自动弹出' }}
-            </span>
-          </div>
-        </div>
         <div class="config-row">
           <label class="config-label">版本</label>
           <div class="config-control">
@@ -112,9 +101,10 @@
             <span v-if="info" class="badge" :class="info.hasUpdate ? 'info' : 'ok'">
               {{ info.hasUpdate ? '可升级到 v' + info.latest : '已是最新' }}
             </span>
-            <AppButton variant="secondary" :disabled="checking || busy" @click="runCheck(false, true)">
-              {{ checking ? '检查中…' : '检查更新' }}
-            </AppButton>
+            <!-- 更新自动检测（useUpdate 每分钟轮询），这里只展示结果，不设手动检查按钮 -->
+            <span v-if="checking" class="config-hint inline">检查更新中…</span>
+            <span v-else-if="info && info.hasUpdate" class="badge info">可升级到 v{{ info.latest }}</span>
+            <span v-else-if="info" class="badge ok">已是最新</span>
           </div>
         </div>
         <div v-if="supported && backup" class="config-row">
@@ -161,9 +151,9 @@ import { showToast } from '../composables/useToast.js'
 import { formatBytes, formatTime } from '../utils/format.js'
 import { useUpdate } from '../composables/useUpdate.js'
 import { useModel } from '../composables/useModel.js'
-import { useOnboarding } from '../composables/useOnboarding.js'
 
 import AppButton from '../components/AppButton.vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
 const serverPort = ref(3000) // 端口输入框的值
 const portChanged = ref(false) // 端口已保存但尚未重启生效
 const restarting = ref(false) // 是否正在重启服务
@@ -183,18 +173,9 @@ const { loadModelData, notifyTray } = useModel()
 const {
   info, checking, stage, stageText, percent, error, installError, rolledBack, savedPath,
   downloading, busy, supported, unsupportedReason, backup, lastResult,
-  runCheck, oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus,
+  oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus,
   isMacPlatform, isWinInstaller
 } = useUpdate()
-
-// 新手引导：这里只负责「重播」与显示当前状态；播放本身由 App.vue 的浮层接管
-const { isDone: onboardingIsDone, startOnboarding } = useOnboarding()
-const onboardingDone = ref(onboardingIsDone())
-
-// 不清 localStorage：重播只是再打开一次，用户中途关掉时不该判定成「完成」
-function replayOnboarding() {
-  startOnboarding(0)
-}
 
 // 本地版本号：优先取服务端 /api/system/status（打开页面就有，不依赖联网），
 // 再退回更新检查结果。原来只读 info.current，检查更新没成功（离线 / 静默检查失败）时
@@ -304,10 +285,17 @@ async function doRestart() {
   }
 }
 
-// 切换开机自启
-async function toggleAutoLaunch() {
+// 开机自启：tab 分段控件的两个取值（「已开启 / 已关闭」互斥选择）
+const autoLaunchOptions = [
+  { value: 'on', label: '开启' },
+  { value: 'off', label: '关闭' }
+]
+
+// 切换开机自启；value 来自 SegmentedTabs 的 update:modelValue（'on' | 'off'）
+async function onAutoLaunchChange(value) {
   if (!window.electronAPI) return
-  const next = !autoLaunch.value
+  const next = value === 'on'
+  if (next === autoLaunch.value) return
   try {
     await window.electronAPI.setAutoLaunch(next)
     autoLaunch.value = next
@@ -459,6 +447,27 @@ onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导�
 </script>
 
 <style scoped>
+/* 设置页竖向密度：通用版式的卡片内边距 20px + 行内边距 10px，
+   在这种一行一项的表单里会在卡片上下留出两指宽的空白。
+   这里整体收一档：卡片只留 12px，行距 6px，末尾提示不再额外撑高 */
+.settings .card {
+  padding: 12px 20px;
+}
+
+.settings .config-row {
+  padding: 6px 0;
+}
+
+.settings .config-hint {
+  padding: 2px 0 0;
+}
+
+/* 标题与卡片之间同样收一档：分区标题下方的间距和卡片内边距叠加，
+   在只有三四行的卡片上方显得格外空 */
+.settings .section-title {
+  margin-bottom: 8px;
+}
+
 .port-input {
   width: 120px;
 }
@@ -482,28 +491,6 @@ onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导�
 /* 导入用原生文件选择，触发按钮自己画 */
 .file-input {
   display: none;
-}
-
-/* 开关形态的按钮：高度与小号按钮一致，圆角做胶囊以示「状态」而非「动作」 */
-.toggle-btn {
-  display: inline-flex;
-  align-items: center;
-  height: var(--btn-h);
-  padding: 0 14px;
-  border-radius: var(--radius-pill);
-  font-size: var(--btn-fs);
-  font-weight: 500;
-  background: var(--bg-hover);
-  color: var(--text-2);
-  border: 1px solid var(--border-1);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.toggle-btn.active {
-  background: var(--primary);
-  color: var(--bg-card);
-  border-color: var(--primary);
 }
 
 .version-text {

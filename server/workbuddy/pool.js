@@ -831,10 +831,13 @@ function createPool(opts = {}) {
 
   // 诊断当前无候选账号的原因（供错误提示；不做任何状态变更）
   // realm：仅统计该区域（未指定则统计全池）
+  // modelRateLimited 单独计数：6004 模型级限流是暂时状态（有上游重置墙钟），
+  // 与 11102/11158 的确定性拒绝语义不同 —— 调用方据此决定要不要把这次失败
+  // 记到模型的连续失败台账上（限流不该把模型打成失活）
   function diagnoseNoCandidate(model, realm) {
     const now = Date.now()
     const scope = normalizeRealm(realm)
-    const diag = { total: 0, disabled: 0, cooling: 0, modelCooled: 0, inFlightFull: 0, healthy: 0, realm }
+    const diag = { total: 0, disabled: 0, cooling: 0, modelCooled: 0, modelRateLimited: 0, inFlightFull: 0, healthy: 0, realm }
     for (const e of byUID.values()) {
       if (!realmOK(e, scope)) continue
       diag.total++
@@ -844,6 +847,7 @@ function createPool(opts = {}) {
       }
       if (model && modelCooled(e, now, model)) {
         diag.modelCooled++
+        if (!String(e.modelCooldowns[model]?.reason || '').startsWith('111')) diag.modelRateLimited++
         continue
       }
       if ((e.until && now < e.until) || (e.breakerUntil && now < e.breakerUntil) || (e.degradeUntil && now < e.degradeUntil)) {
@@ -952,6 +956,7 @@ function createPool(opts = {}) {
         kind: reason.startsWith('11102') || reason.startsWith('11158') ? 'model_unavailable' : 'rate_limit',
         until: mc.until
       }
+      if (mc.reason) item.reason = reason
       if (mc.resetAt && mc.resetAt !== mc.until) item.resetAt = mc.resetAt
       rateLimitedModels.push(item)
     }

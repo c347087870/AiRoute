@@ -93,6 +93,9 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
       for (const model of models) {
         // ⚠️ 本模块里所有调用都发**裸模型 id**，目录行才是 `<provider>/<model>`；
         // 路由层按 `channels/<provider>/<model>` 引用，所以 `owned_by` 必须对
+        // 被关掉的模型不进目录：目录就是「客户端能选到的范围」，
+        // 关掉即从 /v1/models 与路由候选里消失（WorkBuddy 那边由启用清单天然同口径）
+        if (state.disabledModels[`${provider}/${model.id}`] === true) continue
         const row = {
           id: `${provider}/${model.id}`,
           name: model.name,
@@ -101,7 +104,7 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
           max_tokens: model.maxOutput,
           vision: model.vision === true,
         }
-        // 模型自带的推理档位（TRAE 的 reasoning.efforts）同步进 Provider 配置，
+        // 模型自带的推理档位（Trae 的 reasoning.efforts）同步进 Provider 配置，
         // 面板才能在模型行里让用户选档位
         if (model.reasoning?.efforts?.length) row.reasoning = model.reasoning
         out.push(row)
@@ -249,7 +252,7 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
       }
 
       case 'account.create': {
-        // 登录：回调式（TRAE）与设备码轮询式（Qoder）都由插件自己实现，
+        // 登录：回调式（Trae）与设备码轮询式（Qoder）都由插件自己实现，
         // 宿主只回它给的形状。两者的 accountId 都当登录会话键 ——
         // 面板轮询 login.poll 时只认这个字段。
         if (!provider) return { ok: false, error: providerError(payload?.provider) }
@@ -333,6 +336,25 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
               dead: state.deadModels[`${provider}/${model.id}`] > Date.now(),
             })),
         }
+      }
+
+      case 'model.setEnabled': {
+        // 引导页的「多选开启」：给出一份完整启用清单，其余全关。
+        // 传完整清单而不是逐个开关，一次落盘一次广播。
+        // 拒绝空清单：全关等于渠道源里一个模型都不剩，/v1/models 会直接空掉
+        const modelIds = Array.isArray(payload.modelIds) ? payload.modelIds.filter(id => typeof id === 'string' && id) : []
+        if (!modelIds.length) return { ok: false, error: '缺少 modelIds（至少要开启一个模型）' }
+        const ids = new Set(modelIds)
+        const state = readState()
+        const next = {}
+        for (const model of await modelsOf(provider)) {
+          const full = `${provider}/${model.id}`
+          if (!ids.has(full) && !ids.has(model.id)) next[full] = true
+        }
+        state.disabledModels = next
+        writeState(state)
+        emitChanged()
+        return { ok: true, enabled: [...ids] }
       }
 
       case 'model.setDisabled': {
@@ -461,7 +483,7 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
             rows.push({
               accountId: entry.id,
               nickname: entry.name,
-              // TRAE 回 { total, packages, expiredTotal }（余额 = Σ 各资源包剩余），
+              // Trae 回 { total, packages, expiredTotal }（余额 = Σ 各资源包剩余），
               // 没有 balance 字段；两个都认，取不到才是 null
               balance: {
                 total: value.balance ?? value.total ?? null,

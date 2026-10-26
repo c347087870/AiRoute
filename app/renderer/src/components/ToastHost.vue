@@ -90,6 +90,7 @@ async function copyToast(item) {
 // 根据提示类型返回对应图标
 function iconOf(type) {
   if (type === 'error') return '✕'
+  if (type === 'warn') return '!'
   if (type === 'info') return 'ℹ'
   return '✓'
 }
@@ -130,6 +131,11 @@ function iconOf(type) {
   border-left-color: var(--danger);
 }
 
+/* 部分成功（如测试有失败项）用黄色：既不是全错，也不该当成成功盖过去 */
+.toast-warn {
+  border-left-color: var(--warning);
+}
+
 .toast-info {
   border-left-color: var(--primary);
 }
@@ -142,6 +148,10 @@ function iconOf(type) {
 
 .toast-error .toast-icon {
   color: var(--danger);
+}
+
+.toast-warn .toast-icon {
+  color: var(--warning);
 }
 
 .toast-info .toast-icon {

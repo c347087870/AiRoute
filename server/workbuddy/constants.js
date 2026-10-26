@@ -69,6 +69,12 @@ const GROWTH_TASKS_CLAIM_PATH = '/v2/activity/growth/tasks/reward/claim'
 const APPEARANCE_SET_PATH = '/v2/user-asset/appearance/set'
 
 // OAuth 路径（挂 chatBase）
+// 取授权 URL。注意它挂在国内版「官网域」而不是 chatBase：上游返回的 authUrl
+// 主机跟着**请求主机**走，挂 copilot.tencent.com 拿到的是 copilot.tencent.com/login，
+// 再 301 到 www.codebuddy.cn/login（用户看到的是 CodeBuddy 品牌页）；
+// 挂 www.workbuddy.cn 才拿到 www.workbuddy.cn/login。
+// 已实测两者返回的 state 在两条域名族上都能取 token，因此只是入口品牌不同。
+const OAUTH_STATE_HOST_CN = WEB_BASE_CN
 const OAUTH_STATE_PATH = '/v2/plugin/auth/state' // 取授权 URL
 const OAUTH_TOKEN_PATH = '/v2/plugin/auth/token' // 轮询取 token
 const OAUTH_ACCOUNT_PATH = '/v2/plugin/login/account' // 取账号信息
@@ -229,6 +235,7 @@ module.exports = {
   GROWTH_TASKS_ACCEPT_PATH,
   GROWTH_TASKS_CLAIM_PATH,
   APPEARANCE_SET_PATH,
+  OAUTH_STATE_HOST_CN,
   OAUTH_STATE_PATH,
   OAUTH_TOKEN_PATH,
   OAUTH_ACCOUNT_PATH,

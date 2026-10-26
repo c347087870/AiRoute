@@ -57,9 +57,9 @@ async function main() {
     assert.equal(info.failures.length, 0, `不该有加载失败：${JSON.stringify(info.failures)}`)
     assert.deepEqual(host.providers().sort(), ['qoder', 'qodercn', 'trae'])
     for (const plugin of info.plugins) assert.equal(plugin.builtin, true)
-    const trae = info.plugins.find(p => p.id === 'trae')
-    assert.deepEqual(trae.providers, ['trae'])
-    assert.deepEqual(trae.checkinProviders, ['trae'], 'TRAE 有签到端点')
+    const Trae = info.plugins.find(p => p.id === 'trae')
+    assert.deepEqual(Trae.providers, ['trae'])
+    assert.deepEqual(Trae.checkinProviders, ['trae'], 'Trae 有签到端点')
     const qoder = info.plugins.find(p => p.id === 'qoder')
     assert.deepEqual(qoder.providers.sort(), ['qoder', 'qodercn'], '一个包两个 provider')
     assert.deepEqual(qoder.checkinProviders, [], 'Qoder 没有签到端点')
@@ -164,13 +164,13 @@ async function main() {
     // 账号 id 带 provider 前缀，两家的账号不会互相覆盖
     for (const row of qoderAccounts) assert.ok(row.id.startsWith('qoder-'), `意外的账号 id：${row.id}`)
     for (const row of cnAccounts) assert.ok(row.id.startsWith('qodercn-'), `意外的账号 id：${row.id}`)
-    const trae = host.instanceOf('trae')
-    assert.ok(Array.isArray(trae.backend.listAccounts('trae')))
+    const Trae = host.instanceOf('trae')
+    assert.ok(Array.isArray(Trae.backend.listAccounts('trae')))
     // 「有没有这个能力」靠方法在不在判断，而不是靠 provider 名写死分支：
-    // TRAE 有余额端点，Qoder 没有（宿主据此回「未开通」，不留必然失败的按钮）
-    assert.equal(typeof trae.backend.balance, 'function', 'TRAE 有余额端点')
+    // Trae 有余额端点，Qoder 没有（宿主据此回「未开通」，不留必然失败的按钮）
+    assert.equal(typeof Trae.backend.balance, 'function', 'Trae 有余额端点')
     assert.equal(qoder.backend.balance, undefined, 'Qoder 没有余额端点')
-    assert.equal(typeof trae.backend.checkin, 'function')
+    assert.equal(typeof Trae.backend.checkin, 'function')
     assert.equal(typeof qoder.backend.checkin, 'function', 'Qoder 的 checkin 返回 ineligible，不是缺方法')
     await host.shutdown()
   })
@@ -202,7 +202,7 @@ async function main() {
     await host.shutdown()
   })
 
-  // ⑧ 清单兼容：老清单（只有 trae）升级后 qoder 自动补回来
+  // ⑧ 清单兼容：老清单（只有 Trae）升级后 qoder 自动补回来
   await test('老清单缺少内置插件时自动补齐', async () => {
     const dir = freshDir('legacy')
     fs.writeFileSync(path.join(dir, 'channels-plugins.json'), JSON.stringify({
@@ -211,16 +211,16 @@ async function main() {
     const store = createPluginStore({ dataDir: dir, logger: silent })
     const ids = store.list().map(item => item.id).sort()
     assert.deepEqual(ids, ['qoder', 'trae'])
-    // 补齐的那家不该顺手把用户对 trae 的停用改回来
+    // 补齐的那家不该顺手把用户对 Trae 的停用改回来
     assert.equal(store.get('trae').enabled, false)
     assert.equal(store.get('qoder').enabled, true)
   })
 
-  // ⑨ 签到状态：TRAE 的账号行要报出「今天签过没」
+  // ⑨ 签到状态：Trae 的账号行要报出「今天签过没」
   //
   // 面板靠这个字段把「签到」按钮置灰。判据是**自然日**而不是「上次签到时刻」，
   // 所以跨零点必须自动失效 —— 否则第二天按钮还是灰的，用户再也点不动。
-  await test('TRAE 报出今日签到状态（跨零点失效）', async () => {
+  await test('Trae 报出今日签到状态（跨零点失效）', async () => {
     const dir = freshDir('checkin-state')
     const host = createPluginHost({ dataDir: dir, logger: silent })
     host.load()
@@ -248,7 +248,7 @@ async function main() {
   // 这条是按钮置灰的数据来源。记早了（失败也记）按钮会灰一整天，用户明明
   // 没签成却点不动；记漏了（上游说已签过却不记）按钮永远可点，点下去只回
   // 一句「今天已签过」。
-  await test('TRAE 签到落盘：成功 / 已签过才记，失败不记', async () => {
+  await test('Trae 签到落盘：成功 / 已签过才记，失败不记', async () => {
     const dir = freshDir('checkin-persist')
     // 只写凭据文件、不写注册表：顺带覆盖「账号只在凭据里」这条迁移路径 ——
     // 补写注册表时 id 必须沿用凭据键名，不能重算 hash

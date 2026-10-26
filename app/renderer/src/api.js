@@ -131,6 +131,15 @@ export function getRules() {
   return api.get('/api/rules').then(r => r.data)
 }
 
+// Auto 策略：auto 请求按哪一档口径挑模型（综合 / 延迟 / 成本 / 并发）
+export function getAutoStrategy() {
+  return api.get('/api/auto-strategy').then(r => r.data)
+}
+
+export function updateAutoStrategy(strategy) {
+  return api.put('/api/auto-strategy', { strategy }).then(r => r.data)
+}
+
 export function updateRules(rules) {
   return api.put('/api/rules', rules).then(r => r.data)
 }

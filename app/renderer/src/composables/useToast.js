@@ -6,7 +6,7 @@ let seq = 0
 // 每条提示的自动消失计时器：记录剩余时长，鼠标停留时暂停，方便读完整错误或点「复制」
 const timers = new Map() // id -> { timeoutId, startedAt, remaining }
 
-// 显示一条提示，type 支持 success / error / info
+// 显示一条提示，type 支持 success / error / warn / info
 export function showToast(message, type = 'success', duration = 2600) {
   const id = ++seq
   toasts.value.push({ id, message, type })

@@ -253,7 +253,7 @@ onMounted(loadData)
 
 .custom-keyword {
   width: 160px;
-  padding: 8px 12px;
+  padding: 0 12px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-3);
   font-size: var(--fs-small);

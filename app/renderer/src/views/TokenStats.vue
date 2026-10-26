@@ -4,17 +4,13 @@
       <AppButton variant="danger" @click="clearStats" :disabled="loading">清空</AppButton>
     </div>
 
-    <!-- 时间维度选择 -->
-    <div class="tabs">
-      <button
-        v-for="period in periods"
-        :key="period.value"
-        class="tab"
-        :class="{ active: selectedPeriod === period.value }"
-        @click="selectPeriod(period.value)"
-      >
-        {{ period.label }}
-      </button>
+    <!-- 时间维度选择：通用分段控件（SegmentedTabs），与状态面板同一套外观与键盘行为 -->
+    <div class="page-toolbar period-toolbar">
+      <SegmentedTabs
+        v-model="selectedPeriod"
+        :options="periods"
+        label="用量统计时间维度"
+      />
     </div>
 
     <!-- 汇总统计卡片：总计 / 输入 / 缓存读 / 缓存写 -->
@@ -95,7 +91,7 @@
         <span class="title-meta">共 {{ formatNumber(reqCount(currentStats)) }} 次请求</span>
       </h2>
       <div class="card chart-container" @mouseleave="hideTooltip">
-        <div v-if="chartData.length > 0" class="line-chart">
+        <div v-if="chartData.length > 0" class="line-chart" ref="chartEl">
           <!-- Tooltip -->
           <div 
             v-if="tooltip.visible"
@@ -245,7 +241,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import {
   getTokenStatsByPeriod,
   getTokenStatsHourly,
@@ -260,6 +256,7 @@ import { usePolling } from '../composables/usePolling.js'
 import { formatNumber, formatPercent, calcCacheHitRate, toLocalDateKey } from '../utils/format.js'
 
 import AppButton from '../components/AppButton.vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
 // 时间维度选项：与状态面板同一套日历口径（本日 / 本周 / 本月 / 近三月 / 本年），
 // 另外保留「近三天」这个滚动窗口 —— 它回答的是「这两三天有没有异常」，
 // 和「本周」在周一当天重合、周二起就不一样，两者都需要
@@ -345,14 +342,50 @@ const chartTitle = computed(() => {
 })
 
 // SVG 图表配置
-const svgWidth = 800
+// svgWidth 用容器实测宽度：固定 800 的 viewBox 在宽屏下会被 preserveAspectRatio
+// 的 meet 缩放压成中间一条，两侧大片留白（图表「没撑满」）。改成 1:1 像素映射后
+// 图形宽度始终等于容器宽度。
+const chartEl = ref(null)
 const svgHeight = 300
 const paddingLeft = 60
 const paddingRight = 30
 const paddingTop = 20
 const paddingBottom = 40
-const chartWidth = svgWidth - paddingLeft - paddingRight
+
+const DEFAULT_SVG_WIDTH = 800
+const svgWidth = ref(DEFAULT_SVG_WIDTH)
+const chartWidth = computed(() => svgWidth.value - paddingLeft - paddingRight)
 const chartHeight = svgHeight - paddingTop - paddingBottom
+
+// 容器宽度变化时重算 viewBox（窗口缩放 / 侧栏折叠都会触发）
+let resizeObserver = null
+function syncChartWidth() {
+  const el = chartEl.value
+  if (!el) return
+  const w = Math.round(el.clientWidth)
+  if (w > 0 && w !== svgWidth.value) svgWidth.value = w
+}
+
+// 图表容器是 v-if 渲染的：数据到位后才挂载，ResizeObserver 要跟着挂载时机走
+watch(chartEl, (el, oldEl) => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  if (!el) return
+  syncChartWidth()
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(syncChartWidth)
+    resizeObserver.observe(el)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+})
 
 // 计算最大值
 const maxValue = computed(() => {
@@ -384,7 +417,7 @@ const linePoints = computed(() => {
 function getX(index) {
   const data = chartData.value
   if (data.length <= 1) return paddingLeft + chartWidth / 2
-  return paddingLeft + (index / (data.length - 1)) * chartWidth
+  return paddingLeft + (index / (data.length - 1)) * chartWidth.value
 }
 
 // 获取Y坐标
@@ -420,7 +453,7 @@ function handleChartMouseMove(event) {
   const svgRect = svgEl.getBoundingClientRect()
 
   // 计算鼠标在 SVG 坐标系中的 X 位置
-  const scaleX = svgWidth / svgRect.width
+  const scaleX = svgWidth.value / svgRect.width
   const mouseXInSvg = (event.clientX - svgRect.left) * scaleX
 
   // 找到离鼠标最近的数据点
@@ -429,7 +462,7 @@ function handleChartMouseMove(event) {
     updateTooltipPosition(event, lineChartEl, 0)
   } else {
     // 将 mouseXInSvg 映射到数据索引
-    const ratio = (mouseXInSvg - paddingLeft) / chartWidth
+    const ratio = (mouseXInSvg - paddingLeft) / chartWidth.value
     const nearestIndex = Math.round(ratio * (dataLen - 1))
     const clampedIndex = Math.max(0, Math.min(dataLen - 1, nearestIndex))
 
@@ -500,11 +533,10 @@ function hideTooltip() {
   tooltip.value.index = -1
 }
 
-// 选择时间维度
-async function selectPeriod(period) {
-  selectedPeriod.value = period
+// 选择时间维度：分段控件用 v-model 改 selectedPeriod，这里监听它去取数
+watch(selectedPeriod, async (period) => {
   await loadPeriodData(period)
-}
+})
 
 // 按字段累加明细，用于把小时明细合成为「本日」的汇总。
 // failed 必须一起加：请求数口径是 count + failed，漏掉它会比状态面板少一截
@@ -586,7 +618,10 @@ onMounted(() => {
 
 
 
-/* 时间维度选择器 */
+/* 时间维度选择器：与状态面板一致靠左对齐，与下方卡片左边缘齐平 */
+.period-toolbar {
+  justify-content: flex-start;
+}
 
 
 

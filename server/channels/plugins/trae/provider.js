@@ -1,4 +1,4 @@
-// TRAE 渠道：登录、续期、目录、补全、签到、额度
+// Trae 渠道：登录、续期、目录、补全、签到、额度
 //
 // 与 dsh 渠道包的区别：这里**不再有 cordis ctx 与 LLM 适配器栈**。AiRoute 的
 // 请求体在 HTTP 层已经收敛成 OpenAI Chat，所以本文件只做三件事：
@@ -48,8 +48,8 @@ class TraeError extends Error {
 // credentials / login 由宿主注入（见 plugin-api.js）：插件不直接 require 宿主的
 // 存储与端口服务，换实现时这里不用改。
 function createTrae({ dataDir, logger = console, credentials, login }) {
-  if (!credentials) throw new Error('TRAE 插件缺少凭据服务（credentials）')
-  if (!login) throw new Error('TRAE 插件缺少登录回调服务（login）')
+  if (!credentials) throw new Error('Trae 插件缺少凭据服务（credentials）')
+  if (!login) throw new Error('Trae 插件缺少登录回调服务（login）')
   const accounts = credentials
   const loginServer = login
   // ── 状态 ──
@@ -67,7 +67,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
     try {
       events.onChanged?.()
     } catch (error) {
-      logger.warn?.(`[trae] 变更回调失败：${error.message}`)
+      logger.warn?.(`[Trae] 变更回调失败：${error.message}`)
     }
   }
   const events = {}
@@ -219,13 +219,13 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         // 400/401/403 = 令牌真失效，需要重新登录；5xx = 上游抖动，留给下次
         const lapsed = [400, 401, 403].includes(response.status)
         throw new TraeError(
-          `TRAE 续期失败（HTTP ${response.status}）：${text.slice(0, 200)}`,
+          `Trae 续期失败（HTTP ${response.status}）：${text.slice(0, 200)}`,
           lapsed ? 'AUTH' : 'TRANSPORT',
           response.status,
         )
       }
       const exchange = protocol.parseExchangeResponse(await response.json())
-      if (!exchange) throw new TraeError('TRAE 续期响应缺少 Token', 'AUTH')
+      if (!exchange) throw new TraeError('Trae 续期响应缺少 Token', 'AUTH')
       const next = protocol.applyRefresh(credential, exchange)
       accounts.setCredential(dataDir, 'trae', uid, next)
       return next
@@ -267,7 +267,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
       } catch (error) {
         // 续期失败但令牌还没真的过期：先用旧令牌试一次（对齐渠道包的容错口径）
         if (!protocol.isExpired(credential)) {
-          logger.warn?.(`[trae] ${uid} 续期失败，沿用现有令牌：${error.message}`)
+          logger.warn?.(`[Trae] ${uid} 续期失败，沿用现有令牌：${error.message}`)
         } else {
           throw error
         }
@@ -293,7 +293,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
       try {
         credential = await resolveCredential(owner.uid)
       } catch (error) {
-        logger.warn?.(`[trae] 目录读取跳过：${error.message}`)
+        logger.warn?.(`[Trae] 目录读取跳过：${error.message}`)
         return catalog.models
       }
       try {
@@ -320,7 +320,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         return models
       } catch (error) {
         // 远端整体失败才用兜底表；**不覆盖**已有缓存
-        logger.warn?.(`[trae] 模型目录读取失败，使用兜底表：${error.message}`)
+        logger.warn?.(`[Trae] 模型目录读取失败，使用兜底表：${error.message}`)
         if (catalog.models.length === 0) {
           const fallback = protocol.fallbackModels()
           channelOf.clear()
@@ -384,7 +384,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
       if (!name) return
       const parsed = protocol.parseSseEvent(name, data)
       if (parsed.error) {
-        throw new TraeError(`TRAE：${parsed.error.message}`, String(parsed.error.code), 502)
+        throw new TraeError(`Trae：${parsed.error.message}`, String(parsed.error.code), 502)
       }
       if (name === 'output') {
         if (parsed.reasoning) {
@@ -396,7 +396,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
           onChunk({ type: 'text-delta', text: parsed.text })
         }
         for (const call of parsed.toolCalls ?? []) {
-          // ⚠️ TRAE 把**同一个**工具调用拆成多帧下发，每帧只带参数字符串的一段
+          // ⚠️ Trae 把**同一个**工具调用拆成多帧下发，每帧只带参数字符串的一段
           // （实测 `{` 与 `"city":"北京"}` 分两帧），且并非每帧都带 id/name。
           // 必须按 index 合并 —— 否则一次工具调用会变成两个空参数调用。
           const index = typeof call.index === 'number' ? call.index : toolCalls.size
@@ -468,7 +468,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
       })
     }
     if (usage) {
-      // TRAE 的用量口径：prompt_tokens / completion_tokens，缓存命中在 prompt_tokens_details
+      // Trae 的用量口径：prompt_tokens / completion_tokens，缓存命中在 prompt_tokens_details
       onChunk({
         type: 'usage',
         usage: {
@@ -502,8 +502,8 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
     const candidates = usableAccounts(bare)
     if (candidates.length === 0) {
       const any = usableAccounts('')
-      if (any.length === 0) throw new TraeError('TRAE 没有可用账号，请先登录', 'AUTH', 401)
-      throw new TraeError(`TRAE 的账号都在 ${bare} 上受限，请稍后再试`, 'QUOTA_EXCEEDED', 429)
+      if (any.length === 0) throw new TraeError('Trae 没有可用账号，请先登录', 'AUTH', 401)
+      throw new TraeError(`Trae 的账号都在 ${bare} 上受限，请稍后再试`, 'QUOTA_EXCEEDED', 429)
     }
 
     const tried = new Set()
@@ -535,7 +535,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         if (!response.ok) {
           const text = await response.text().catch(() => '')
           const status = response.status
-          lastError = new TraeError(`TRAE：${text.slice(0, 300) || `HTTP ${status}`}`, 'HTTP_ERROR', status)
+          lastError = new TraeError(`Trae：${text.slice(0, 300) || `HTTP ${status}`}`, 'HTTP_ERROR', status)
           if (status === 429) {
             rateLimits.set(`${candidate.uid}::${bare}`, Date.now() + RATE_LIMIT_FALLBACK_MS)
             continue
@@ -562,7 +562,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
     }
     throw lastError instanceof TraeError
       ? lastError
-      : new TraeError(lastError?.message || 'TRAE：所有账号均不可用', 'HTTP_ERROR', 502)
+      : new TraeError(lastError?.message || 'Trae：所有账号均不可用', 'HTTP_ERROR', 502)
   }
 
   // ── 登录 ──
@@ -583,13 +583,13 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         accounts.setCredential(dataDir, 'trae', uid, credential)
         updateAccount(uid, { name: protocol.displayName(credential, accounts.accountId('trae', uid)), enabled: true, addedAt: Date.now() })
         await fetchCatalog({ force: true })
-        return 'TRAE 登录成功，可以关闭此页面回到 AiRoute'
+        return 'Trae 登录成功，可以关闭此页面回到 AiRoute'
       },
     })
     logins.set(state, { machineId, deviceId, createdAt: Date.now() })
     // start() 返回的是 { callbackUrl, wait }，回调地址要从 callbackUrl 里取：
     // 直接把整个对象拼进 URL 会得到 auth_callback_url=[object Object]，
-    // TRAE 登录页拿不到回调地址，会永远停在「认证中」
+    // Trae 登录页拿不到回调地址，会永远停在「认证中」
     return { loginUrl: protocol.buildLoginUrl(machineId, deviceId, callback.callbackUrl), state }
   }
 
@@ -602,9 +602,9 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         headers: protocol.oauthHeaders(),
         body: { ClientID: 'en1oxy7wnw8j9n', RefreshToken: info.refreshToken, ClientSecret: '-', UserID: '' },
       })
-      if (!response.ok) throw new Error(`TRAE 换取令牌失败（HTTP ${response.status}）`)
+      if (!response.ok) throw new Error(`Trae 换取令牌失败（HTTP ${response.status}）`)
       exchange = protocol.parseExchangeResponse(await response.json())
-      if (!exchange) throw new Error('TRAE 换取令牌的响应里没有 Token')
+      if (!exchange) throw new Error('Trae 换取令牌的响应里没有 Token')
     } else {
       // 没有 refreshToken 时只能用回调里的 access token 兜底
       exchange = { accessToken: info.accessToken, refreshToken: '', tokenExpireAt: 0, tokenExpireDuration: 0 }
@@ -631,7 +631,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         }
       }
     } catch { /* 容错：沿用回调里的用户信息 */ }
-    if (!userInfo.uid) throw new Error('TRAE 未能确定账号 uid')
+    if (!userInfo.uid) throw new Error('Trae 未能确定账号 uid')
     return protocol.buildCredential(exchange, userInfo, session)
   }
 
@@ -653,7 +653,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
     if (!status.ok) throw new TraeError(`签到状态查询失败（HTTP ${status.status}）`, 'HTTP_ERROR', status.status)
     const before = protocol.parseCheckinStatus(await status.json().catch(() => ({})))
     if (before.code === protocol.CHECKIN_CODE_AUTH) {
-      throw new TraeError('TRAE 签到鉴权失败，请重新登录', 'AUTH', 401)
+      throw new TraeError('Trae 签到鉴权失败，请重新登录', 'AUTH', 401)
     }
     if (before.checkedIn) {
       // 上游只说「今天签过了」，没说是什么时候签的：别把 lastCheckinAt 写成此刻
@@ -670,7 +670,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
     if (!claim.ok) throw new TraeError(`签到失败（HTTP ${claim.status}）`, 'HTTP_ERROR', claim.status)
     if (!claimed.ok) {
       if (claimed.code === protocol.CHECKIN_CODE_AUTH) {
-        throw new TraeError('TRAE 签到鉴权失败，请重新登录', 'AUTH', 401)
+        throw new TraeError('Trae 签到鉴权失败，请重新登录', 'AUTH', 401)
       }
       if (claimed.code === protocol.CHECKIN_CODE_PLAN_LIMIT) {
         return { outcome: 'ineligible', message: claimed.message || '当前套餐不参与签到' }

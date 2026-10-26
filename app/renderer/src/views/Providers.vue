@@ -12,7 +12,7 @@
       <!-- 第一次启动就摸到这里的人多半是跳过了引导：给一条回到引导的路，
            比让他读两句说明再自己猜「渠道源」在哪要好 -->
       <div class="empty-actions">
-        <AppButton variant="secondary" @click="startOnboarding(2)">用新手引导一步步配置</AppButton>
+        <AppButton variant="secondary" @click="startOnboarding(1)">用新手引导一步步配置</AppButton>
       </div>
     </div>
 
@@ -902,7 +902,7 @@ function openForOnboarding() {
 .effort-input {
   width: 130px;
   font-size: var(--fs-xs);
-  padding: 3px 6px;
+  padding: 0 6px;
   border: 1px solid var(--border-1);
   border-radius: var(--radius-xs);
   background: var(--bg-card);
@@ -1222,7 +1222,7 @@ function openForOnboarding() {
 .limit-field input {
   flex: 1;
   min-width: 0;
-  padding: 6px 10px;
+  padding: 0 10px;
   font-size: var(--fs-small);
 }
 
@@ -1240,7 +1240,7 @@ function openForOnboarding() {
 
 .model-edit-row .effort-select-sm,
 .model-edit-row .effort-input {
-  padding: 6px 10px;
+  padding: 0 10px;
   font-size: var(--fs-small);
 }
 
@@ -1300,7 +1300,7 @@ function openForOnboarding() {
 .picker-search {
   flex: 1;
   min-width: 160px;
-  padding: 7px 10px;
+  padding: 0 10px;
   font-size: var(--fs-small);
 }
 

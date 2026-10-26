@@ -38,7 +38,7 @@ const RUNTIME_PROVIDERS = [
 const DISPLAY_NAMES = {
   workbuddy: 'WorkBuddy（国内版）',
   'workbuddy-global': 'WorkBuddy（国际版）',
-  trae: 'TRAE (字节)',
+  trae: 'Trae (字节)',
   qoder: 'Qoder',
   qodercn: 'Qoder (国内版)',
 }

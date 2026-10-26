@@ -1,6 +1,6 @@
 // Qoder 渠道：设备码登录、续期、目录、加密补全
 //
-// 与 TRAE 同构（没有 cordis ctx、没有 LLM 适配器栈），差异只在协议：
+// 与 Trae 同构（没有 cordis ctx、没有 LLM 适配器栈），差异只在协议：
 //   - 登录是**设备码轮询**（不是本地回调）：用户在网页确认后，我们轮询 openApi 取令牌；
 //   - 补全走 **WASM 加密端点**，请求体的加密与签名由 qoder-auth-wasm 完成；
 //   - 响应的 SSE 多一层信封，先剥掉才是标准 OpenAI 帧。
@@ -400,7 +400,7 @@ function createQoder({ dataDir, logger = console, credentials }) {
     throw lastError ?? new Error(`${product.displayName}：所有账号均不可用`)
   }
 
-  // 信封 SSE → 内部 chunk。内层是标准 OpenAI 帧，所以解析与 TRAE 同形，
+  // 信封 SSE → 内部 chunk。内层是标准 OpenAI 帧，所以解析与 Trae 同形，
   // 差别只在每一行先剥一层信封。
   async function consumeEnvelope(response, { model, signal, onChunk }) {
     const reader = response.body.getReader()

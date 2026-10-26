@@ -46,8 +46,9 @@
         <div class="card">
           <div class="config-row">
             <label class="config-label">版本 / 端口</label>
-            <div class="config-control mono">
-              v{{ info.server.version }} · 端口 {{ info.server.port }}
+            <div class="config-control">
+              <span class="mono">v{{ info.server.version }}</span> · 端口
+              <span class="mono">{{ info.server.port }}</span>
               <span class="badge" :class="info.devMode ? 'ok' : 'warn'">
                 {{ info.devMode ? '开发模式' : '非开发模式' }}
               </span>
@@ -55,8 +56,9 @@
           </div>
           <div class="config-row">
             <label class="config-label">Node / 平台</label>
-            <div class="config-control mono">
-              {{ info.process.node }} · {{ info.process.platform }}-{{ info.process.arch }}
+            <div class="config-control">
+              <span class="mono">{{ info.process.node }}</span> ·
+              <span class="mono">{{ info.process.platform }}-{{ info.process.arch }}</span>
             </div>
           </div>
           <div class="config-row">
@@ -84,7 +86,7 @@
               <span class="badge" :class="info.channels.state === 'ready' ? 'ok' : 'bad'">
                 {{ info.channels.state }}
               </span>
-              <span class="mono">{{ info.channels.providers.length }} 家 / {{ info.channels.models }} 个模型</span>
+              <span>{{ info.channels.providers.length }} 家 / {{ info.channels.models }} 个模型</span>
               <span v-if="info.channels.error" class="text-red">{{ info.channels.error }}</span>
             </div>
           </div>
@@ -110,8 +112,8 @@
           <div v-if="info.channels.pluginFailures.length" class="config-row">
             <label class="config-label">插件异常</label>
             <div class="config-control wrap">
-              <span v-for="f in info.channels.pluginFailures" :key="f.id" class="text-red mono">
-                {{ f.id }}：{{ f.error }}
+              <span v-for="f in info.channels.pluginFailures" :key="f.id" class="text-red">
+                <span class="mono">{{ f.id }}</span>：{{ f.error }}
               </span>
             </div>
           </div>
@@ -119,7 +121,7 @@
             <label class="config-label">WorkBuddy 账号池</label>
             <div class="config-control">
               <template v-if="info.workbuddy.counts">
-                <span class="mono">
+                <span>
                   总 {{ info.workbuddy.counts.total }} · 可用 {{ info.workbuddy.counts.healthy }} ·
                   冷却 {{ info.workbuddy.counts.cooling }} · 停用 {{ info.workbuddy.counts.disabled }} ·
                   占满 {{ info.workbuddy.counts.inFlightFull }}
@@ -130,9 +132,10 @@
           </div>
           <div class="config-row">
             <label class="config-label">日志 / 请求</label>
-            <div class="config-control mono">
-              {{ formatBytes(info.logs.totalSize) }} · {{ info.logs.fileCount }} 个文件 ·
-              今日 {{ formatNumber(info.tokens.todayRequests) }} 次（失败 {{ formatNumber(info.tokens.todayFailed) }}）
+            <div class="config-control">
+              <span>{{ formatBytes(info.logs.totalSize) }}</span> ·
+              <span>{{ info.logs.fileCount }} 个文件</span> ·
+              <span>今日 {{ formatNumber(info.tokens.todayRequests) }} 次（失败 {{ formatNumber(info.tokens.todayFailed) }}）</span>
             </div>
           </div>
         </div>

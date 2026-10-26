@@ -1,14 +1,13 @@
 <template>
   <div class="benchmark">
-    <!-- 顶部 Tab：运行评测 / 评测结果 / 题库管理 -->
-    <div class="tabs">
-      <button
-        v-for="tab in tabs"
-        :key="tab.value"
-        class="tab"
-        :class="{ active: activeTab === tab.value }"
-        @click="activeTab = tab.value"
-      >{{ tab.label }}</button>
+    <!-- 顶部 Tab：运行评测 / 评测结果 / 题库管理
+         统一用 SegmentedTabs（与状态面板、渠道账号页同一套外观与键盘行为） -->
+    <div class="page-toolbar benchmark-toolbar">
+      <SegmentedTabs
+        v-model="activeTab"
+        :options="tabs"
+        label="模型测评页视图切换"
+      />
     </div>
 
     <!-- ============ Tab 1：运行评测 ============ -->
@@ -394,14 +393,9 @@ import { listModels, buildModelGroups, resolveRefLabel } from '../utils/models.j
 import { formatNumber, formatTime, toLocalDateKey } from '../utils/format.js'
 
 import AppButton from '../components/AppButton.vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
 const { providers, loadModelData } = useModel()
 
-// 顶部 Tab 定义
-const tabs = [
-  { value: 'run', label: '运行评测' },
-  { value: 'results', label: '评测结果' },
-  { value: 'questions', label: '题库管理' }
-]
 const activeTab = ref('run') // 当前激活的 Tab
 
 // 评分方式选项，编辑弹窗与列表展示共用
@@ -433,6 +427,14 @@ const selectedRunId = ref('') // 当前查看的评测记录 ID
 const runDetail = ref(null) // 当前评测记录详情（含每题回答）
 const expandedModels = ref([]) // 展开明细的模型引用列表
 const expandedOutputs = ref([]) // 展开完整输出的答案键列表
+
+// 顶部 Tab：与状态面板、渠道账号页同一套分段控件，附带计数徽标
+// （题库多少道、历史多少次评测，切过去之前就能看到）
+const tabs = computed(() => [
+  { value: 'run', label: '运行评测' },
+  { value: 'results', label: '评测结果', badge: runs.value.length },
+  { value: 'questions', label: '题库管理', badge: questions.value.length }
+])
 
 // 题库管理筛选与编辑状态
 const filterCategory = ref('') // 列表分类筛选值
@@ -1043,10 +1045,10 @@ onUnmounted(stopPolling)
 
 <style scoped>
 
-/* 顶部 Tab */
-
-
-
+/* 顶部 Tab：分段控件靠左，与下方卡片的左边缘对齐（全局 .page-toolbar 默认右对齐） */
+.benchmark-toolbar {
+  justify-content: flex-start;
+}
 
 .tab-panel {
   padding-bottom: 40px;
@@ -1479,7 +1481,7 @@ onUnmounted(stopPolling)
 .form-row textarea {
   resize: vertical;
   font-family: inherit;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 </style>

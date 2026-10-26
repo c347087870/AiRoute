@@ -375,4 +375,5 @@ onMounted(() => { loadData() })
     grid-template-columns: 1fr;
   }
 }
+
 </style>

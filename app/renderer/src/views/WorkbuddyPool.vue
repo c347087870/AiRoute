@@ -60,21 +60,16 @@
           </div>
         </div>
 
-        <!-- OAuth 登录流程（页内区块，非弹窗） -->
+        <!-- OAuth 登录流程（页内区块，非弹窗；区块本身与引导页 / 渠道页共用） -->
         <div v-if="oauth" class="wb-oauth">
-          <div class="wb-oauth-title">
-            请在浏览器中完成 WorkBuddy 登录授权
-            <span class="realm-tag" :class="oauth.realm === 'global' ? 'global' : 'cn'">
-              {{ oauth.realm === 'global' ? '国际版' : '国内版' }}
-            </span>
-          </div>
-          <div class="wb-oauth-url" :title="oauth.url">{{ oauth.url }}</div>
-          <div class="wb-oauth-actions">
-            <AppButton variant="primary" @click="openAuthUrl">打开授权链接</AppButton>
-            <AppButton variant="secondary" @click="copyAuthUrl">复制链接</AppButton>
-            <AppButton variant="secondary" @click="cancelOauth">取消</AppButton>
-          </div>
-          <div class="wb-oauth-status">{{ oauth.message || '等待浏览器完成登录，每 3 秒自动检测一次…' }}</div>
+          <OauthAuthBlock
+            :title="`在浏览器中完成 WorkBuddy（${oauth.realm === 'global' ? '国际版' : '国内版'}）授权`"
+            :url="oauth.url"
+            :message="oauth.message"
+            status-hint="等待浏览器完成登录，每 3 秒自动检测一次…"
+            cancel-text="取消"
+            @cancel="cancelOauth"
+          />
         </div>
 
         <div v-if="!accounts.length" class="empty">
@@ -1249,6 +1244,7 @@ import {
   wbApplyVersions
 } from '../api.js'
 import AppButton from '../components/AppButton.vue'
+import OauthAuthBlock from '../components/OauthAuthBlock.vue'
 
 // ==================== 常量 ====================
 
@@ -1741,22 +1737,6 @@ function cancelOauth() {
   stopOauthPolling()
   oauth.value = null
   addPanel.value = false
-}
-
-// 在系统默认浏览器打开授权链接
-function openAuthUrl() {
-  if (oauth.value && oauth.value.url) window.open(oauth.value.url, '_blank')
-}
-
-// 复制授权链接到剪贴板
-async function copyAuthUrl() {
-  if (!oauth.value || !oauth.value.url) return
-  try {
-    await navigator.clipboard.writeText(oauth.value.url)
-    showToast('授权链接已复制')
-  } catch {
-    showToast('复制失败，请手动选中复制', 'error')
-  }
 }
 
 // 单号签到
@@ -2773,7 +2753,7 @@ function errText(err) {
 
 .wb-input {
   font-size: var(--fs-small);
-  padding: 8px 12px;
+  padding: 0 11px;
   flex: 1;
   min-width: 200px;
 }
@@ -2828,12 +2808,10 @@ function errText(err) {
   color: var(--warn-text);
 }
 
+/* OAuth 区块：边框 / 底色 / 按钮都在共用组件 OauthAuthBlock 里，
+   这里只管与下方账号表之间的间距 */
 .wb-oauth {
   margin-bottom: 14px;
-  padding: 14px;
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  background: var(--primary-bg);
 }
 
 /* ===== 区域（国际版 / 国内版）===== */
@@ -2870,13 +2848,7 @@ function errText(err) {
   color: var(--text-3);
 }
 
-/* 账号行 / OAuth 标题上的区域标签 */
-
-
-
-.wb-oauth-title .realm-tag {
-  margin-left: 6px;
-}
+/* 账号行上的区域标签（OAuth 区块已迁入共用组件 OauthAuthBlock） */
 
 /* ===== 模型和档位：区域切换 ===== */
 .wb-realm-switch {
@@ -2923,31 +2895,6 @@ function errText(err) {
 .wb-realm-btn-count {
   font-size: var(--fs-mini);
   color: var(--text-2);
-}
-
-.wb-oauth-title {
-  font-size: var(--fs-small);
-  font-weight: 600;
-  color: var(--text-1);
-  margin-bottom: 8px;
-}
-
-.wb-oauth-url {
-  font-size: var(--fs-xs);
-  color: var(--primary);
-  word-break: break-all;
-  margin-bottom: 10px;
-}
-
-.wb-oauth-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.wb-oauth-status {
-  margin-top: 10px;
-  font-size: var(--fs-xs);
-  color: var(--text-3);
 }
 
 .reward {
@@ -3012,7 +2959,7 @@ function errText(err) {
 .wb-hours-input {
   width: 130px;
   font-size: var(--fs-small);
-  padding: 6px 10px;
+  padding: 0 10px;
 }
 
 

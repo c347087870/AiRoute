@@ -13,9 +13,9 @@
 const SLOTS = {
   qoder: [{ key: 'default', label: 'Qoder', url: 'https://qoder.com' }],
   qodercn: [{ key: 'default', label: 'Qoder 国内版', url: 'https://qoder.cn' }],
-  trae: [{ key: 'default', label: 'TRAE', url: 'https://www.trae.cn' }],
+  trae: [{ key: 'default', label: 'Trae', url: 'https://www.trae.cn' }],
   workbuddy: [
-    { key: 'cn', label: '国内版', url: 'https://copilot.tencent.com' },
+    { key: 'cn', label: '国内版', url: 'https://www.workbuddy.cn/profile' },
     { key: 'global', label: '国际版', url: 'https://www.workbuddy.ai/profile/plans-usage' }
   ]
 }

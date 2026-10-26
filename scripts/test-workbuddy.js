@@ -1266,15 +1266,17 @@ async function main() {
     let diag = pool.diagnoseNoCandidate('m1')
     assert.strictEqual(diag.healthy, 2)
 
-    // d1 的 m1 被模型级冷却（6004 有重置墙钟）→ 计入 modelCooled
+    // d1 的 m1 被模型级冷却（6004 有重置墙钟）→ 计入 modelCooled，且单算 modelRateLimited
     pool.cooldownSoftForModel('d1', 600000, Date.now() + 3600000, 'm1', '6004 model rate limit')
     diag = pool.diagnoseNoCandidate('m1')
     assert.strictEqual(diag.modelCooled, 1)
+    assert.strictEqual(diag.modelRateLimited, 1, '6004 是暂时限流，不是确定性拒绝')
     assert.strictEqual(diag.healthy, 1)
 
     // 其他模型不受该冷却影响
     diag = pool.diagnoseNoCandidate('other')
     assert.strictEqual(diag.modelCooled, 0)
+    assert.strictEqual(diag.modelRateLimited, 0)
     assert.strictEqual(diag.healthy, 2)
 
     // d2 账号级冷却 → 计入 cooling
@@ -1282,6 +1284,12 @@ async function main() {
     diag = pool.diagnoseNoCandidate('m1')
     assert.strictEqual(diag.cooling, 1)
     assert.strictEqual(diag.healthy, 0)
+
+    // 11102 确定性拒绝：modelCooled 计入但 modelRateLimited 不计入
+    pool.blockModelBackoff('d1', 'm1', '11102 model not available')
+    diag = pool.diagnoseNoCandidate('m1')
+    assert.strictEqual(diag.modelCooled, 1)
+    assert.strictEqual(diag.modelRateLimited, 0, '11102 是确定性拒绝，不算限流')
   })
 
   test('WorkBuddy 源识别与列表（唯一性判定用）', () => {

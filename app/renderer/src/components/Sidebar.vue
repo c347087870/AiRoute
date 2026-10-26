@@ -1,41 +1,16 @@
 <template>
   <nav class="sidebar">
     <div class="sidebar-header">
-      <div class="logo">AiRoute</div>
+      <div class="logo">
+        <img class="logo-mark" src="/favicon.svg" alt="" />
+        <span>AiRoute</span>
+      </div>
       <StatusBadge :online="isOnline" />
     </div>
 
     <div class="nav-items">
       <template v-for="item in navItems" :key="item.path || item.key">
-        <!-- 一级分组：本身没有页面，点击只展开/收起二级项 -->
-        <div v-if="item.children" class="nav-group">
-          <button
-            class="nav-item nav-parent"
-            :class="{ active: isGroupActive(item) }"
-            :aria-expanded="!!openGroups[item.key]"
-            @click="toggleGroup(item.key)"
-          >
-            <span class="nav-icon"><AppIcon :name="item.icon" /></span>
-            <span class="nav-label">{{ item.label }}</span>
-            <span class="nav-arrow" :class="{ open: !!openGroups[item.key] }">
-              <AppIcon name="chevronDown" />
-            </span>
-          </button>
-          <div v-show="openGroups[item.key]" class="nav-children">
-            <router-link
-              v-for="child in item.children"
-              :key="child.path"
-              :to="child.path"
-              class="nav-item nav-child"
-              :class="{ active: $route.path === child.path }"
-            >
-              <span class="nav-label">{{ child.label }}</span>
-            </router-link>
-          </div>
-        </div>
-
         <router-link
-          v-else
           :to="item.path"
           class="nav-item"
           :class="{ active: isItemActive(item) }"
@@ -51,24 +26,64 @@
         <span class="nav-icon"><AppIcon name="onboarding" /></span>
         <span class="nav-label">新手引导</span>
       </button>
+
+      <!-- 高级功能：整个菜单的最后一项。低频但要保留入口的页面收在这里，
+          放最后可以让上面几个日常入口保持连续，不用先往下滚一段 -->
+      <div class="nav-group">
+        <button
+          class="nav-item nav-parent"
+          :class="{ active: isGroupActive(advancedGroup) }"
+          :aria-expanded="!!openGroups[advancedGroup.key]"
+          @click="toggleGroup(advancedGroup.key)"
+        >
+          <span class="nav-icon"><AppIcon :name="advancedGroup.icon" /></span>
+          <span class="nav-label">{{ advancedGroup.label }}</span>
+          <span class="nav-arrow" :class="{ open: !!openGroups[advancedGroup.key] }">
+            <AppIcon name="chevronDown" />
+          </span>
+        </button>
+        <div v-show="openGroups[advancedGroup.key]" class="nav-children">
+          <router-link
+            v-for="child in advancedGroup.children"
+            :key="child.path"
+            :to="child.path"
+            class="nav-item nav-child"
+            :class="{ active: $route.path === child.path }"
+          >
+            <span class="nav-label">{{ child.label }}</span>
+          </router-link>
+        </div>
+      </div>
     </div>
 
     <div class="sidebar-footer">
       <div v-if="showUpdate" class="update-bar" :class="{ busy }" @click="onUpdateClick">
         {{ updateText }}
       </div>
-      <div class="theme-switch" role="group" aria-label="主题">
-        <button
-          v-for="item in themeOptions"
-          :key="item.value"
-          class="theme-btn"
-          :class="{ active: themeMode === item.value }"
-          :title="item.label"
-          :aria-pressed="themeMode === item.value"
-          @click="setMode(item.value)"
+      <div class="footer-row">
+        <!-- 系统设置收在左下角，只留一个齿轮图标：低频入口不该占侧边栏一整行 -->
+        <router-link
+          to="/settings"
+          class="footer-icon-btn"
+          :class="{ active: route.path === '/settings' }"
+          title="系统设置"
+          aria-label="系统设置"
         >
-          {{ item.icon }}
-        </button>
+          <AppIcon name="settings" />
+        </router-link>
+        <div class="theme-switch" role="group" aria-label="主题">
+          <button
+            v-for="item in themeOptions"
+            :key="item.value"
+            class="theme-btn"
+            :class="{ active: themeMode === item.value }"
+            :title="item.label"
+            :aria-pressed="themeMode === item.value"
+            @click="setMode(item.value)"
+          >
+            <AppIcon :name="item.icon" />
+          </button>
+        </div>
       </div>
     </div>
   </nav>
@@ -93,11 +108,11 @@ const { mode: themeMode, setMode } = useTheme()
 // 重新打开引导（首次启动时由 App.vue 自动拉起一次，这里管之后再打开）
 const { startOnboarding } = useOnboarding()
 
-// 三种主题模式：图标 + 悬停说明
+// 三种主题模式：图标 + 悬停说明（图标用内联 SVG，Unicode 字形各系统渲染不一）
 const themeOptions = [
-  { value: 'system', icon: '◐', label: '跟随系统' },
-  { value: 'light', icon: '☀', label: '亮色' },
-  { value: 'dark', icon: '☾', label: '暗色' }
+  { value: 'system', icon: 'themeSystem', label: '跟随系统' },
+  { value: 'light', icon: 'themeLight', label: '亮色' },
+  { value: 'dark', icon: 'themeDark', label: '暗色' }
 ]
 
 const navItems = [
@@ -105,26 +120,27 @@ const navItems = [
   // 免费账号已经并进渠道账号页当第三个 Tab；/workbuddy 作为它的子页面保留，
   // 但侧边栏不再单独占一项，所以这里用 alsoActive 让子页面期间「渠道账号」保持高亮
   { path: '/channels', label: '渠道账号', icon: 'channels', alsoActive: ['/workbuddy'] },
-  { path: '/settings', label: '系统设置', icon: 'settings' },
   { path: '/tutorial', label: '使用教程', icon: 'tutorial' },
   // 开发面板是一级页面而不是收进「高级功能」：它每天都要点开好几次（看端口、
   // 数据目录、失活原因），埋在两级菜单里要展开再找一次。正式版没有这条路由，
   // 所以只进开发模式的菜单 —— 否则点进去是空白页
-  ...(isDevMode ? [{ path: '/dev', label: '开发面板', icon: 'dev' }] : []),
-  {
-    // 一级分组放在最后：低频但需要保留入口的页面收进这里，避免侧边栏越来越长
-    key: 'advanced',
-    label: '高级功能',
-    icon: 'advanced',
-    children: [
-      { path: '/routing', label: '路由规则' },
-      { path: '/providers', label: '模型来源' },
-      { path: '/logs', label: '日志查看' },
-      { path: '/token-stats', label: '用量统计' },
-      { path: '/benchmark', label: '模型测分' }
-    ]
-  }
+  ...(isDevMode ? [{ path: '/dev', label: '开发面板', icon: 'dev' }] : [])
 ]
+
+// 「高级功能」分组单独放在菜单末尾：低频但需要保留入口的页面收进这里，
+// 放最后可以让上面几个日常入口保持连续
+const advancedGroup = {
+  key: 'advanced',
+  label: '高级功能',
+  icon: 'advanced',
+  children: [
+    { path: '/routing', label: '路由规则' },
+    { path: '/providers', label: '模型来源' },
+    { path: '/logs', label: '日志查看' },
+    { path: '/token-stats', label: '用量统计' },
+    { path: '/benchmark', label: '模型测分' }
+  ]
+}
 
 // 分组展开状态：默认全收起，但当前路由落在某组内时必须展开 ——
 // 否则用户直接进 /routing 会看不到自己所在的菜单项
@@ -137,9 +153,7 @@ const isItemActive = item =>
   route.path === item.path || (item.alsoActive || []).includes(route.path)
 
 function syncGroupWithRoute() {
-  for (const item of navItems) {
-    if (item.children && isGroupActive(item)) openGroups.value[item.key] = true
-  }
+  if (isGroupActive(advancedGroup)) openGroups.value[advancedGroup.key] = true
 }
 
 function toggleGroup(key) {
@@ -206,10 +220,20 @@ onMounted(() => {
 }
 
 .logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 17px;
   font-weight: 650;
   color: var(--text-1);
   letter-spacing: -0.035em;
+}
+
+.logo-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: block;
 }
 
 /* 侧栏菜单是全站唯一的「大号菜单」：36px 高、13px 字，比紧凑的小号按钮大一档，
@@ -343,8 +367,50 @@ onMounted(() => {
   cursor: default;
 }
 
+/* 底部一行：左边设置图标，右边主题切换 */
+.footer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 设置齿轮：与主题切换同高的方形图标按钮 */
+.footer-icon-btn {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-1);
+  background: var(--bg-hover);
+  color: var(--text-2);
+  text-decoration: none;
+  transition: all 0.15s;
+}
+
+/* 齿轮图标固定 18px：AppIcon 默认撑满父容器，会把线宽一起放大 */
+.footer-icon-btn :deep(.app-icon) {
+  width: 18px;
+  height: 18px;
+}
+
+.footer-icon-btn:hover {
+  color: var(--text-1);
+  background: var(--bg-card);
+}
+
+.footer-icon-btn.active {
+  color: var(--text-1);
+  background: var(--bg-card);
+  border-color: var(--border-2);
+  box-shadow: var(--shadow-card);
+}
+
 /* 主题切换：三格分段按钮（跟随系统 / 亮色 / 暗色） */
 .theme-switch {
+  flex: 1;
   display: flex;
   gap: 2px;
   padding: 3px;
@@ -368,6 +434,13 @@ onMounted(() => {
 
 .theme-btn:hover {
   color: var(--text-1);
+}
+
+/* 主题按钮里的 SVG 图标：固定 14px，AppIcon 默认撑满按钮 */
+.theme-btn .app-icon {
+  width: 14px;
+  height: 14px;
+  margin: 0 auto;
 }
 
 .theme-btn.active {

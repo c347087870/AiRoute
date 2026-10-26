@@ -117,7 +117,7 @@ function startMockUpstream() {
 
       // OpenAI chat/completions
       if (stream) {
-        // 并发用例（auto-least-conn）需要一个「还没结束」的上游：请求体里带 hold
+        // 并发用例（并发优先策略）需要一个「还没结束」的上游：请求体里带 hold
         // 就先压 600ms 不写任何字节，好让第二个请求在它仍挂着时到达网关
         const holdMs = /hold/.test(JSON.stringify(body.messages || [])) ? 600 : 0
         const emit = () => {
@@ -368,12 +368,43 @@ async function main() {
       assert.ok(ids.includes('claude-opus-4-20250514'))
     })
 
-    await check('GET /v1/models 暴露四档 auto 伪模型', async () => {
+    await check('GET /v1/models 只暴露 auto 伪模型', async () => {
       const r = await fetchJson(`${base}/v1/models`)
       const ids = r.json.data.map(m => m.id)
-      for (const id of ['auto', 'auto-fast', 'auto-cheap', 'auto-least-conn']) {
-        assert.ok(ids.includes(id), `${id} 应出现在 /v1/models`)
+      assert.ok(ids.includes('auto'))
+      // 策略改在「渠道-模型」页统一选，模型列表里不该再有另外三档
+      for (const id of ['auto-fast', 'auto-cheap', 'auto-least-conn']) {
+        assert.ok(!ids.includes(id), `${id} 不该再出现在 /v1/models`)
       }
+    })
+
+    await check('Auto 策略：可读可改，非法值 400', async () => {
+      const r = await fetchJson(`${base}/api/auto-strategy`)
+      assert.strictEqual(r.status, 200)
+      assert.strictEqual(r.json.strategy, 'balanced')
+      assert.deepStrictEqual(r.json.strategies.map(item => item.id), ['balanced', 'latency', 'cost', 'connections'])
+
+      const bad = await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: '不存在的档' })
+      })
+      assert.strictEqual(bad.status, 400)
+
+      const ok = await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'connections' })
+      })
+      assert.strictEqual(ok.status, 200)
+      assert.strictEqual(ok.json.strategy, 'connections')
+
+      // 复位
+      await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'balanced' })
+      })
     })
 
     // ==================== 配置写入校验 ====================
@@ -736,13 +767,19 @@ async function main() {
       })
     })
 
-    await check('auto-least-conn：并发的两个请求摊到不同模型上', async () => {
+    await check('并发优先策略：并发的两个请求摊到不同模型上', async () => {
+      // 策略是全局一档：先把「并发优先」选上，再用 auto 这个模型名发请求
+      await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'connections' })
+      })
       const before = mock.requests.filter(q => q.url.includes('/chat/completions')).length
       const call = () => fetchJson(`${base}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          model: 'auto-least-conn',
+          model: 'auto',
           messages: [{ role: 'user', content: 'hold 并发' }],
           stream: true
         })
@@ -758,6 +795,13 @@ async function main() {
         .map(q => q.body.model)
       assert.strictEqual(landed.length, 2, `应有两次上游请求：${landed}`)
       assert.notStrictEqual(landed[0], landed[1], `并发的两条请求应落到不同模型：${landed}`)
+
+      // 复位
+      await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'balanced' })
+      })
     })
 
     // ==================== 无可用 Provider ====================

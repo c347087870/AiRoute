@@ -19,6 +19,19 @@ node scripts/verify-release.js   # 发布前自检：版本一致性、产物元
 
 依赖以 `package-lock.json` 为准（CI 用 `npm ci`）；`pnpm-lock.yaml` 在 `.gitignore` 里，pnpm 不读 `package-lock.json`，版本可能与 CI 装出来的不一致——本地全绿而 CI 挂时先查这里。
 
+## 原则
+
+### 奥卡姆剃刀
+
+如无必要，勿增实体（entia non sunt multiplicanda）：
+
+- 优先选最简单的方案——能用一个函数解决的，不要引入类、工厂、配置项、插件体系
+- 少写代码：不为「以后可能用到」预留抽象层、兼容分支、预留字段；没有真实调用方的抽象是负债
+- 能复用既有模块就不要新增：先在 `server/`、`app/renderer/`、`scripts/` 里搜一遍，确认真的没有再新写
+- 不引入新的工具链、依赖、配置、构建步骤，除非任务确实需要；确有需要时先说明理由
+- 改动只做必要的最小范围，不顺手重构、不顺手改格式、不顺手升级无关依赖
+- 界面提示文案从简：只说用户此刻需要知道的一件事，不解释背景、不堆叠引导话术
+
 ## 代码约定
 
 - 主进程 / `server/` / `scripts/` 是 CommonJS；`app/renderer` 是 ESM（Vite + Vue SFC）。全仓库无 TypeScript，也没有 lint / 格式化配置；跟随周边文件风格，不要引入新工具链
@@ -54,7 +67,7 @@ app/main/        Electron 主进程（窗口、托盘、更新、安装形态判
 app/renderer/    Vue 渲染层
 server/          本地 HTTP 服务与上游适配（router / upstream / workbuddy）
 server/channels/ 账号渠道插件宿主（plugin-host / plugin-store / plugin-api）+ plugins/ 下的
-                 TRAE、Qoder 插件包（自有协议实现 + 凭据存储），可装可卸
+                 Trae、Qoder 插件包（自有协议实现 + 凭据存储），可装可卸
 scripts/         构建、产物推导、发布自检与测试
 .agents/skills/  Agent Skills
 ```
