@@ -5,7 +5,7 @@
         <span v-if="logSize" class="log-size text-muted">
           日志已占用 {{ formatBytes(logSize.totalSize) }} · {{ logSize.fileCount }} 个文件
         </span>
-        <button class="btn-danger btn-sm" :disabled="clearing" @click="clearAllLogs">清空</button>
+        <AppButton variant="danger" :disabled="clearing" @click="clearAllLogs">清空</AppButton>
       </div>
     </div>
 
@@ -30,7 +30,7 @@
         <option :value="200">最近 200 条</option>
       </select>
 
-      <button class="btn-ghost btn-sm" @click="resetFilters">重置</button>
+      <AppButton variant="secondary" @click="resetFilters">重置</AppButton>
     </div>
 
     <div class="card">
@@ -107,7 +107,7 @@
           <option value="">全部账号</option>
           <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || String(a.uid).slice(0, 8) }}</option>
         </select>
-        <button class="btn-ghost btn-sm" @click="loadCreditHistory">刷新</button>
+        <AppButton variant="secondary" @click="loadCreditHistory">刷新</AppButton>
       </div>
       <div class="table-wrap scroll-credit" v-if="creditEntries.length">
         <table class="table">
@@ -133,9 +133,9 @@
       </div>
       <div v-else class="empty">暂无积分变动记录</div>
       <div class="credit-pager" v-if="creditTotal > 0">
-        <button class="btn-ghost btn-sm" :disabled="creditPage <= 1" @click="changeCreditPage(-1)">上一页</button>
+        <AppButton variant="secondary" :disabled="creditPage <= 1" @click="changeCreditPage(-1)">上一页</AppButton>
         <span class="text-muted">第 {{ creditPage }} / {{ creditTotalPages }} 页</span>
-        <button class="btn-ghost btn-sm" :disabled="creditPage >= creditTotalPages" @click="changeCreditPage(1)">下一页</button>
+        <AppButton variant="secondary" :disabled="creditPage>= creditTotalPages" @click="changeCreditPage(1)">下一页</AppButton>
       </div>
     </div>
   </div>
@@ -149,6 +149,7 @@ import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
 import { formatNumber, formatTime, formatBytes } from '../utils/format.js'
 
+import AppButton from '../components/AppButton.vue'
 const logs = ref([]) // 当前加载出来的日志列表（服务端已按任务合并，一条 = 一个任务）
 const logSize = ref(null) // 日志目录占用 { totalSize, fileCount }
 const limit = ref(50) // 显示条数
@@ -374,9 +375,9 @@ onMounted(refreshAll)
 }
 
 
+/* 高度与内边距交给全局大号下拉规则（App.vue 的 select） */
 .filter-select {
-  font-size: var(--fs-small);
-  padding: 8px 12px;
+  min-width: 132px;
 }
 
 .credit-card {
@@ -464,8 +465,9 @@ onMounted(refreshAll)
 }
 
 
+/* 数字/账号列：统一走全局等宽栈（数字按位对齐由全局 .table 的 tabular-nums 负责） */
 .token-cell {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 

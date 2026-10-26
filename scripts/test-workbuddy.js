@@ -3386,6 +3386,98 @@ async function main() {
     }
   })
 
+  test('状态面板五档口径：当日 / 本周 / 本月 / 近三月 / 本年，月维度走月汇总桶', () => {
+    const prevDir = process.env.AIROUTE_DATA_DIR
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-range-'))
+    process.env.AIROUTE_DATA_DIR = tmp
+    let ts = null
+    try {
+      const tsPath = path.join(__dirname, '..', 'server', 'token-stats.js')
+      delete require.cache[require.resolve(tsPath)]
+      ts = require(tsPath)
+
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth()
+      const at = (year, month, day) => new Date(year, month, day, 12, 0, 0).getTime()
+
+      // 成功请求落在：本月 ×2、上月、上上上月（近三月之外）、去年年末
+      const successes = [
+        at(y, m, 2),
+        at(y, m, 2),
+        at(y, m - 1, 2),
+        at(y, m - 2, 2),
+        at(y, m - 3, 2),
+        at(y - 1, 11, 2)
+      ]
+      for (const timestamp of successes) {
+        ts.recordTokens('p/m', { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 }, timestamp)
+      }
+      ts.recordFailure('p/m', at(y, m, 2))
+
+      const range = ts.getRangeStats()
+      assert.deepStrictEqual(Object.keys(range).sort(), ['day', 'month', 'quarter', 'week', 'year'])
+
+      const inThisMonth = successes.filter(t => {
+        const d = new Date(t)
+        return d.getFullYear() === y && d.getMonth() === m
+      })
+      const inQuarter = successes.filter(t => t >= at(y, m - 2, 1))
+      const inThisYear = successes.filter(t => new Date(t).getFullYear() === y)
+
+      // 本月：只含本月那两笔成功 + 一次失败，上月及更早不能混进来
+      assert.strictEqual(range.month.count, inThisMonth.length, '本月只累计本月的成功请求')
+      assert.strictEqual(range.month.failed, 1, '本月失败数独立累计')
+      assert.strictEqual(range.month.total, inThisMonth.length * 4, '本月 total = 4 × 本月成功笔数')
+
+      // 近三月 = 本月 + 往前两个自然月（滚动），更早的不在内
+      assert.strictEqual(range.quarter.count, inQuarter.length, '近三月应含本月与往前两个自然月')
+
+      // 本年：今年所有月份，去年的不算
+      assert.strictEqual(range.year.count, inThisYear.length, '本年不能把去年的请求算进来')
+
+      // 本周：从本周一 00:00 起算。本月 2 号是否落在本周取决于今天星期几，
+      // 所以只断言「周口径不超过月口径、且不少于当日」，再单独验周一的边界
+      assert.ok(range.week.count <= range.month.count, '本周不可能多于本月')
+      const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7))
+      assert.strictEqual(weekStart.getDay(), 1, '周起点必须是周一')
+      const expectedWeek = successes.filter(t => t >= weekStart.getTime())
+      assert.strictEqual(range.week.count, expectedWeek.length, '本周只累计周一之后的成功请求')
+
+      // 四档单调：区间越大请求数只增不减
+      const req = s => s.count + s.failed
+      assert.ok(req(range.week) >= req(range.day))
+      assert.ok(req(range.month) >= req(range.week))
+      assert.ok(req(range.quarter) >= req(range.month))
+      assert.ok(req(range.year) >= req(range.quarter))
+
+      // 月汇总的保留期独立于按日明细：35 天前的按日桶会被清，
+      // 但月桶要留够「本年 + 近三月」（30 个月前的才清）
+      ts.recordTokens('p/m', { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, at(y, m - 30, 2))
+      ts.cleanupOldData()
+      const stats = ts.getAllStats()
+      const months = Object.keys(stats.byMonth)
+      const pad2 = n => String(n).padStart(2, '0')
+      assert.ok(months.includes(`${y}-${pad2(m + 1)}`), '本月月桶不能被清掉')
+      assert.ok(!months.includes(`${y}-${pad2(m - 30 + 1)}`), '30 个月前的月桶应被清掉')
+      // 按小时明细仍按 35 天裁：30 个月前那次请求的小时桶必须已经没了
+      const oldHourPrefix = `${y}-${pad2(m - 30 + 1)}-`
+      assert.ok(!Object.keys(stats.byHour).some(k => k.startsWith(oldHourPrefix)), '按小时明细仍按 35 天裁')
+    } finally {
+      try {
+        if (ts) {
+          ts.saveStats()
+          ts.flush()
+        }
+      } catch {
+        /* 忽略 */
+      }
+      if (prevDir === undefined) delete process.env.AIROUTE_DATA_DIR
+      else process.env.AIROUTE_DATA_DIR = prevDir
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
   // ==================== 19. 客户端 IP 解析与 CIDR（iputil）====================
   group('19. 客户端 IP 解析与 CIDR（iputil）')
 

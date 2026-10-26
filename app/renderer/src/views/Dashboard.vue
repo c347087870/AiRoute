@@ -1,5 +1,15 @@
 <template>
   <div class="dashboard">
+    <!-- 时间维度：默认「当日」，切档后顶部两张卡与用量概览一起换口径 ——
+         页面上的数字必须属于同一个区间，否则「请求数」和「用量」会各说各话 -->
+    <div class="page-toolbar dashboard-toolbar">
+      <SegmentedTabs
+        v-model="selectedRange"
+        :options="RANGE_TABS"
+        label="状态面板时间维度"
+      />
+    </div>
+
     <div class="stats-grid">
       <div class="card stat-card">
         <div class="stat-label">Router 状态</div>
@@ -10,42 +20,46 @@
       <div class="card stat-card">
         <div class="stat-label">请求数</div>
         <div class="stat-value">
-          {{ formatNumber(stats.todayRequests) }} / {{ formatNumber(monthRequests) }}
+          {{ formatNumber(periodStats.requests) }}
         </div>
         <div
           class="stat-subtitle"
-          :title="`今日失败 ${stats.todayFailed} 次，本月失败 ${monthFailed} 次（与 Token 统计同源）`"
+          :title="`${currentRange.label}成功 ${formatNumber(periodStats.count)} 次、失败 ${formatNumber(periodStats.failed)} 次；请求数 = 成功 + 失败，与用量统计同源`"
         >
-          今日 / 本月 · 今日失败 {{ formatNumber(stats.todayFailed) }}
+          {{ currentRange.label }} · 失败 {{ formatNumber(periodStats.failed) }}
         </div>
       </div>
     </div>
 
-    <!-- 用量概览：只留三个关键数，缓存明细与趋势图在用量统计页 -->
+    <!-- 用量概览：当前区间只展示一份，输入 / 命中缓存 / 输出 + 命中率，
+         缓存写明细与趋势图在用量统计页 -->
     <div class="section">
       <div class="section-header">
         <h2 class="section-title">用量概览</h2>
         <router-link class="link-more" to="/token-stats">用量统计 →</router-link>
       </div>
       <div class="card usage-card">
-        <div class="usage-group" v-for="group in usageGroups" :key="group.key">
-          <div class="usage-head">
-            <span class="usage-dot" :class="group.key"></span>
-            <span class="usage-title">{{ group.label }}</span>
-          </div>
+        <div class="usage-group">
           <div class="usage-total">
-            <span class="usage-total-value">{{ formatNumber(group.total) }}</span>
+            <span class="usage-total-value">{{ formatNumber(usageGroup.total) }}</span>
             <span class="usage-total-unit">Token</span>
           </div>
           <div class="usage-split">
             <span class="usage-part">
               <span class="usage-part-label">输入</span>
-              <span class="usage-part-value input">{{ formatNumber(group.input) }}</span>
+              <span class="usage-part-value input">{{ formatNumber(usageGroup.input) }}</span>
+            </span>
+            <span class="usage-part">
+              <span class="usage-part-label">命中缓存</span>
+              <span class="usage-part-value cacheRead">{{ formatNumber(usageGroup.cacheRead) }}</span>
             </span>
             <span class="usage-part">
               <span class="usage-part-label">输出</span>
-              <span class="usage-part-value output">{{ formatNumber(group.output) }}</span>
+              <span class="usage-part-value output">{{ formatNumber(usageGroup.output) }}</span>
             </span>
+          </div>
+          <div class="usage-rate" :title="usageGroup.rateTitle">
+            缓存命中率 {{ formatPercent(usageGroup.hitRate) }}
           </div>
         </div>
       </div>
@@ -78,7 +92,7 @@
                 </span>
               </td>
               <td class="nowrap">{{ log.responseTime }}ms</td>
-              <td class="font-bold">{{ tokenCell(log.totalTokens) }}</td>
+              <td>{{ tokenCell(log.totalTokens) }}</td>
             </tr>
           </tbody>
         </table>
@@ -90,10 +104,11 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { getLogs, getStats, getHealth, getTokenStatsToday, getTokenStatsMonth } from '../api.js'
-import { formatNumber, formatTime } from '../utils/format.js'
+import { getLogs, getHealth, getTokenStatsRange } from '../api.js'
+import { formatNumber, formatPercent, formatTime, calcCacheHitRate } from '../utils/format.js'
 
 // 总计单元格：上游未返回用量时服务端给 null，显示 '-'（与日志页口径一致），
 // 直接 formatNumber(null) 会显示 0，容易被误读成「真实用量为 0」
@@ -101,41 +116,57 @@ function tokenCell(v) {
   return v === null || v === undefined ? '-' : formatNumber(v)
 }
 
+// 时间维度：day / month / quarter / year 由服务端 /api/token-stats/range 一次算好。
+// 月维度走月汇总桶而不是把按日明细加起来 —— 按日只留 35 天，月初用日明细加会少一截。
+// 区间细节只放在 title（悬停可见），不再在页面上常驻一行说明
+const RANGE_TABS = [
+  { value: 'day', label: '当日', title: '今天 0 点到现在' },
+  { value: 'month', label: '本月', title: '本月 1 日到现在' },
+  { value: 'quarter', label: '近三月', title: '本月与往前两个自然月（滚动三个月）' },
+  { value: 'year', label: '本年', title: '今年 1 月 1 日到现在' }
+]
+
+const selectedRange = ref('day') // 默认当日
 const recentLogs = ref([]) // 最近 5 条请求日志
 const isOnline = ref(false) // Router 是否在线，只由健康检查决定
-const stats = ref({ todayRequests: 0, todayFailed: 0, totalRequests: 0, totalFailed: 0, retentionDays: 0 }) // 请求数统计
 
-// Token 统计只取今日 / 本月两个汇总：各模型明细与时间维度都在用量统计页
-const tokenStatsToday = ref(emptyTokenStats())
-const tokenStatsMonth = ref(emptyTokenStats())
+// 四个区间的 Token 统计，键与 RANGE_TABS 的 value 对应
+const rangeStats = ref(emptyRangeStats())
 
-// 空的 Token 统计对象，用于初始化和接口失败兜底
-function emptyTokenStats() {
+function emptyStat() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, count: 0, failed: 0 }
 }
 
-// 本月请求次数与用量统计页同口径：有 token 的请求 + 失败请求
-const monthRequests = computed(() => {
-  return (Number(tokenStatsMonth.value.count) || 0) + (Number(tokenStatsMonth.value.failed) || 0)
-})
-
-const monthFailed = computed(() => Number(tokenStatsMonth.value.failed) || 0)
-
-// 用量概览只保留总计 / 输入 / 输出；请求次数在顶部状态卡，缓存明细与趋势图在用量统计页
-function buildUsageGroup(key, label, tokenStats) {
-  return {
-    key,
-    label,
-    total: tokenStats.total,
-    input: tokenStats.input,
-    output: tokenStats.output
-  }
+function emptyRangeStats() {
+  return { day: emptyStat(), month: emptyStat(), quarter: emptyStat(), year: emptyStat() }
 }
 
-const usageGroups = computed(() => [
-  buildUsageGroup('today', '今天', tokenStatsToday.value),
-  buildUsageGroup('month', '本月', tokenStatsMonth.value)
-])
+const currentRange = computed(
+  () => RANGE_TABS.find(r => r.value === selectedRange.value) || RANGE_TABS[0]
+)
+
+const selectedStats = computed(() => rangeStats.value[selectedRange.value] || emptyStat())
+
+// 请求次数口径 = 有 token 的请求（count）+ 失败请求（failed），与用量统计页一致
+const periodStats = computed(() => {
+  const stats = selectedStats.value
+  const count = Number(stats.count) || 0
+  const failed = Number(stats.failed) || 0
+  return { count, failed, requests: count + failed }
+})
+
+// 用量概览只保留总计 / 输入 / 输出与缓存命中；缓存写明细与趋势图在用量统计页
+const usageGroup = computed(() => {
+  const stats = selectedStats.value
+  return {
+    total: stats.total,
+    input: stats.input,
+    cacheRead: stats.cacheRead,
+    output: stats.output,
+    hitRate: calcCacheHitRate(stats),
+    rateTitle: '缓存命中率 = 命中缓存 ÷（输入 + 命中缓存），缓存写不计入分母'
+  }
+})
 
 // 加载 Router 健康状态，只有这个接口的成败影响在线状态
 async function loadHealth() {
@@ -144,16 +175,6 @@ async function loadHealth() {
     isOnline.value = true
   } catch {
     isOnline.value = false
-  }
-}
-
-// 加载请求数统计，失败时保留上一次的数据
-async function loadStats() {
-  try {
-    const data = await getStats()
-    if (data) stats.value = data
-  } catch (err) {
-    console.error('加载请求统计失败:', err)
   }
 }
 
@@ -166,23 +187,20 @@ async function loadLogs() {
   }
 }
 
-// 加载今日 / 本月 Token 汇总
-// 用 allSettled：两个接口各自独立，任一失败不应把另一份数据一起丢弃（否则用量显示为 0，误导用户）
+// 加载四个区间的 Token 汇总。失败时保留上一次的数据，
+// 轮询每 5 秒重试，没必要为一次抖动把数字清零
 async function loadTokenStats() {
-  const [today, month] = await Promise.allSettled([
-    getTokenStatsToday(),
-    getTokenStatsMonth()
-  ])
-  if (today.status === 'fulfilled') tokenStatsToday.value = today.value || emptyTokenStats()
-  if (month.status === 'fulfilled') tokenStatsMonth.value = month.value || emptyTokenStats()
-  for (const r of [today, month]) {
-    if (r.status === 'rejected') console.error('加载 Token 统计失败:', r.reason)
+  try {
+    const data = await getTokenStatsRange()
+    if (data) rangeStats.value = { ...emptyRangeStats(), ...data }
+  } catch (err) {
+    console.error('加载 Token 统计失败:', err)
   }
 }
 
 // 加载所有 Dashboard 数据，各接口独立失败互不影响
 async function loadData() {
-  await Promise.all([loadHealth(), loadStats(), loadLogs(), loadTokenStats()])
+  await Promise.all([loadHealth(), loadLogs(), loadTokenStats()])
 }
 
 // 顶部栏的「实时」角标由布局渲染，5 秒轮询由 usePolling 统一负责
@@ -193,6 +211,12 @@ onMounted(() => { loadData() })
 </script>
 
 <style scoped>
+/* 工具条：全局 .page-toolbar 是整条右对齐，而这里是页面唯一的时间维度切换，
+   放在左侧与下方卡片的左边缘对齐 */
+.dashboard-toolbar {
+  justify-content: flex-start;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -216,6 +240,7 @@ onMounted(() => { loadData() })
   font-size: var(--fs-display);
   font-weight: 700;
   color: var(--text-1);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-value.green {
@@ -260,66 +285,19 @@ onMounted(() => { loadData() })
   text-decoration: underline;
 }
 
-/* 用量概览：左右两栏 + 中间细分隔线，靠字号层级区分主次，不再用底色块 */
+/* 用量概览：一档一份，靠字号层级区分主次，不用底色块。
+   原来这里是「今天 / 本月」左右两栏，两栏还要用 subgrid 对齐行轨道；
+   改成按档切换后只剩一份，subgrid 与中间分隔线一起删掉 */
 .usage-card {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 18px 24px;
 }
 
 .usage-group {
   min-width: 0;
-  padding: 0 24px;
 }
 
-.usage-group:first-child {
-  padding-left: 0;
-}
-
-.usage-group:last-child {
-  padding-right: 0;
-  position: relative;
-}
-
-/* 分隔线上下留白，不顶到卡片边缘 */
-.usage-group:last-child::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 2px;
-  bottom: 2px;
-  width: 1px;
-  background: var(--border-2);
-}
-
-.usage-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.usage-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  border-radius: 50%;
-}
-
-.usage-dot.today {
-  background: var(--primary);
-}
-
-.usage-dot.month {
-  background: var(--purple);
-}
-
-.usage-title {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  letter-spacing: 0.5px;
-}
-
+/* 卡内不再重复当前时间维度：顶部的分段控件已经标出选中的是哪一档，
+   再来一行「当日 / 本月」只是把同一件事说两遍 */
 .usage-total {
   display: flex;
   align-items: baseline;
@@ -327,7 +305,7 @@ onMounted(() => { loadData() })
   margin-bottom: 10px;
 }
 
-/* 等宽数字：今天 / 本月上下对照时位数不跳动 */
+/* 等宽数字：切档时位数不跳动 */
 .usage-total-value {
   font-size: var(--fs-display);
   font-weight: 700;
@@ -370,36 +348,27 @@ onMounted(() => { loadData() })
   color: var(--primary);
 }
 
+.usage-part-value.cacheRead {
+  color: var(--purple);
+}
+
 .usage-part-value.output {
   color: var(--success);
 }
 
-/* 窗口变窄时模型名更容易折成三行，再降一档字号 */
-@media (max-width: 1280px) {
-  .stat-value.primary {
-    font-size: var(--fs-base);
-  }
+/* 命中率：弱化到辅助信息层级，数字与上方统计保持同一行内基线 */
+.usage-rate {
+  margin-top: 8px;
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
 }
 
-/* 窄屏下两栏改成上下两段，分隔线从竖线换成横线 */
+/* 窄屏下两张卡改成上下两段 */
 @media (max-width: 900px) {
   .usage-card {
-    grid-template-columns: 1fr;
     padding: 16px 18px;
-  }
-
-  .usage-group {
-    padding: 0;
-  }
-
-  .usage-group:last-child {
-    margin-top: 14px;
-    padding-top: 14px;
-    border-top: 1px solid var(--border-2);
-  }
-
-  .usage-group:last-child::before {
-    display: none;
   }
 
   .stats-grid {

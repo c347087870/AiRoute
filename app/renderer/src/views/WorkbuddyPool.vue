@@ -27,18 +27,13 @@
     <div v-if="tab === 'accounts'">
       <div class="card wb-card">
         <div class="wb-toolbar">
-          <button class="btn-primary btn-sm" :disabled="!!oauth" @click="startAddAccount">+ 添加账号</button>
-          <button
-            class="btn-ghost btn-sm"
-            :disabled="busyAll || !cnAccountCount"
-            :title="cnAccountCount ? '' : '国际版账号不支持签到，请先添加国内版账号'"
-            @click="checkinAll"
-          >
+          <AppButton variant="primary" :disabled="!!oauth" @click="startAddAccount">+ 添加账号</AppButton>
+          <AppButton variant="secondary" :disabled="busyAll || !cnAccountCount" :title="cnAccountCount ? '' : '国际版账号不支持签到，请先添加国内版账号'" @click="checkinAll">
             {{ busyAll === 'checkin' ? '执行中…' : '全部签到' }}
-          </button>
-          <button class="btn-ghost btn-sm" :disabled="!!busyAll" @click="refreshBalanceAll">
+          </AppButton>
+          <AppButton variant="secondary" :disabled="!!busyAll" @click="refreshBalanceAll">
             {{ busyAll === 'balance' ? '刷新中…' : '刷新余额' }}
-          </button>
+          </AppButton>
         </div>
 
         <!-- 添加账号：先选区域（国际版与国内版的域名/OAuth 入口不同） -->
@@ -57,8 +52,8 @@
             </label>
           </div>
           <div class="wb-add-realm-actions">
-            <button class="btn-primary btn-sm" @click="confirmStartAddAccount">开始登录</button>
-            <button class="btn-ghost btn-sm" @click="addPanel = false">取消</button>
+            <AppButton variant="primary" @click="confirmStartAddAccount">开始登录</AppButton>
+            <AppButton variant="secondary" @click="addPanel = false">取消</AppButton>
           </div>
           <div class="wb-add-realm-note">
             国际版无签到与成长任务，仅支持对话、余额、保活；添加后该区域的模型会自动出现在「账号渠道」源的 <code>workbuddy-global/…</code> 组里。
@@ -75,9 +70,9 @@
           </div>
           <div class="wb-oauth-url" :title="oauth.url">{{ oauth.url }}</div>
           <div class="wb-oauth-actions">
-            <button class="btn-primary btn-sm" @click="openAuthUrl">打开授权链接</button>
-            <button class="btn-ghost btn-sm" @click="copyAuthUrl">复制链接</button>
-            <button class="btn-ghost btn-sm" @click="cancelOauth">取消</button>
+            <AppButton variant="primary" @click="openAuthUrl">打开授权链接</AppButton>
+            <AppButton variant="secondary" @click="copyAuthUrl">复制链接</AppButton>
+            <AppButton variant="secondary" @click="cancelOauth">取消</AppButton>
           </div>
           <div class="wb-oauth-status">{{ oauth.message || '等待浏览器完成登录，每 3 秒自动检测一次…' }}</div>
         </div>
@@ -127,18 +122,13 @@
                   <span v-else>-</span>
                 </td>
                 <td class="nowrap">
-                  <button
-                    class="btn-ghost btn-sm"
-                    :disabled="busyUid === acct.uid || acct.realm === 'global'"
-                    :title="acct.realm === 'global' ? '国际版无签到能力' : ''"
-                    @click="doCheckin(acct)"
-                  >签到</button>
-                  <button class="btn-ghost btn-sm" :disabled="busyUid === acct.uid" @click="doBalance(acct)">余额</button>
-                  <button class="btn-ghost btn-sm" :disabled="busyUid === acct.uid" @click="doKeepalive(acct)">保活</button>
-                  <button class="btn-ghost btn-sm" @click="openDetail(acct)">详情</button>
-                  <button v-if="acct.disabled" class="btn-ghost btn-sm" @click="doEnable(acct)">恢复</button>
-                  <button v-else class="btn-ghost btn-sm" @click="doDisable(acct)">禁用</button>
-                  <button class="btn-danger btn-sm" @click="doRemove(acct)">移除</button>
+                  <AppButton variant="secondary" :disabled="busyUid === acct.uid || acct.realm === 'global' || acct.checkinDone" :title="acct.realm === 'global' ? '国际版无签到能力' : acct.checkinDone ? '今天已签到，明天再来' : ''" @click="doCheckin(acct)">{{ acct.checkinDone ? '已签' : '签到' }}</AppButton>
+                  <AppButton variant="secondary" :disabled="busyUid === acct.uid" @click="doBalance(acct)">余额</AppButton>
+                  <AppButton variant="secondary" :disabled="busyUid === acct.uid" @click="doKeepalive(acct)">保活</AppButton>
+                  <AppButton variant="secondary" @click="openDetail(acct)">详情</AppButton>
+                  <AppButton variant="secondary" v-if="acct.disabled" @click="doEnable(acct)">恢复</AppButton>
+                  <AppButton variant="secondary" v-else @click="doDisable(acct)">禁用</AppButton>
+                  <AppButton variant="danger" @click="doRemove(acct)">移除</AppButton>
                 </td>
               </tr>
             </tbody>
@@ -152,7 +142,7 @@
       <div class="card wb-modal">
         <div class="wb-modal-header">
           <h2>{{ detailAcct.nickname || '账号详情' }}</h2>
-          <button class="wb-modal-close" @click="closeDetail">×</button>
+          <AppButton variant="ghost" iconOnly class="wb-modal-close" @click="closeDetail">×</AppButton>
         </div>
         <div class="wb-kv"><span class="wb-kv-label">uid</span><span class="wb-kv-value mono">{{ detailAcct.uid }}</span></div>
         <div class="wb-kv">
@@ -221,17 +211,13 @@
           </div>
         </div>
         <div class="wb-modal-actions">
-          <button v-if="detailAcct.disabled" class="btn-ghost btn-sm" @click="doEnable(detailAcct)">恢复启用</button>
-          <button v-else class="btn-ghost btn-sm" @click="doDisable(detailAcct)">禁用账号</button>
-          <button
-            v-if="detailAcct.disabled || detailAcct.cooling || (detailAcct.rateLimitedModels || []).length"
-            class="btn-ghost btn-sm"
-            @click="doRevive(detailAcct)"
-          >
+          <AppButton variant="secondary" v-if="detailAcct.disabled" @click="doEnable(detailAcct)">恢复启用</AppButton>
+          <AppButton variant="secondary" v-else @click="doDisable(detailAcct)">禁用账号</AppButton>
+          <AppButton variant="secondary" v-if="detailAcct.disabled || detailAcct.cooling || (detailAcct.rateLimitedModels || []).length" @click="doRevive(detailAcct)">
             解冻
-          </button>
-          <button class="btn-ghost btn-sm" @click="gotoCredits(detailAcct)">查看积分</button>
-          <button class="btn-primary btn-sm" @click="closeDetail">关闭</button>
+          </AppButton>
+          <AppButton variant="secondary" @click="gotoCredits(detailAcct)">查看积分</AppButton>
+          <AppButton variant="primary" @click="closeDetail">关闭</AppButton>
         </div>
       </div>
     </div>
@@ -245,7 +231,7 @@
               {{ acct.nickname || acct.uid.slice(0, 12) }}
             </option>
           </select>
-          <button class="btn-ghost btn-sm" @click="loadCredits">{{ creditLoading ? '加载中…' : '刷新' }}</button>
+          <AppButton variant="secondary" @click="loadCredits">{{ creditLoading ? '加载中…' : '刷新' }}</AppButton>
         </div>
 
         <div class="wb-note">积分批次按「快过期优先、未用完在前」排序，与后端返回顺序一致。</div>
@@ -287,8 +273,8 @@
           <select v-model="usageHours" class="wb-select" @change="loadUsage">
             <option v-for="opt in USAGE_WINDOWS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
-          <button class="btn-ghost btn-sm" @click="loadUsage">{{ usageLoading ? '加载中…' : '刷新' }}</button>
-          <button class="btn-ghost btn-sm" :disabled="usageSaving" @click="saveUsage">{{ usageSaving ? '保存中…' : '立即落盘' }}</button>
+          <AppButton variant="secondary" @click="loadUsage">{{ usageLoading ? '加载中…' : '刷新' }}</AppButton>
+          <AppButton variant="secondary" :disabled="usageSaving" @click="saveUsage">{{ usageSaving ? '保存中…' : '立即落盘' }}</AppButton>
           <span
             class="wb-count"
             v-if="usageData && usageData.yesterday"
@@ -454,17 +440,12 @@
         </div>
 
         <div class="wb-toolbar">
-          <button
-            class="btn-primary btn-sm"
-            :disabled="modelsLoading || !modelRegionAccountCount"
-            :title="modelRegionAccountCount ? '' : '该区域还没有账号，请先到「账号池」添加'"
-            @click="loadModels(true)"
-          >
+          <AppButton variant="primary" :disabled="modelsLoading || !modelRegionAccountCount" :title="modelRegionAccountCount ? '' : '该区域还没有账号，请先到「账号池」添加'" @click="loadModels(true)">
             {{ modelsLoading ? '拉取中…' : '拉取上游模型' }}
-          </button>
-          <button class="btn-ghost btn-sm" :disabled="modelsSaving || !upstreamModels.length" @click="saveEnabledModels">
+          </AppButton>
+          <AppButton variant="secondary" :disabled="modelsSaving || !upstreamModels.length" @click="saveEnabledModels">
             {{ modelsSaving ? '保存中…' : '保存启用模型' }}
-          </button>
+          </AppButton>
           <span class="wb-count">
             {{ modelRegion === 'global' ? '国际版' : '国内版' }}：已勾选 {{ enabledModelIds.length }} / {{ upstreamModels.length }}
           </span>
@@ -530,18 +511,18 @@
               {{ acct.nickname || acct.uid.slice(0, 12) }}
             </option>
           </select>
-          <button class="btn-primary btn-sm" :disabled="!taskUid || taskRunning" @click="runAllTasks">
+          <AppButton variant="primary" :disabled="!taskUid || taskRunning" @click="runAllTasks">
             {{ taskRunning ? '执行中…' : '一键完成全部' }}
-          </button>
-          <button class="btn-ghost btn-sm" :disabled="!taskUid || taskAccepting" @click="acceptTasks">
+          </AppButton>
+          <AppButton variant="secondary" :disabled="!taskUid || taskAccepting" @click="acceptTasks">
             {{ taskAccepting ? '接受中…' : '接受任务' }}
-          </button>
-          <button class="btn-ghost btn-sm" :disabled="taskScanning" @click="scanTasks">
+          </AppButton>
+          <AppButton variant="secondary" :disabled="taskScanning" @click="scanTasks">
             {{ taskScanning ? '扫描中…' : '全账号扫描' }}
-          </button>
-          <button class="btn-primary btn-sm" :disabled="queueStarting" @click="startQueue">
+          </AppButton>
+          <AppButton variant="primary" :disabled="queueStarting" @click="startQueue">
             {{ queueStarting ? '入队中…' : '全账号入队执行' }}
-          </button>
+          </AppButton>
           <span v-if="taskRunning" class="wb-count">进度 {{ taskProgressText }}</span>
           <span v-if="selectedTaskCodes.length" class="wb-count">已选 {{ selectedTaskCodes.length }} 项</span>
         </div>
@@ -631,14 +612,9 @@
                 </td>
                 <td class="nowrap">{{ taskStateLabel(t) }}</td>
                 <td class="nowrap">
-                  <button
-                    v-if="canClaim(t)"
-                    class="btn-ghost btn-sm"
-                    :disabled="claimingCode === t.task_code"
-                    @click="claimOne(t)"
-                  >
+                  <AppButton variant="secondary" v-if="canClaim(t)" :disabled="claimingCode === t.task_code" @click="claimOne(t)">
                     {{ claimingCode === t.task_code ? '领取中…' : '领奖' }}
-                  </button>
+                  </AppButton>
                   <span v-else>-</span>
                 </td>
               </tr>
@@ -652,10 +628,10 @@
     <div v-if="tab === 'scheduler'">
       <div class="card wb-card">
         <div class="wb-toolbar">
-          <button class="btn-ghost btn-sm" @click="loadScheduler">刷新</button>
-          <button class="btn-primary btn-sm" :disabled="schedSaving" @click="saveScheduler">
+          <AppButton variant="secondary" @click="loadScheduler">刷新</AppButton>
+          <AppButton variant="primary" :disabled="schedSaving" @click="saveScheduler">
             {{ schedSaving ? '保存中…' : '保存排程' }}
-          </button>
+          </AppButton>
         </div>
 
         <div class="wb-note">时点填小时（0-23），多个用英文逗号分隔，例如 9,21；留空将回落为默认时点。</div>
@@ -690,9 +666,9 @@
                 <td class="nowrap">{{ schedState[t.key] && schedState[t.key].at ? formatTime(schedState[t.key].at) : '-' }}</td>
                 <td>{{ (schedState[t.key] && schedState[t.key].summary) || '-' }}</td>
                 <td class="nowrap">
-                  <button class="btn-ghost btn-sm" :disabled="runningTask === t.key" @click="runSchedulerTask(t.key)">
+                  <AppButton variant="secondary" :disabled="runningTask === t.key" @click="runSchedulerTask(t.key)">
                     {{ runningTask === t.key ? '执行中…' : '立即执行' }}
-                  </button>
+                  </AppButton>
                 </td>
               </tr>
               <tr>
@@ -705,9 +681,9 @@
                 <td class="nowrap">{{ schedState.balance && schedState.balance.at ? formatTime(schedState.balance.at) : '-' }}</td>
                 <td>{{ (schedState.balance && schedState.balance.summary) || '-' }}</td>
                 <td class="nowrap">
-                  <button class="btn-ghost btn-sm" :disabled="runningTask === 'balance'" @click="runSchedulerTask('balance')">
+                  <AppButton variant="secondary" :disabled="runningTask === 'balance'" @click="runSchedulerTask('balance')">
                     {{ runningTask === 'balance' ? '执行中…' : '立即执行' }}
-                  </button>
+                  </AppButton>
                 </td>
               </tr>
               <tr>
@@ -720,9 +696,9 @@
                 <td class="nowrap">{{ schedState.taskSweep && schedState.taskSweep.at ? formatTime(schedState.taskSweep.at) : '-' }}</td>
                 <td>{{ (schedState.taskSweep && schedState.taskSweep.summary) || '-' }}</td>
                 <td class="nowrap">
-                  <button class="btn-ghost btn-sm" :disabled="runningTask === 'taskSweep'" @click="runSchedulerTask('taskSweep')">
+                  <AppButton variant="secondary" :disabled="runningTask === 'taskSweep'" @click="runSchedulerTask('taskSweep')">
                     {{ runningTask === 'taskSweep' ? '执行中…' : '立即执行' }}
-                  </button>
+                  </AppButton>
                 </td>
               </tr>
             </tbody>
@@ -751,14 +727,10 @@
         </div>
 
         <div class="wb-toolbar">
-          <button class="btn-ghost btn-sm" :disabled="compLoading" @click="loadCompensation(false)">
+          <AppButton variant="secondary" :disabled="compLoading" @click="loadCompensation(false)">
             {{ compLoading ? '查询中…' : '刷新状态' }}
-          </button>
-          <button
-            class="btn-primary btn-sm"
-            :disabled="compClaiming"
-            @click="claimCompensationAll"
-          >{{ compClaiming ? '领取中…' : '逐号领取' }}</button>
+          </AppButton>
+          <AppButton variant="primary" :disabled="compClaiming" @click="claimCompensationAll">{{ compClaiming ? '领取中…' : '逐号领取' }}</AppButton>
           <span class="wb-desc">
             待领 {{ compPendingCount }} 个<template v-if="compErrorCount">，查询失败 {{ compErrorCount }} 个</template>
           </span>
@@ -793,12 +765,7 @@
                   {{ compCountdown(row) }}
                 </td>
                 <td class="nowrap">
-                  <button
-                    v-if="compPending(row)"
-                    class="btn-ghost btn-sm"
-                    :disabled="!!compClaimingUid"
-                    @click="claimCompensationOne(row)"
-                  >{{ compClaimingUid === row.uid ? '领取中…' : '领取' }}</button>
+                  <AppButton variant="secondary" v-if="compPending(row)" :disabled="!!compClaimingUid" @click="claimCompensationOne(row)">{{ compClaimingUid === row.uid ? '领取中…' : '领取' }}</AppButton>
                   <span v-else class="wb-desc">-</span>
                 </td>
               </tr>
@@ -820,14 +787,10 @@
         </div>
 
         <div class="wb-toolbar">
-          <button class="btn-primary btn-sm" :disabled="verLoading" @click="checkVersions(true)">
+          <AppButton variant="primary" :disabled="verLoading" @click="checkVersions(true)">
             {{ verLoading ? '检查中…' : '检查最新版本' }}
-          </button>
-          <button
-            class="btn-ghost btn-sm"
-            :disabled="verApplying || !verHasUpdate"
-            @click="applyVersions"
-          >{{ verApplying ? '应用中…' : '应用全部更新' }}</button>
+          </AppButton>
+          <AppButton variant="secondary" :disabled="verApplying || !verHasUpdate" @click="applyVersions">{{ verApplying ? '应用中…' : '应用全部更新' }}</AppButton>
           <span v-if="verFetchedAt" class="wb-count">
             上次检查 {{ formatTime(verFetchedAt) }}{{ verFromCache ? '（缓存）' : '' }}
           </span>
@@ -972,9 +935,9 @@
           出站 X-Device-Token 的来源：留空则不注入；填写后每 5 分钟读一次文件（≤1KB），读取失败自动降级为不注入。
         </div>
         <div class="wb-actions-row">
-          <button class="btn-primary btn-sm" :disabled="cfgSaving" @click="saveConfig">
+          <AppButton variant="primary" :disabled="cfgSaving" @click="saveConfig">
             {{ cfgSaving ? '保存中…' : '保存配置' }}
-          </button>
+          </AppButton>
           <span class="wb-note">保存后立即生效（热更新），并写入 server-config.json 持久化。</span>
         </div>
       </div>
@@ -1176,9 +1139,9 @@
         </div>
 
         <div class="wb-actions-row">
-          <button class="btn-primary btn-sm" :disabled="cfgSaving" @click="saveConfig">
+          <AppButton variant="primary" :disabled="cfgSaving" @click="saveConfig">
             {{ cfgSaving ? '保存中…' : '保存配置' }}
-          </button>
+          </AppButton>
           <span class="wb-note">与上方配置一并提交，保存后热更新并持久化。</span>
         </div>
       </div>
@@ -1217,7 +1180,7 @@
             <option v-for="c in LOG_CHANNELS" :key="c.value" :value="c.value">{{ c.label }}</option>
           </select>
           <input v-model="logKeyword" class="wb-input" type="text" placeholder="搜索消息关键字" @keyup.enter="loadLogs" />
-          <button class="btn-ghost btn-sm" @click="loadLogs">{{ logLoading ? '加载中…' : '刷新' }}</button>
+          <AppButton variant="secondary" @click="loadLogs">{{ logLoading ? '加载中…' : '刷新' }}</AppButton>
           <label class="wb-auto">
             <input type="checkbox" v-model="logAuto" @change="toggleLogAuto" />
             自动刷新（3 秒）
@@ -1285,6 +1248,7 @@ import {
   wbVersions,
   wbApplyVersions
 } from '../api.js'
+import AppButton from '../components/AppButton.vue'
 
 // ==================== 常量 ====================
 
@@ -2800,9 +2764,10 @@ function errText(err) {
   line-height: 1.6;
 }
 
+/* 右侧留出箭头位：全局 select 用背景图画箭头，padding-right 不够会被压在边框上 */
 .wb-select {
   font-size: var(--fs-small);
-  padding: 8px 12px;
+  padding: 0 30px 0 12px;
   min-width: 200px;
 }
 
@@ -2834,7 +2799,7 @@ function errText(err) {
 
 
 .mono {
-  font-family: 'Courier New', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 
@@ -3213,7 +3178,7 @@ function errText(err) {
 }
 
 .wb-log-time {
-  font-family: 'Courier New', Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--text-3);
   flex-shrink: 0;
 }
@@ -3308,18 +3273,9 @@ function errText(err) {
   color: var(--text-1);
 }
 
+/* 外观与尺寸沿用 AppButton 的 md 图标按钮（见 App.vue .app-btn-icon） */
 .wb-modal-close {
-  background: transparent;
-  border: none;
-  color: var(--text-3);
-  font-size: var(--fs-title);
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-}
-
-.wb-modal-close:hover {
-  color: var(--danger);
+  flex: none;
 }
 
 .wb-modal-actions {

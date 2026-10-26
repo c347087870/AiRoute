@@ -6,10 +6,10 @@
 // 为什么内联 path 而不是装图标包：整包 5900+ 图标，就算 tree-shaking 也要额外
 // 引入一层组件与构建配置，而这里只用十来个。内联后产物只多约 3 KB，零新增依赖。
 //
-// 「路由规则 / 模型来源 / 日志查看 / 用量统计 / 模型测分」现在收在「高级」分组里，
+// 「路由规则 / 模型来源 / 日志查看 / 用量统计 / 模型测分」现在收在「高级功能」分组里，
 // 二级项不带图标（220px 宽的侧边栏缩进后放不下）；freeAccounts 则随着「免费账号」
 // 并入渠道账号页而空了出来。它们的图标仍留在这张表里 —— 以后谁被移回一级菜单，
-// 直接拿来用，不必再去翻图标站。
+// 直接拿来用，不必再去翻图标站。dev 是「开发面板」（仅开发模式出现的一级项）。
 //
 // 换图标：把对应 key 的值换成新的 body 即可（在 icones.js.org 点开图标复制 SVG，
 // 或取 https://api.iconify.design/tabler/<图标名>.json 里的 icons.<名>.body）。
@@ -35,18 +35,22 @@ export const ICONS = {
   settings: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37c1 .608 2.296.07 2.572-1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0-6 0"/></g>',
   // tabler:book
   tutorial: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 19a9 9 0 0 1 9 0a9 9 0 0 1 9 0M3 6a9 9 0 0 1 9 0a9 9 0 0 1 9 0M3 6v13m9-13v13m9-13v13"/>',
-  // tabler:adjustments-horizontal（一级「高级」分组）
+  // tabler:adjustments-horizontal（一级「高级功能」分组）
   advanced: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6a2 2 0 1 0 4 0a2 2 0 1 0-4 0M4 6h8m4 0h4M6 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0m-2 0h2m4 0h10m-5 6a2 2 0 1 0 4 0a2 2 0 1 0-4 0M4 18h11m4 0h1"/>',
   // tabler:arrow-left（二级页面标题左侧的返回按钮）
   arrowLeft: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12l6 6M5 12l6-6"/>',
   // tabler:chevron-down（分组展开箭头，靠 CSS 旋转表示状态）
   chevronDown: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m6 9l6 6l6-6"/>',
+  // tabler:terminal-2（一级「开发面板」，仅开发模式出现）
+  dev: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3l-3 3m5 0h3M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   // tabler:grip-vertical（渠道卡片拖拽排序的手柄）
   gripVertical: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0m6-14a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0"/>',
   // tabler:external-link（渠道账号「明细」：用系统浏览器打开个人中心）
   externalLink: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6m-7 1l9-9m-5 0h5v5"/>',
   // tabler:help（渠道账号页标题旁的问号：说明文字收在它后面）
   help: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0m9 5v.01"/><path d="M12 13.5a1.5 1.5 0 0 1 1-1.5a2.6 2.6 0 1 0-3-4"/></g>',
+  // tabler:route（侧边栏「新手引导」：一条带起终点的路径，对应引导的分步流程）
+  onboarding: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 19a2 2 0 1 0 4 0a2 2 0 1 0-4 0m14-14a2 2 0 1 0 4 0a2 2 0 1 0-4 0"/><path d="M5 17V9a4 4 0 0 1 4-4h8"/><path d="M19 7v8a4 4 0 0 1-4 4H7"/></g>',
   // tabler:copy / tabler:check / tabler:x（提示条的复制按钮，三个状态共用同一处）
   copy: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></g>',
   check: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l5 5L20 7"/>',

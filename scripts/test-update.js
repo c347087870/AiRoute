@@ -131,12 +131,14 @@ test('normalizeSha 统一大小写与 sha256: 前缀', () => {
   assert.strictEqual(core.normalizeSha(''), '')
 })
 
-test('compareVersion 按三段数字比较，忽略 v 前缀与预发布后缀', () => {
-  assert.strictEqual(updateServer.compareVersion('1.7.2', '1.7.1'), 1)
-  assert.strictEqual(updateServer.compareVersion('v1.7.0', '1.7.0'), 0)
-  assert.strictEqual(updateServer.compareVersion('1.7.0-beta.1', '1.7.0'), 0)
-  assert.strictEqual(updateServer.compareVersion('1.6.9', '1.7.0'), -1)
-  assert.strictEqual(updateServer.compareVersion('1.10.0', '1.9.9'), 1)
+test('compareSemver 按三段数字比较，忽略 v 前缀', () => {
+  assert.strictEqual(updateServer.compareSemver('1.7.2', '1.7.1'), 1)
+  assert.strictEqual(updateServer.compareSemver('v1.7.0', '1.7.0'), 0)
+  assert.strictEqual(updateServer.compareSemver('1.6.9', '1.7.0'), -1)
+  assert.strictEqual(updateServer.compareSemver('1.10.0', '1.9.9'), 1)
+  // 预发布不再是「相等」：旧 compareVersion 砍掉后缀，beta.3 与 beta.2 被判成同一个版本，
+  // beta 线永远发现不了更新（beta 线的比较规则见下面的「更新线路」分组）
+  assert.strictEqual(updateServer.compareSemver('1.7.0-beta.1', '1.7.0'), -1)
 })
 
 test('assetCandidates 按运行形态选择产物名', () => {
@@ -201,6 +203,85 @@ test('isInside 拒绝目录外的路径', () => {
   assert.strictEqual(core.isInside(base, base), true)
   assert.strictEqual(core.isInside(base, path.join(base, '..', 'evil.dmg')), false)
   assert.strictEqual(core.isInside(base, '/tmp/other/a.dmg'), false)
+})
+
+// ===== 更新线路（beta / 正式隔离）=====
+
+group('更新线路：beta 与正式隔离')
+
+test('compareSemver 能分辨预发布，旧的三段比较做不到', () => {
+  // 三条必须在 beta 线上成立，否则 beta.2 → beta.3 会被判成「已是最新」
+  assert.strictEqual(updateServer.compareSemver('2.0.0-beta.3', '2.0.0-beta.2'), 1)
+  assert.strictEqual(updateServer.compareSemver('2.0.0-beta.2', '2.0.0-beta.10'), -1)
+  assert.strictEqual(updateServer.compareSemver('2.0.0', '2.0.0-beta.3'), 1, '正式版高于同号预发布')
+  // 跨大版本：beta 构建也应该看到「正式版已发布」，但那属于正式线的判断
+  assert.strictEqual(updateServer.compareSemver('2.0.0', '1.9.0'), 1)
+  assert.strictEqual(updateServer.compareSemver('1.9.0', '1.9.0'), 0)
+  assert.strictEqual(updateServer.compareSemver('v1.9.0', '1.8.1'), 1)
+})
+
+test('parseSemver / isPrerelease 拆出预发布标识', () => {
+  assert.deepStrictEqual(updateServer.parseSemver('v2.0.0-beta.3'), { nums: [2, 0, 0], pre: 'beta.3' })
+  assert.deepStrictEqual(updateServer.parseSemver('1.9'), { nums: [1, 9, 0], pre: '' })
+  assert.strictEqual(updateServer.isPrerelease('2.0.0-beta.3'), true)
+  assert.strictEqual(updateServer.isPrerelease('1.9.0'), false)
+  assert.strictEqual(updateServer.isPrerelease('v1.6.1-macos.1'), true)
+})
+
+test('releaseLine：beta 构建走 beta 线，正式构建走正式线', () => {
+  assert.strictEqual(updateServer.releaseLine('2.0.0-beta.3'), 'beta')
+  assert.strictEqual(updateServer.releaseLine('2.0.0-rc.1'), 'beta')
+  assert.strictEqual(updateServer.releaseLine('1.9.0'), 'stable')
+  // 制品标记（v1.6.1-macos.1）当年是按正式版发的，不能因为带后缀就被打去 beta 线
+  assert.strictEqual(updateServer.releaseLine('1.6.1-macos.1'), 'stable')
+  // 强制覆盖供排障
+  assert.strictEqual(updateServer.releaseLine('1.9.0', 'beta'), 'beta')
+  assert.strictEqual(updateServer.releaseLine('2.0.0-beta.3', 'stable'), 'stable')
+})
+
+// 造一批贴近真实仓库的 Release（含草稿、prerelease、只发另一平台的版本）
+function releaseFixture() {
+  return [
+    { tag_name: 'v1.9.0', draft: false, prerelease: false, assets: [{ name: 'AiRoute-1.9.0-arm64.dmg' }] },
+    { tag_name: 'v2.0.0-beta.3', draft: true, prerelease: true, assets: [{ name: 'AiRoute-2.0.0-beta.3-arm64.dmg' }] },
+    { tag_name: 'v2.0.0-beta.2', draft: false, prerelease: true, assets: [{ name: 'AiRoute-2.0.0-beta.2-arm64.dmg' }] },
+    { tag_name: 'v2.0.0-beta.1', draft: false, prerelease: true, assets: [] },
+    { tag_name: 'v1.7.0-beta.2', draft: false, prerelease: true, assets: [{ name: 'AiRoute-1.7.0-beta.2-arm64.dmg' }] }
+  ]
+}
+
+test('beta 线排除草稿：草稿资产对外 404，选中它等于让用户下不动', () => {
+  const picked = updateServer.pickRelease(releaseFixture(), 'beta')
+  assert.strictEqual(picked.tag_name, 'v2.0.0-beta.2', 'beta.3 是草稿，必须跳过')
+})
+
+test('beta 线优先挑带资产的版本，全都空才退回最高版', () => {
+  const withAsset = updateServer.pickRelease(releaseFixture(), 'beta', r => (r.assets || []).length > 0)
+  assert.strictEqual(withAsset.tag_name, 'v2.0.0-beta.2')
+
+  // 连资产都没有：仍然给出最高版本（而不是假装没有更新），由下载环节报明确错误
+  const bare = releaseFixture().map(r => ({ ...r, assets: [] }))
+  assert.strictEqual(updateServer.pickRelease(bare, 'beta').tag_name, 'v2.0.0-beta.2')
+})
+
+test('正式线看不到任何 pre-release，哪怕它的版本号更高', () => {
+  const picks = updateServer.pickRelease(releaseFixture(), 'stable')
+  assert.strictEqual(picks.tag_name, 'v1.9.0', '2.0.0-beta.2 版本号更高，但属于 beta 线')
+})
+
+test('两条线路各自取到自己的最高版本，互不串线', () => {
+  const beta = updateServer.pickRelease(releaseFixture(), 'beta')
+  const stable = updateServer.pickRelease(releaseFixture(), 'stable')
+  assert.notStrictEqual(beta.tag_name, stable.tag_name)
+  assert.ok(/beta/.test(beta.tag_name))
+  assert.ok(!/beta/.test(stable.tag_name))
+})
+
+test('没有符合线路的版本时返回 null，不抛错也不过期', () => {
+  const onlyDrafts = releaseFixture().filter(r => r.draft)
+  assert.strictEqual(updateServer.pickRelease(onlyDrafts, 'beta'), null)
+  assert.strictEqual(updateServer.pickRelease([], 'stable'), null)
+  assert.strictEqual(updateServer.pickRelease(null, 'beta'), null)
 })
 
 // ===== 安装链路 =====

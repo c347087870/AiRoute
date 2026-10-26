@@ -2,13 +2,18 @@
   <div class="providers">
     <div class="page-toolbar">
       <div class="header-actions">
-        <button class="btn-primary" @click="openAddModal()">+ 通用 Provider</button>
+        <AppButton variant="primary" @click="openAddModal()">+ 通用 Provider</AppButton>
       </div>
     </div>
 
     <div v-if="!providerCount" class="card empty">
       还没有配置任何 Provider，点击右上角「+ 通用 Provider」开始。
       免费账号（含 WorkBuddy）由「渠道账号」页登录后自动出现在渠道源里。
+      <!-- 第一次启动就摸到这里的人多半是跳过了引导：给一条回到引导的路，
+           比让他读两句说明再自己猜「渠道源」在哪要好 -->
+      <div class="empty-actions">
+        <AppButton variant="secondary" @click="startOnboarding(2)">用新手引导一步步配置</AppButton>
+      </div>
     </div>
 
     <div v-else class="provider-list">
@@ -102,13 +107,13 @@
         </div>
 
         <div class="row-actions">
-          <button v-if="testingName === name" class="btn-ghost btn-sm" @click="stopTest">停止</button>
-          <button v-else class="btn-ghost btn-sm" @click="runTest(name)" :disabled="!!testingName">
+          <AppButton variant="secondary" v-if="testingName === name" @click="stopTest">停止</AppButton>
+          <AppButton variant="secondary" v-else @click="runTest(name)" :disabled="!!testingName">
             测试
-          </button>
-          <button class="btn-ghost btn-sm" @click="editProvider(name, provider)">编辑</button>
-          <button class="btn-primary btn-sm" @click="setAsCurrent(name)">设为当前</button>
-          <button class="btn-danger btn-sm" @click="removeProvider(name)">删除</button>
+          </AppButton>
+          <AppButton variant="secondary" @click="editProvider(name, provider)">编辑</AppButton>
+          <AppButton variant="primary" @click="setAsCurrent(name)">设为当前</AppButton>
+          <AppButton variant="danger" @click="removeProvider(name)">删除</AppButton>
         </div>
       </div>
     </div>
@@ -117,7 +122,7 @@
       <div class="card modal">
         <div class="modal-header">
           <h2>{{ modalTitle }}</h2>
-          <button class="modal-close" @click="closeModal">×</button>
+          <AppButton variant="ghost" iconOnly class="modal-close" @click="closeModal">×</AppButton>
         </div>
         <div class="form">
           <label>
@@ -146,10 +151,10 @@
             API Key
             <div class="key-input-wrap">
               <input v-model="form.apiKey" :type="showKey ? 'text' : 'password'" placeholder="sk-..." />
-              <button class="key-eye-btn" @click="showKey = !showKey" :title="showKey ? '隐藏' : '显示'">
+              <AppButton variant="secondary" iconOnly class="key-eye-btn" @click="showKey = !showKey" :title="showKey ? '隐藏' : '显示'">
                 {{ showKey ? '🙈' : '👁' }}
-              </button>
-              <button class="key-copy-btn" @click="copyKey" title="复制">📋</button>
+              </AppButton>
+              <AppButton variant="secondary" iconOnly class="key-copy-btn" @click="copyKey" title="复制">📋</AppButton>
             </div>
           </label>
           </template>
@@ -158,15 +163,10 @@
             <div class="model-editor-header">
               <span class="model-editor-title">模型列表</span>
               <div v-if="form.type !== 'channel'" class="model-editor-actions">
-                <button
-                  class="btn-ghost btn-sm"
-                  :disabled="picker.loading"
-                  title="用上面的 URL 与 API Key 向上游查询 /models 接口"
-                  @click="openModelPicker"
-                >
+                <AppButton variant="secondary" :disabled="picker.loading" title="用上面的 URL 与 API Key 向上游查询 /models 接口" @click="openModelPicker">
                   {{ picker.loading ? '拉取中…' : '从接口拉取模型' }}
-                </button>
-                <button class="btn-ghost btn-sm" @click="addModelRow">+ 添加模型</button>
+                </AppButton>
+                <AppButton variant="secondary" @click="addModelRow">+ 添加模型</AppButton>
               </div>
             </div>
             <div class="model-editor-hint">
@@ -186,7 +186,7 @@
               <div class="model-edit-line">
                 <input v-model="model.id" class="model-id-input" placeholder="模型 ID，如 glm-4.6" />
                 <input v-model="model.displayName" class="model-name-input" placeholder="显示名称（可选）" />
-                <button class="model-remove-btn" @click="removeModelRow(index)" title="移除该模型">×</button>
+                <AppButton variant="ghost" iconOnly class="model-remove-btn" @click="removeModelRow(index)" title="移除该模型">×</AppButton>
               </div>
               <div class="model-edit-line">
                 <div class="limit-field">
@@ -217,8 +217,8 @@
           </div>
 
           <div class="form-actions">
-            <button class="btn-ghost" @click="closeModal">取消</button>
-            <button class="btn-primary" @click="saveProvider">保存</button>
+            <AppButton variant="secondary" @click="closeModal">取消</AppButton>
+            <AppButton variant="primary" @click="saveProvider">保存</AppButton>
           </div>
         </div>
       </div>
@@ -229,13 +229,13 @@
       <div class="card modal picker-modal">
         <div class="modal-header">
           <h2>从接口拉取模型</h2>
-          <button class="modal-close" @click="closePicker">×</button>
+          <AppButton variant="ghost" iconOnly class="modal-close" @click="closePicker">×</AppButton>
         </div>
 
         <div v-if="picker.loading" class="picker-state">正在向上游查询模型列表…</div>
         <div v-else-if="picker.error" class="picker-state picker-error">
           <div>{{ picker.error }}</div>
-          <button class="btn-ghost btn-sm" @click="openModelPicker">重试</button>
+          <AppButton variant="secondary" @click="openModelPicker">重试</AppButton>
         </div>
         <template v-else>
           <div class="picker-meta">
@@ -249,8 +249,8 @@
               <input v-model="picker.showAll" type="checkbox" />
               显示全部（含 embedding / 语音 / 图像）
             </label>
-            <button class="btn-ghost btn-sm" @click="selectAllVisible">全选</button>
-            <button class="btn-ghost btn-sm" @click="clearSelection">清空</button>
+            <AppButton variant="secondary" @click="selectAllVisible">全选</AppButton>
+            <AppButton variant="secondary" @click="clearSelection">清空</AppButton>
           </div>
           <div class="picker-list">
             <label v-for="m in visiblePickerModels" :key="m.id" class="picker-row">
@@ -265,14 +265,10 @@
         </template>
 
         <div class="form-actions">
-          <button class="btn-ghost" @click="closePicker">取消</button>
-          <button
-            class="btn-primary"
-            :disabled="picker.loading || !picker.selected.size"
-            @click="applyPickedModels"
-          >
+          <AppButton variant="secondary" @click="closePicker">取消</AppButton>
+          <AppButton variant="primary" :disabled="picker.loading || !picker.selected.size" @click="applyPickedModels">
             应用（{{ picker.selected.size }}）
-          </button>
+          </AppButton>
         </div>
       </div>
     </div>
@@ -281,7 +277,9 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useModel } from '../composables/useModel.js'
+import { useOnboarding } from '../composables/useOnboarding.js'
 import { showToast } from '../composables/useToast.js'
 import { useEscClose } from '../composables/useEscClose.js'
 import {
@@ -296,6 +294,11 @@ import {
 } from '../api.js'
 import { formatNumber } from '../utils/format.js'
 import { modelLabel } from '../utils/models.js'
+
+import AppButton from '../components/AppButton.vue'
+const route = useRoute()
+const router = useRouter()
+const { startOnboarding } = useOnboarding()
 
 // 模型 chip 超过该数量时折叠，点击 +N 展开
 const MODEL_COLLAPSE_LIMIT = 3
@@ -769,10 +772,24 @@ function stopTest() {
 onMounted(() => {
   loadModelData()
   loadModelHealth()
+  openForOnboarding()
 })
+
+// 启动引导的「添加模型来源」直接落到新增弹窗上（?onboarding=add）。
+// 参数用完就 replace 掉：刷新页面不该又弹出一个空表单
+function openForOnboarding() {
+  if (route.query.onboarding !== 'add') return
+  router.replace({ path: route.path, query: {} })
+  openAddModal()
+}
 </script>
 
 <style scoped>
+
+/* 空态里的引导入口：跟说明文字隔开一行，别和正文挤成一段 */
+.empty-actions {
+  margin-top: 14px;
+}
 
 
 /* 右上角新增入口按钮组（通用 Provider / WorkBuddy 账号池） */
@@ -841,7 +858,7 @@ onMounted(() => {
   background: var(--bg-page);
   border-radius: var(--radius-xs);
   padding: 2px 7px;
-  font-family: 'Courier New', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .badge-current {
@@ -866,8 +883,9 @@ onMounted(() => {
 /* 推理档位快捷选择（与右侧自定义输入框配合使用） */
 .effort-select-sm {
   width: 130px;
-  font-size: var(--fs-xs);
-  padding: 3px 4px;
+  font-size: var(--field-fs);
+  padding: 0 24px 0 8px;
+  background-position: right 7px center;
   border: 1px solid var(--border-1);
   border-radius: var(--radius-xs);
   background: var(--bg-card);
@@ -924,7 +942,7 @@ onMounted(() => {
 .meta-value {
   font-size: var(--fs-xs);
   color: var(--text-strong);
-  font-family: 'Courier New', Consolas, monospace;
+  font-family: var(--font-mono);
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -946,9 +964,9 @@ onMounted(() => {
   background: var(--bg-hover);
   border: 1px solid var(--border-2);
   border-radius: var(--radius-sm);
-  padding: 4px 6px 4px 10px;
+  padding: 2px 4px 2px 10px;
   font-size: var(--fs-xs);
-  max-width: 320px;
+  max-width: 360px;
 }
 
 .model-chip.current {
@@ -992,13 +1010,18 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
+/* 嵌在模型标签里的动作按钮：高度仍走全站小号按钮，只把左右内边距收窄，
+   免得一个「切换」按钮把标签撑到 320px 以外 */
 .chip-use {
+  display: inline-flex;
+  align-items: center;
+  height: var(--btn-h);
+  padding: 0 8px;
   background: var(--bg-card);
   border: 1px solid var(--border-3);
-  color: var(--text-3);
-  font-size: var(--fs-mini);
-  padding: 2px 8px;
-  border-radius: var(--radius-lg);
+  color: var(--text-2);
+  font-size: var(--btn-fs);
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
   transition: all 0.15s;
 }
@@ -1015,11 +1038,14 @@ onMounted(() => {
 }
 
 .chip-more {
+  display: inline-flex;
+  align-items: center;
+  height: var(--btn-h);
+  padding: 0 10px;
   background: transparent;
   border: 1px dashed var(--border-3);
-  color: var(--text-3);
-  font-size: var(--fs-mini);
-  padding: 4px 10px;
+  color: var(--text-2);
+  font-size: var(--btn-fs);
   border-radius: var(--radius-sm);
 }
 
@@ -1114,20 +1140,8 @@ onMounted(() => {
 
 .key-eye-btn,
 .key-copy-btn {
-  background: transparent;
-  border: 1px solid var(--border-3);
-  border-radius: var(--radius-sm);
-  padding: 6px 8px;
-  cursor: pointer;
-  font-size: var(--fs-base);
-  line-height: 1;
   flex-shrink: 0;
-}
-
-.key-eye-btn:hover,
-.key-copy-btn:hover {
-  background: var(--bg-page);
-  border-color: var(--primary);
+  font-size: var(--fs-base);
 }
 
 .model-editor {
@@ -1182,21 +1196,14 @@ onMounted(() => {
   flex: 1.4;
 }
 
+/* 尺寸由 AppButton 的 sm 图标按钮统一提供，这里只管悬停时的危险色 */
 .model-remove-btn {
-  background: transparent;
-  border: 1px solid var(--border-3);
-  color: var(--text-3);
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  font-size: var(--fs-section);
-  line-height: 1;
   flex-shrink: 0;
+  font-size: var(--fs-section);
 }
 
 .model-remove-btn:hover {
   color: var(--danger);
-  border-color: var(--danger);
 }
 
 .limit-field {
@@ -1393,3 +1400,4 @@ onMounted(() => {
   margin-top: 8px;
 }
 </style>
+

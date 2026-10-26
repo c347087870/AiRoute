@@ -23,8 +23,8 @@
           <h2 class="block-title">选择模型</h2>
           <div class="block-actions">
             <span class="muted">已选 {{ selectedRefs.length }} 个</span>
-            <button class="btn-ghost btn-sm" @click="selectAllModels">全选</button>
-            <button class="btn-ghost btn-sm" @click="clearModels">清空</button>
+            <AppButton variant="secondary" @click="selectAllModels">全选</AppButton>
+            <AppButton variant="secondary" @click="clearModels">清空</AppButton>
           </div>
         </div>
         <div v-if="!modelGroupsByProvider.length" class="empty-hint">暂无可用模型</div>
@@ -46,8 +46,8 @@
           <h2 class="block-title">选择题目</h2>
           <div class="block-actions">
             <span class="muted">已选 {{ selectedQuestionIds.length }} 题</span>
-            <button class="btn-ghost btn-sm" @click="selectAllCategories">全选</button>
-            <button class="btn-ghost btn-sm" @click="clearCategories">清空</button>
+            <AppButton variant="secondary" @click="selectAllCategories">全选</AppButton>
+            <AppButton variant="secondary" @click="clearCategories">清空</AppButton>
           </div>
         </div>
         <div v-if="!categoryGroups.length" class="empty-hint">题库为空，请到「题库管理」添加题目</div>
@@ -92,7 +92,7 @@
               @change="clampConcurrency"
             />
           </label>
-          <button class="btn-primary" :disabled="!canStart" @click="startRun">{{ startButtonText }}</button>
+          <AppButton variant="primary" :disabled="!canStart" @click="startRun">{{ startButtonText }}</AppButton>
         </div>
         <div class="hint">
           预计请求数 {{ estimateRequests }} 次（{{ selectedRefs.length }} 模型 × {{ selectedQuestionIds.length }} 题）
@@ -119,9 +119,9 @@
             <option v-for="run in runs" :key="run.id" :value="run.id">{{ runLabel(run) }}</option>
             <option v-if="!runs.length" value="">暂无评测记录</option>
           </select>
-          <button class="btn-ghost btn-sm" @click="loadRuns()">刷新</button>
-          <button class="btn-danger btn-sm" :disabled="!selectedRunId" @click="deleteRun">删除本条</button>
-          <button class="btn-danger btn-sm" :disabled="!runs.length" @click="clearRuns">清空全部</button>
+          <AppButton variant="secondary" @click="loadRuns()">刷新</AppButton>
+          <AppButton variant="danger" :disabled="!selectedRunId" @click="deleteRun">删除本条</AppButton>
+          <AppButton variant="danger" :disabled="!runs.length" @click="clearRuns">清空全部</AppButton>
         </div>
         <div v-if="runDetail" class="run-meta">
           <span class="badge" :class="statusClass(runDetail.status)">{{ statusText(runDetail.status) }}</span>
@@ -247,10 +247,10 @@
             <option v-for="group in categoryGroups" :key="group.category" :value="group.category">{{ group.category }}</option>
           </select>
           <input v-model="keyword" class="search-input" placeholder="搜索 ID / 标题 / 分类 / 提示词" />
-          <button class="btn-primary btn-sm" @click="openEdit(-1)">+ 新增题目</button>
-          <button class="btn-ghost btn-sm" @click="triggerImport">导入 JSON</button>
-          <button class="btn-ghost btn-sm" @click="exportQuestions">导出 JSON</button>
-          <button class="btn-ghost btn-sm" @click="resetToBuiltin">恢复内置题库</button>
+          <AppButton variant="primary" @click="openEdit(-1)">+ 新增题目</AppButton>
+          <AppButton variant="secondary" @click="triggerImport">导入 JSON</AppButton>
+          <AppButton variant="secondary" @click="exportQuestions">导出 JSON</AppButton>
+          <AppButton variant="secondary" @click="resetToBuiltin">恢复内置题库</AppButton>
           <input
             ref="fileInput"
             type="file"
@@ -281,8 +281,8 @@
               <td>{{ scoringModeLabel(item.scoring && item.scoring.mode) }}</td>
               <td>{{ item.scoring ? item.scoring.maxScore : '-' }}</td>
               <td>
-                <button class="btn-ghost btn-sm" @click="openEdit(questionIndex(item))">编辑</button>
-                <button class="btn-danger btn-sm" @click="removeQuestion(item)">删除</button>
+                <AppButton variant="secondary" @click="openEdit(questionIndex(item))">编辑</AppButton>
+                <AppButton variant="danger" @click="removeQuestion(item)">删除</AppButton>
               </td>
             </tr>
             <tr v-if="!filteredQuestions.length">
@@ -299,7 +299,7 @@
       <div class="card modal">
         <div class="modal-header">
           <h2>{{ editingIndex === -1 ? '新增题目' : '编辑题目' }}</h2>
-          <button class="modal-close" @click="showEditDialog = false">×</button>
+          <AppButton variant="ghost" iconOnly class="modal-close" @click="showEditDialog = false">×</AppButton>
         </div>
         <div class="form">
           <div class="form-row">
@@ -357,8 +357,8 @@
           </div>
         </div>
         <div class="modal-actions">
-          <button class="btn-ghost" @click="showEditDialog = false">取消</button>
-          <button class="btn-primary" @click="saveEdit">保存</button>
+          <AppButton variant="secondary" @click="showEditDialog = false">取消</AppButton>
+          <AppButton variant="primary" @click="saveEdit">保存</AppButton>
         </div>
       </div>
     </div>
@@ -368,12 +368,12 @@
       <div class="card modal modal-sm">
         <div class="modal-header">
           <h2>导入题库</h2>
-          <button class="modal-close" @click="importDialog.visible = false">×</button>
+          <AppButton variant="ghost" iconOnly class="modal-close" @click="importDialog.visible = false">×</AppButton>
         </div>
         <p class="modal-text">文件解析成功，共 {{ importDialog.list.length }} 道题目，请选择导入方式：</p>
         <div class="modal-actions">
-          <button class="btn-ghost" @click="doImport('append')">追加到现有题库</button>
-          <button class="btn-primary" @click="doImport('replace')">替换现有题库</button>
+          <AppButton variant="secondary" @click="doImport('append')">追加到现有题库</AppButton>
+          <AppButton variant="primary" @click="doImport('replace')">替换现有题库</AppButton>
         </div>
       </div>
     </div>
@@ -393,6 +393,7 @@ import { useEscClose } from '../composables/useEscClose.js'
 import { listModels, buildModelGroups, resolveRefLabel } from '../utils/models.js'
 import { formatNumber, formatTime, toLocalDateKey } from '../utils/format.js'
 
+import AppButton from '../components/AppButton.vue'
 const { providers, loadModelData } = useModel()
 
 // 顶部 Tab 定义
@@ -1482,3 +1483,4 @@ onUnmounted(stopPolling)
 }
 
 </style>
+

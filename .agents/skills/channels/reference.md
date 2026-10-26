@@ -139,8 +139,7 @@ grep -o 'case "[a-zA-Z]*\.[a-zA-Z]*"' server/channels/business.mjs | sed 's/case
 | --- | --- |
 | `app/renderer/src/views/Channels.vue` | 全部渠道 UI（账号 / 模型两个 Tab）；`PROVIDERS`、`ONBOARDING_PROVIDERS`、`NO_CLAIM_PROVIDERS`、`WB_*`、`MODEL_GROUP_PROVIDERS`、`FLASH_FAMILIES` 都在这里 |
 | `app/renderer/src/api.js` | `channelsStatus` / `channelsRefresh` / `channelsRpc` / `channelsTest`（剥两层信封、把 400 当结果返回） |
-| `app/renderer/src/utils/channel-links.js` | 11 个渠道的个人中心/用量页链接 + localStorage 覆盖（`SLOTS`） |
-| `app/renderer/src/components/ChannelLinkEditor.vue` | 上述链接的编辑弹层 |
+| `app/renderer/src/utils/channel-links.js` | 各渠道的个人中心/用量页链接（`SLOTS`，只读默认值） |
 | `app/renderer/src/views/Providers.vue` | `type === 'channel'` 只读展示：只允许改显示名与推理档位 |
 | `app/renderer/src/utils/models.js` | 渠道模型的展示名带渠道前缀（`provider · name`） |
 

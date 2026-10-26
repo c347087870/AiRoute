@@ -2,6 +2,42 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 变更
+
+- **应用内更新分两条线路，beta 与正式互不可见**：客户端按**自己的版本号**判定线路 —— 带 `beta` / `rc` / `alpha` / `next` / `dev` 标识的构建走 **beta 线**，其余走**正式线**。正式线只查正式发布（`/releases/latest` 的口径，天然不含 pre-release），beta 线只查 pre-release（自己拉 `/releases` 列表挑），两边永远拿不到对方的版本号。线路判定写在 `server/update.js` 的 `releaseLine`：只认那几个「试跑标识」，`v1.6.1-macos.1` 这类当年按正式版发的制品标记仍算正式线。`AIROUTE_UPDATE_LINE=beta|stable` 可强制覆盖，仅供排障
+- **版本比较改成完整 semver**：原来的 `compareVersion` 砍掉预发布后缀再比，`2.0.0-beta.2` 与 `2.0.0-beta.3` 会被判成同一个版本 —— beta 线因此永远发现不了更新。现在用 `compareSemver`（数字段 + 预发布标识按 semver 规则排序，`2.0.0-beta.10 > 2.0.0-beta.2`，正式版高于同号预发布）
+- **beta 版直接发布为 pre-release，不再建草稿**：草稿对匿名调用完全不可见（`/releases` 列表不出现、资产下载一律 404），beta 客户端根本查不到它。`release.yml` 改为：正式版仍是草稿 + 人工 Publish，带 `-` 后缀的 beta 版直接 `gh release create --prerelease`。beta 客户端因此在 CI 跑完后立刻能收到新包，不必等人去网页点 Publish
+- **beta 线排除草稿 Release**：草稿的 tag 页虽然能打开（200），但它的 dmg / exe / `SHA256SUMS.txt` 下载全是 404 —— 选中它等于让用户看到「有新版本」却永远下不动。`pickRelease` 硬性排除 `draft`，并优先挑确实带资产的版本
+- **「关于与更新」显示当前线路**：版本行多一枚徽标，beta 线显示「beta 线」（黄色），正式线显示「正式线」（绿色）。线路由服务端 `/api/system/status` 与 `/api/update/check` 一并返回，判定只有服务端一处说了算
+
+- **渠道账号页移除「设置个人中心链接」齿轮**：三张卡操作行右端那枚齿轮连同一整套链接编辑能力一起删掉 —— 齿轮是 `ChannelLinkEditor` 的唯一入口，只删按钮会留下一段再也没有入口的死代码。链接改为**只读内置默认值**（`utils/channel-links.js` 的 `SLOTS`，只放确证过的官方域名），账号行的 ↗ 明细按钮直接取默认值打开浏览器，不再读 localStorage 覆盖值。随之删掉 `components/ChannelLinkEditor.vue`、`channel-links.js` 的 `readCustomLinks` / `saveCustomLinks` / `linkKeyOf`，以及页面里的 `linkEditor` / `customLinks` 状态与 `toggleLinkEditor` / `saveLinks` / `resetLinks` / `linkValuesOf` 四个函数
+- **签到过的账号按钮置灰**：账号行的「签到」在当天已签到时变成「已签」并禁点（悬停显示签到时间），WorkBuddy 与 TRAE 两张卡同构。原先 TRAE 侧只有内存里的即时结论、没有落盘，因此刷新后按钮又变回可点：现在由插件把 `lastCheckinDay` 记进 `trae-accounts.json`，账号行报出与 WorkBuddy 同名的 `checkinDone` / `lastCheckinAt`，判据是**自然日**（跨零点自动失效）。只有「领到了」与「上游说今天已签过」才记，签到失败不记 —— 否则按钮会灰一整天，用户明明没签成却点不动。签到后页面立即重读账号列表，不用等下一轮 5 秒轮询
+- **区域文案统一为「国内版 / 国际版」**：Qoder 那一区的「中国版」改成「国内版」，与 WorkBuddy 卡同名同写法 —— 同一个概念在一张卡上叫「国内版」、在另一张上叫「中国版」，用户得先想一下才敢确认两处说的是不是同一件事。改动覆盖账号行的区域标签、操作行的区域下拉（`国内版（qoder.cn）`）、模型页分组名、`channel-links.js` 的槽位标签、插件清单与 `protocol.PRODUCTS` 的 `displayName`、`channels:verify` 的展示名表与 `channels` skill 的说明。站点域名（qoder.com / qoder.cn）与 provider id（`qoder` / `qodercn`）都不动：前者是上游事实，后者是已落盘的凭据键与统计引用，改名会让历史账号与用量对不上
+- **渠道账号页收掉余额与卡片内的批量入口**：账号行的「余额」、WorkBuddy 卡操作行的「全部签到 / 刷新余额」、Qoder 与 TRAE 卡操作行的「领取积分 / 余额」一并移除，签到统一走页顶的「一键签到」与账号行的「签到」。原来「每张卡都画、不支持的置灰」是为了让各卡操作行等长、也能看出「这家没有这个功能」，代价是 Qoder 两家那两枚按钮永远点不动；批量入口只剩一处之后，卡内不再重复一套。随之删掉 `creditBusy` / `balances` 两个状态与 `balanceAccount` / `loadBalances` / `claimCredits` / `wbBalance` / `wbCheckinAll` / `wbRefreshBalances` 六个函数，卡片结果区只保留签到结果
+- **状态面板加时间维度切换（当日 / 本月 / 近三月 / 本年）**：顶部一排分段控件，切档后「请求数」卡与「用量概览」一起换口径 —— 页面上的数字必须属于同一个区间，否则请求数与 Token 用量各说各话。原来固定「今天 / 本月」两栏对照，两栏还要靠 `subgrid` 对齐行轨道；现在一档只显示一份，subgrid 与中间分隔线一并删掉。近三月是**本月 + 往前两个自然月**（滚动三个月），本年从 1 月 1 日起，两个口径都写在切换控件右侧，避免被读成「近 90 天 / 近 365 天」。数据来自新端点 `GET /api/token-stats/range`（一次取回四档）：**月维度一律用月汇总桶求和**，不把按日明细加起来 —— 按日只留 35 天，月初用日明细算「本月」会少一截。`server/token-stats.js` 的月桶保留期因此独立出来（24 个月，跟着「本年 + 近三月」走），按日 / 按小时仍是 35 天
+- **TRAE / Qoder / Qoder 国内版改为可安装的渠道插件**：三家不再是宿主里的硬编码分支，而是 `server/channels/plugins/` 下的插件包。`plugin-host.js` 按清单（`channels-plugins.json`）发现并加载，建立 provider 索引；`owned/runtime.js` 只剩聚合逻辑，全文不含任何 provider 名字。加一家渠道 = 新建 `plugins/<id>/`（导出 `{ id, name, providers, checkinProviders, create(ctx) }`）+ 在 `plugin-store.js` 的 `BUILTIN_PLUGINS` 登记一项
+- **插件凭据由宿主注入**：新增 `plugin-api.js`，插件拿到的 `ctx` 是显式的 `{ dataDir, logger, credentials, loginServer }`，不再 `require('../shared/accounts')`。装进来的第三方包因此不能绕过宿主直接读明文凭据（`channels:verify` 有断言盯着）
+- **装 / 卸 / 启停**：新增 `GET|POST /api/channels/plugins` 与 CLI `node scripts/channels-plugin.js {list,add,remove,enable,disable}`。动作后自动重建运行时并重同步模型目录，provider 立刻出现或消失。**内置插件只允许停用不允许删除**（删记录下次启动会补回来；删 Qoder 的包会让已登录账号直接读不到目录）。刻意不做在线从 npm 拉包：来源必须是用户显式给的本地路径
+- **渠道数不再写死**：`账号渠道（N 家）` 由 `channelProviderName()` 按运行时 providers 计算，装了第三方插件自动跟着变
+- **失败隔离**：插件读取或初始化失败只影响它自己，`provider.status` 返回 `failures` 说明「声明了但没起来」—— 与「根本没装」是两个可区分的状态
+
+### 修复
+
+- **「关于与更新」的版本号不再显示 `v未检查`**：这一行原来只读更新检查结果（`info.current`），检查更新没成功时（离线、GitHub 不通、静默检查还没跑完）就退化成占位文案，还把 `v` 前缀直接拼在「未检查」前面。版本是本地事实，改为优先取 `GET /api/system/status` 的版本（进页面即得，不依赖联网），检查结果只作兜底；两者都没有时显示 `—`，不再拿一句说明冒充版本号
+
+### 新增
+
+- **开发面板（只在开发模式出现）**：侧边栏新增一级菜单「开发面板」（`/dev`，在「使用教程」之后，带独立终端图标），一屏看到此刻这个进程在跑什么 —— 版本 / 端口 / PID / Node 与平台、数据目录与工作目录、内存与运行时长、渠道运行时与 provider 索引、WorkBuddy 池计数、在途请求、失活明细、数据目录里落盘的文件（名字 / 大小 / 修改时间）与本项目相关的环境变量；每 5 秒自动刷新。数据源是新端点 `GET /api/dev/info`（`server/dev-info.js`）。**两层开关都把得住**：渲染层用 `import.meta.env.DEV`（编译期常量，`vite build` 替换成 false，路由与侧边栏入口连同 `DevPanel.vue` 一起被摇掉 —— 产物里既无入口也无代码）；服务端用 `NODE_ENV !== 'production'`（打包版主进程在 require server 之前就设好了 production），正式版请求该端点回 404。环境变量只回显 `NODE_ENV` / `PORT` / `AIROUTE_*`，不回整份 `process.env`
+- **插件宿主回归** `scripts/test-channel-plugins.js`（8 项，已进 `npm test`）：内置插件默认加载、停用后 provider 消失、初始化失败不拖垮别家、外部插件按路径装入、统一 ABI、内置不可删、文件缺失可读报错、老清单自动补齐
+- **状态面板四档口径回归**（`npm test` 第 18 组）：本月只累计本月、近三月含本月 + 前两个自然月、本年不含去年、四档请求数单调递增；月桶保留期与按日明细解耦（30 个月前的月桶才清，35 天前的按日桶照清）。`smoke-e2e` 另加一项 `/api/token-stats/range` 字段齐备与口径自洽
+- `channels:verify` 扩到 8 项：插件入口与实现齐全、清单与登记一致、源展示名按运行时计算、插件不直连宿主存储
+
+### 测试
+
+- `smoke-e2e` 增 3 项（共 61 项）：开发模式下 `/api/dev/info` 字段齐备且数据目录指向本次临时目录、环境变量只含本项目键、另起一个 `NODE_ENV=production` 网关断言该端点 404 且其它端点不受影响
+
 ## [2.0.0-beta.3] - 2026-10-23
 
 上游对齐版：把「渠道实现必须与上游 `dsh-our-free-model` 一致」从口头约定变成可执行、接进 `npm test` 与 CI 的校验。运行时行为、协议与产物命名均无变化——重新生成的 `business.mjs` 与此前逐字节相同。

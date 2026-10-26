@@ -12,9 +12,9 @@
         <h2>大模型一键接入</h2>
         <p>点按钮复制接入提示词，粘贴给 Claude Code、Codex、Cursor 等任意 AI，它会自己找配置、写入并做连通性自检。提示词里的地址取自本页，端口变了会跟着变；客户端在另一台设备时，按提示词里的说明把 <code>localhost</code> 换成本页的局域网地址。</p>
       </div>
-      <button class="btn-primary copy-prompt-btn" @click="copySetupPrompt">
+      <AppButton variant="primary" class="copy-prompt-btn" @click="copySetupPrompt">
         {{ copyState === 'ok' ? '已复制，去粘贴给 AI' : copyState === 'fail' ? '复制失败，请检查剪贴板权限' : '复制一键接入提示词' }}
-      </button>
+      </AppButton>
     </div>
 
     <div class="tutorial-content">
@@ -56,7 +56,7 @@
         <h2>三、功能详解</h2>
 
         <h3>状态面板</h3>
-        <p>Router 状态、今日 / 近 35 天请求数；Token 用量（输入 / 缓存读 / 缓存写 / 输出）与各模型明细；按 Provider 分组的模型芯片「快速切换」；最近 5 条请求（含耗时、Token、Fallback）。</p>
+        <p>顶部四档时间维度：当日 / 本月 / 近三月 / 本年，切档后请求数、失败数与用量概览一起换口径（近三月是本月 + 往前两个自然月）。Router 状态卡常驻；用量概览给 Token 总计与输入 / 命中缓存 / 输出、缓存命中率，各模型明细与趋势图在「用量统计」页；下方是最近 5 条请求（含耗时、Token）。</p>
 
         <h3>模型切换</h3>
         <p>四处任选，状态实时同步、对所有客户端立即生效：侧边栏底部下拉框、状态面板模型芯片、托盘右键菜单、Provider 页模型芯片上的「切换」。</p>
@@ -98,6 +98,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { getServerConfig } from '../api.js'
 import donateImg from '../assets/donate.jpg' // 打赏二维码图片，构建时由 Vite 处理为相对路径
+import AppButton from '../components/AppButton.vue'
 
 const serverPort = ref(3000) // 当前服务端口，从服务端配置读取，失败时保持默认 3000
 const lanIPs = ref([]) // 本机局域网 IPv4 列表（服务端动态检测，物理网卡优先）
@@ -203,7 +204,7 @@ onMounted(loadConfig)
   padding: 1px 5px;
   border-radius: var(--radius-xs);
   background: var(--tint-neutral);
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 
@@ -290,7 +291,7 @@ onMounted(loadConfig)
   background: var(--bg-code);
   padding: 2px 6px;
   border-radius: var(--radius-xs);
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-small);
   color: var(--primary);
 }
@@ -319,7 +320,7 @@ onMounted(loadConfig)
 }
 
 .info-value {
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-family: var(--font-mono);
   color: var(--primary);
   font-weight: 500;
   font-size: var(--fs-small);

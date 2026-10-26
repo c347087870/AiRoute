@@ -53,7 +53,8 @@ npm run test:e2e
 app/main/        Electron 主进程（窗口、托盘、更新、安装形态判定）
 app/renderer/    Vue 渲染层
 server/          本地 HTTP 服务与上游适配（router / upstream / workbuddy）
-server/channels/ 免费账号渠道包（vendor 的 ESM bundle + worker 线程 + 凭据存储）
+server/channels/ 账号渠道插件宿主（plugin-host / plugin-store / plugin-api）+ plugins/ 下的
+                 TRAE、Qoder 插件包（自有协议实现 + 凭据存储），可装可卸
 scripts/         构建、产物推导、发布自检与测试
 .agents/skills/  Agent Skills
 ```

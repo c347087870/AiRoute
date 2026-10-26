@@ -74,6 +74,8 @@
 > - Windows 安装版：下载 → SHA-256 校验 → 退出应用 → 静默安装 → 自动重启；失败时会重新启动当前版本（Windows 无自动回滚）
 >
 > **Windows 便携版不支持一键升级**：在「设置 → 关于与更新」里手动下载安装包，退出 AiRoute 后替换 exe（想用一键升级请改装安装版）。两类产物看文件名即可区分：安装版 `-setup.exe`，便携版 `-portable.exe`。
+>
+> **更新分两条线路，互不打扰**：正式版（版本号如 `1.9.0`）只查正式发布，预发布版（版本号带 `-beta.x` / `-rc.1` 等标识）只查预发布。beta 客户端看不到正式版，正式版客户端也看不到 beta——「设置 → 关于与更新」里有一枚徽标标明当前在哪条线上。版本号带 `-beta` 的包由 CI 直接发布为 GitHub pre-release（不建草稿），因此 beta 客户端能立刻收到它。
 
 ### 方式二：源码运行
 
@@ -329,6 +331,7 @@ pnpm test       # WorkBuddy 模块 + 一键升级（校验 / 替换 / 回滚 / W
 pnpm test:e2e   # 端到端冒烟测试（本地 mock 上游，覆盖三条协议链路）
 ```
 
+> **开发面板**（只在开发模式出现）：`pnpm dev` / `pnpm dev:web` 下侧边栏一级菜单「开发面板」（在「使用教程」之后），或直接访问 `http://localhost:5173/#/dev`。一屏看到版本 / 端口 / PID、数据目录与工作目录、内存与运行时长、渠道运行时与 provider 索引、WorkBuddy 池计数、在途请求、失活明细、数据目录里落盘的文件与本项目环境变量，每 5 秒自动刷新。数据来自 `GET /api/dev/info`，正式版请求它回 404（服务端按 `NODE_ENV !== 'production'` 判定）；打包产物里连路由与页面代码都没有——`import.meta.env.DEV` 是编译期常量，`vite build` 时被替换成 false，`DevPanel.vue` 随之被摇掉。
 > 产物在 `app/dist-electron/`。exe 只能在 Windows 上构建、dmg 只能在 macOS 上构建（交叉架构可以，跨系统不行）。
 > 架构列表与产物命名以 `electron-builder.json` 的 `target` / `artifactName`（安装版见 `nsis.artifactName`）为准，`scripts/targets.js` 读取它，构建与发布自检不在脚本里另写一份。
 > 打包脚本会自动排除 API Key、WorkBuddy 凭证、个人配置（`state.json` / `server-config.json` 等）与运行数据，产物可放心分发。

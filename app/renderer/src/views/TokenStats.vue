@@ -1,7 +1,7 @@
 <template>
   <div class="token-stats-page">
     <div class="page-toolbar">
-      <button class="btn-danger btn-sm" @click="clearStats" :disabled="loading">清空</button>
+      <AppButton variant="danger" @click="clearStats" :disabled="loading">清空</AppButton>
     </div>
 
     <!-- 时间维度选择 -->
@@ -74,6 +74,18 @@
           <div class="summary-value orange">{{ formatNumber(currentStats.cacheWrite) }}</div>
         </div>
       </div>
+
+      <div class="card summary-card">
+        <div class="summary-icon green">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+          </svg>
+        </div>
+        <div class="summary-content">
+          <div class="summary-label" title="命中缓存 ÷（输入 + 命中缓存），缓存写不计入分母">缓存命中率</div>
+          <div class="summary-value green">{{ formatPercent(cacheHitRate) }}</div>
+        </div>
+      </div>
     </div>
 
     <!-- 趋势图表 -->
@@ -102,7 +114,7 @@
             </div>
             <div class="tooltip-row">
               <span class="tooltip-label">缓存读:</span>
-              <span class="tooltip-value text-purple">{{ formatNumber(tooltip.cacheRead) }}</span>
+              <span class="tooltip-value">{{ formatNumber(tooltip.cacheRead) }}</span>
             </div>
             <div class="tooltip-row">
               <span class="tooltip-label">缓存写:</span>
@@ -212,8 +224,8 @@
             <tr v-for="(stats, model) in modelStats" :key="model">
               <td>{{ model }}</td>
               <td>{{ formatNumber(reqCount(stats)) }}</td>
-              <td class="text-purple font-bold">{{ formatNumber(stats.total) }}</td>
-              <td class="text-purple">{{ formatNumber(stats.cacheRead) }}</td>
+              <td class="font-bold">{{ formatNumber(stats.total) }}</td>
+              <td class="text-muted">{{ formatNumber(stats.cacheRead) }}</td>
               <td class="text-orange">{{ formatNumber(stats.cacheWrite) }}</td>
               <td>
                 <div class="percentage-bar">
@@ -234,19 +246,30 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats, clearTokenStats } from '../api.js'
+import {
+  getTokenStatsByPeriod,
+  getTokenStatsHourly,
+  getTokenStatsCalendar,
+  getTokenStatsRange,
+  getTokenStats,
+  clearTokenStats
+} from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { formatNumber, toLocalDateKey } from '../utils/format.js'
+import { formatNumber, formatPercent, calcCacheHitRate, toLocalDateKey } from '../utils/format.js'
 
-// 时间维度选项
+import AppButton from '../components/AppButton.vue'
+// 时间维度选项：与状态面板同一套日历口径（本日 / 本周 / 本月 / 近三月 / 本年），
+// 另外保留「近三天」这个滚动窗口 —— 它回答的是「这两三天有没有异常」，
+// 和「本周」在周一当天重合、周二起就不一样，两者都需要
 const periods = [
-  { value: 'today', label: '今天（24小时）' },
+  { value: 'today', label: '本日' },
   { value: '3', label: '近三天' },
-  { value: '7', label: '近七天' },
-  { value: '15', label: '近半个月' },
-  { value: '30', label: '近一个月' }
+  { value: 'week', label: '本周' },
+  { value: 'month', label: '本月' },
+  { value: 'quarter', label: '近三月' },
+  { value: 'year', label: '本年' }
 ]
 
 const selectedPeriod = ref('today') // 默认显示今天的小时数据
@@ -271,6 +294,9 @@ const tooltip = ref({
 
 // 当前统计数据
 const currentStats = computed(() => periodData.value.summary || {})
+
+// 缓存命中率：与状态面板同一口径，都走 utils/format.js 的实现
+const cacheHitRate = computed(() => calcCacheHitRate(currentStats.value))
 
 // 图表数据
 // 请求次数口径 = count（有 token 的请求）+ failed（失败请求），与状态面板 /api/stats 一致
@@ -310,14 +336,12 @@ function reqCount(stats) {
 // 模型统计数据
 const modelStats = computed(() => modelStatsData.value.byModel || {})
 
-// 图表标题
+// 图表标题：直接用维度标签，不再用「近 N 天」拼 —— 本周 / 本月这类日历口径
+// 拼出来会是「近week天」这种错字
 const chartTitle = computed(() => {
-  if (selectedPeriod.value === 'today') {
-    return '今日每小时使用趋势'
-  } else {
-    const days = selectedPeriod.value
-    return `近${days}天使用趋势`
-  }
+  const found = periods.find(p => p.value === selectedPeriod.value)
+  const label = found ? found.label : ''
+  return selectedPeriod.value === 'today' ? `${label}每小时使用趋势` : `${label}每日使用趋势`
 })
 
 // SVG 图表配置
@@ -482,9 +506,15 @@ async function selectPeriod(period) {
   await loadPeriodData(period)
 }
 
-// 按字段累加明细，用于把小时明细合成为「今天」的汇总
+// 按字段累加明细，用于把小时明细合成为「本日」的汇总。
+// failed 必须一起加：请求数口径是 count + failed，漏掉它会比状态面板少一截
 function sumBy(list, key) {
   return list.reduce((sum, item) => sum + (Number(item[key]) || 0), 0)
+}
+
+function sumByKeys(list) {
+  const keys = ['input', 'output', 'cacheRead', 'cacheWrite', 'total', 'count', 'failed']
+  return Object.fromEntries(keys.map(key => [key, sumBy(list, key)]))
 }
 
 // 加载时间段数据。silent：轮询触发时不拉 loading（只用于禁用「清空」按钮，
@@ -493,25 +523,21 @@ async function loadPeriodData(period, { silent = false } = {}) {
   if (!silent) loading.value = true
   try {
     if (period === 'today') {
-      // 今天：获取按小时的数据，必须用本地日期键，UTC 日期会与服务端统计口径错开一天
+      // 本日：获取按小时的数据，必须用本地日期键，UTC 日期会与服务端统计口径错开一天。
+      // 汇总与服务端 /range 的 day 用同一口径（带 failed），不在前端自己加 ——
+      // 前端只加 count 会让「请求数」比状态面板少掉失败的那部分
       const today = toLocalDateKey()
-      const hourlyData = await getTokenStatsHourly(today)
-      const details = hourlyData.details || []
+      const [hourlyData, range] = await Promise.all([getTokenStatsHourly(today), getTokenStatsRange()])
       periodData.value = {
-        summary: {
-          input: sumBy(details, 'input'),
-          output: sumBy(details, 'output'),
-          cacheRead: sumBy(details, 'cacheRead'),
-          cacheWrite: sumBy(details, 'cacheWrite'),
-          total: sumBy(details, 'total'),
-          count: sumBy(details, 'count')
-        },
-        details
+        summary: range?.day || sumByKeys(hourlyData.details || []),
+        details: hourlyData.details || []
       }
+    } else if (period === '3') {
+      // 近三天是滚动窗口（含今天往前三段），不是日历边界
+      periodData.value = await getTokenStatsByPeriod(3)
     } else {
-      // 多天：获取按天的数据
-      const days = parseInt(period)
-      periodData.value = await getTokenStatsByPeriod(days)
+      // 本周 / 本月 / 近三月 / 本年：按日历边界取汇总 + 逐天明细
+      periodData.value = await getTokenStatsCalendar(period)
     }
     
     // 同时加载模型统计
@@ -565,10 +591,10 @@ onMounted(() => {
 
 
 
-/* 汇总卡片 */
+/* 汇总卡片：总计 / 输入 / 缓存读 / 缓存写 / 命中率 五张，窄屏逐档降列数 */
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -590,19 +616,22 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.summary-icon.purple {
-  background: var(--tint-purple);
-  color: var(--purple);
-}
-
+/* 图标底一律中性灰：汇总卡是「读数」，不该用品牌紫/蓝去抢注意力；
+   只有橙（缓存写）与绿（命中率）保留语义色，用来区分「需要注意的」与「健康的」 */
+.summary-icon.purple,
 .summary-icon.blue {
-  background: var(--tint-primary-soft);
-  color: var(--primary);
+  background: var(--bg-hover);
+  color: var(--text-2);
 }
 
 .summary-icon.orange {
-  background: var(--tint-warning-soft);
-  color: var(--warning);
+  background: var(--tint-warning);
+  color: var(--warn-text);
+}
+
+.summary-icon.green {
+  background: var(--ok-bg);
+  color: var(--success);
 }
 
 .summary-content {
@@ -611,27 +640,29 @@ onMounted(() => {
 
 .summary-label {
   font-size: var(--fs-xs);
-  color: var(--text-3);
+  color: var(--text-2);
   margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .summary-value {
   font-size: var(--fs-display);
   font-weight: 700;
+  /* 等宽数字：四个汇总卡片并排，位数不同也不会看起来左右错位 */
+  font-variant-numeric: tabular-nums;
 }
 
-.summary-value.purple {
-  color: var(--purple);
-}
-
+/* 主数值用正文色：Token 总量是这一页真正的主角，颜色越少它越突出 */
+.summary-value.purple,
 .summary-value.blue {
-  color: var(--primary);
+  color: var(--text-1);
 }
 
 .summary-value.orange {
-  color: var(--warning);
+  color: var(--warn-text);
+}
+
+.summary-value.green {
+  color: var(--ok-text);
 }
 
 /* 图表区域 */
@@ -763,6 +794,8 @@ onMounted(() => {
   font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
   color: var(--text-1);
+  /* 数字列等宽对齐；模型名里的英文数字同样适用，不影响中文 */
+  font-variant-numeric: tabular-nums;
 }
 
 .model-table th {
@@ -819,3 +852,4 @@ onMounted(() => {
   }
 }
 </style>
+

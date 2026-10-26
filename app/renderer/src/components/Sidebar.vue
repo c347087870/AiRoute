@@ -44,6 +44,13 @@
           <span class="nav-label">{{ item.label }}</span>
         </router-link>
       </template>
+
+      <!-- 新手引导：不是一个页面（没有路由），点了直接开全屏引导浮层。
+          跳过或走完引导后它仍然留在这里 —— 用户下次想复习流程时不必去设置页找 -->
+      <button class="nav-item nav-action" @click="startOnboarding(0)">
+        <span class="nav-icon"><AppIcon name="onboarding" /></span>
+        <span class="nav-label">新手引导</span>
+      </button>
     </div>
 
     <div class="sidebar-footer">
@@ -75,11 +82,16 @@ import AppIcon from './AppIcon.vue'
 import { getHealth } from '../api.js'
 import { useUpdate } from '../composables/useUpdate.js'
 import { useTheme } from '../composables/useTheme.js'
+import { useOnboarding } from '../composables/useOnboarding.js'
+import { isDevMode } from '../utils/dev-mode.js'
 
 const isOnline = ref(false)
 
 // 主题切换（唯一入口，设置页不再重复放一份）
 const { mode: themeMode, setMode } = useTheme()
+
+// 重新打开引导（首次启动时由 App.vue 自动拉起一次，这里管之后再打开）
+const { startOnboarding } = useOnboarding()
 
 // 三种主题模式：图标 + 悬停说明
 const themeOptions = [
@@ -95,10 +107,14 @@ const navItems = [
   { path: '/channels', label: '渠道账号', icon: 'channels', alsoActive: ['/workbuddy'] },
   { path: '/settings', label: '系统设置', icon: 'settings' },
   { path: '/tutorial', label: '使用教程', icon: 'tutorial' },
+  // 开发面板是一级页面而不是收进「高级功能」：它每天都要点开好几次（看端口、
+  // 数据目录、失活原因），埋在两级菜单里要展开再找一次。正式版没有这条路由，
+  // 所以只进开发模式的菜单 —— 否则点进去是空白页
+  ...(isDevMode ? [{ path: '/dev', label: '开发面板', icon: 'dev' }] : []),
   {
     // 一级分组放在最后：低频但需要保留入口的页面收进这里，避免侧边栏越来越长
     key: 'advanced',
-    label: '高级',
+    label: '高级功能',
     icon: 'advanced',
     children: [
       { path: '/routing', label: '路由规则' },
@@ -171,8 +187,8 @@ onMounted(() => {
 
 <style scoped>
 .sidebar {
-  width: 220px;
-  min-width: 220px;
+  width: 244px;
+  min-width: 244px;
   background: var(--bg-card);
   border-right: 1px solid var(--border-1);
   display: flex;
@@ -181,54 +197,59 @@ onMounted(() => {
 }
 
 .sidebar-header {
-  padding: 24px 16px 16px;
-  border-bottom: 1px solid var(--border-2);
+  min-height: 56px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-1);
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
 .logo {
-  font-size: var(--fs-lg);
-  font-weight: 700;
-  color: var(--primary);
-  letter-spacing: 0.5px;
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--text-1);
+  letter-spacing: -0.035em;
 }
 
+/* 侧栏菜单是全站唯一的「大号菜单」：36px 高、13px 字，比紧凑的小号按钮大一档，
+   扫视整列时不会挤成一片 */
 .nav-items {
   flex: 1;
-  padding: 10px 10px;
+  padding: 16px 10px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 14px;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px;
   border-radius: var(--radius-md);
   color: var(--text-2);
   text-decoration: none;
-  font-size: var(--fs-base);
+  font-size: 14px;
+  font-weight: 450;
   transition: all 0.15s;
 }
 
 .nav-item:hover {
   color: var(--text-1);
-  background: var(--bg-page);
+  background: var(--bg-hover);
 }
 
 .nav-item.active {
-  color: var(--primary);
-  background: var(--primary-bg);
-  font-weight: 500;
+  color: var(--text-1);
+  background: var(--bg-hover);
+  font-weight: 550;
 }
 
 .nav-icon {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   flex: none;
   display: flex;
   align-items: center;
@@ -243,10 +264,20 @@ onMounted(() => {
   text-align: left;
 }
 
+/* 「新手引导」：动作按钮与导航项同一套外观。button 默认居中、
+   自带字重与内边距，这里全部对齐 .nav-item 的链接，否则它比上面几项矮一截 */
+.nav-action {
+  width: 100%;
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+
 .nav-arrow {
   margin-left: auto;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   flex: none;
   color: var(--text-3);
   transition: transform 0.15s;
@@ -258,7 +289,7 @@ onMounted(() => {
 
 /* 二级菜单：左侧竖线 + 缩进表示层级，子项不再带图标（220px 宽放不下） */
 .nav-children {
-  margin: 2px 0 2px 24px;
+  margin: 2px 0 2px 26px;
   padding-left: 8px;
   border-left: 1px solid var(--border-2);
   display: flex;
@@ -266,9 +297,11 @@ onMounted(() => {
   gap: 2px;
 }
 
+/* 二级项比一级略矮一档，字号同样取 13px */
 .nav-child {
-  padding: 8px 12px;
-  font-size: var(--fs-small);
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 /* 当前路由落在组内时，父项只变色不铺底色：底色留给真正所在的子项，
@@ -280,8 +313,8 @@ onMounted(() => {
 }
 
 .sidebar-footer {
-  padding: 14px;
-  border-top: 1px solid var(--border-2);
+  padding: 12px;
+  border-top: 1px solid var(--border-1);
 }
 
 .update-bar {
@@ -314,19 +347,22 @@ onMounted(() => {
 .theme-switch {
   display: flex;
   gap: 2px;
-  padding: 2px;
-  background: var(--bg-page);
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-sm);
+  padding: 3px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
 }
 
+/* 三格分段按钮与 SegmentedTabs 同一套观感：选中项浮起一层卡片色 */
 .theme-btn {
   flex: 1;
-  padding: 4px 0;
+  height: 24px;
+  padding: 0;
   background: transparent;
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: var(--fs-small);
-  line-height: 1.4;
+  line-height: 1;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
 }
 
@@ -336,7 +372,8 @@ onMounted(() => {
 
 .theme-btn.active {
   background: var(--bg-card);
-  color: var(--primary);
+  color: var(--text-1);
+  border-color: var(--border-1);
   box-shadow: var(--shadow-card);
 }
 </style>

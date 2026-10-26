@@ -1,75 +1,86 @@
-# server/channels — 十个账号渠道的来源与再生成
+# server/channels — 渠道的来源与实现
 
-本目录让 AiRoute 具备 LobsterAI、Qoder、Qoder 中国版、TRAE、Cline、Loomy、
-Raccoon、MiniMax Code、ZCode、Gemini 十个账号渠道的登录、账号池、积分领取、
-模型黑名单与推理能力。**渠道实现本身不是本项目写的**，来源与许可如下。
+本目录让 AiRoute 具备 **TRAE**、**Qoder**、**Qoder 国内版** 三个账号渠道的登录、
+账号池、模型目录与推理。这三个渠道是**插件**（`plugins/` 下各一个包），
+由宿主发现并加载；WorkBuddy 两区不走这里（见下文「与 WorkBuddy 的分工」）。
 
-- 上游作者：Jet（<https://gitee.com/iJetLi>）
-- 许可证：MIT（见同目录 `LICENSE`，版权声明随代码一并保留）
-- 本项目经 `dsh-our-free-model` 的再打包产物引入：
-  该仓库吸收了上游实现（提交 `345f0a07b22713c0ae189ca7d8b97ec4f64626c6`，
-  2026-10-06），并提供了脱离宿主运行的 shim（`packages/standalone/channels/`）。
-
-## 目录内容
+实现都在本仓库内，**没有打包产物**：
 
 | 路径 | 来源 | 说明 |
 | --- | --- | --- |
-| `business.mjs` | **生成产物** | 由 `scripts/build-channels.js` 从 `dsh-our-free-model/vendor/channel-pack/pack.js` 转换而来（2.3 MB ESM）。改渠道行为要回上游改源码后重跑脚本，**不要手改** |
-| `qoder-auth-wasm.wasm` | 上游 | Qoder 加密推理所需的 WASM，必须与 `business.mjs` 同目录（产物按 `import.meta.url` 定位它） |
-| `contracts.mjs` | OFM standalone | `@deepseek-ai/{cordis,dsh-credentials,dsh-llm}` 的形状替身：`LlmAdapter` 基类、`LlmError`、`ReasoningEffortId` 等 |
-| `credentials.mjs` | OFM standalone | `ctx.credentials` 的文件实现：`channel-credentials.json`（0600，明文，与 `server/workbuddy-auths/` 同口径） |
-| `images.mjs` | OFM standalone | `ctx.attachments`：图片读取与尺寸上限 |
-| `worker.mjs` | 本项目改自 OFM standalone | 渠道包的宿主 `ctx`（credentials / llm / attachments / effect / inject / emit / connection.fetch）与 `models`/`rpc`/`complete` 三个操作 |
-| `runtime.js` | 本项目 | 主进程侧的 worker 宿主：调用转发、目录缓存、可重入关停 |
-| `sse.js` | 本项目 | 渠道 chunk → OpenAI Chat 的帧映射与用量口径换算 |
-| `index.js` | 本项目 | CJS 门面：`init` / `getRuntime` / `refreshModels` / `rpc` / `shutdown` |
+| `plugins/trae/index.js` | 本项目 | TRAE 插件清单 + ABI 适配 + 旧账号认领 |
+| `plugins/trae/protocol.js` | 本项目 | TRAE 协议常量、凭据、请求头、OpenAI → SOLO 请求体、目录解析（纯函数，可离线单测） |
+| `plugins/trae/provider.js` | 本项目 | TRAE 的登录回调控件、续期、选号、补全、签到、积分 |
+| `plugins/qoder/index.js` | 本项目 | Qoder 插件清单（一个包两个 provider）+ ABI 适配 |
+| `plugins/qoder/protocol.js` | 本项目 | Qoder 产品配置、PKCE 设备码登录、续期、信封剥离 |
+| `plugins/qoder/wasm.js` | 上游 WASM + 本项目桥 | `qoder-auth-wasm.wasm` 的 wasm-bindgen 桥：构造加密请求 |
+| `plugins/qoder/qoder-auth-wasm.wasm` | Qoder 桌面端 | 加密推理所需的算法产物，必须与 `wasm.js` 同目录 |
+| `plugins/qoder/provider.js` | 本项目 | Qoder 的设备码轮询登录、选号、加密补全 |
+| `plugin-host.js` | 本项目 | 发现 / 加载插件、建 provider 索引、生命周期与失败隔离 |
+| `plugin-store.js` | 本项目 | 插件清单（`channels-plugins.json`）：装了什么、开没开 |
+| `plugin-api.js` | 本项目 | 宿主交给插件的 `ctx`（dataDir / logger / 凭据 / 登录回调）与 ABI 校验 |
+| `owned/runtime.js` | 本项目 | 把插件聚合为面板认识的那一套接口（目录 / RPC / 补全），**不含任何 provider 名字** |
+| `shared/accounts.js` | 本项目 | 凭据读写（`channel-credentials.json`）与账号标识 |
+| `shared/login-server.js` | 本项目 | 登录回调用的临时本地监听（TRAE 用） |
+| `sse.js` | 本项目 | 内部 chunk → OpenAI Chat 的帧映射与用量口径换算 |
+| `index.js` | 本项目 | CJS 门面：`init` / `getRuntime` / `refreshModels` / `rpc` / `reloadPlugins` / `shutdown` |
 
-## 与 OFM standalone 版的差异
+## 插件约定
 
-转换脚本对上游产物做了 5 处改写，都是为了在 AiRoute 里当库用：
+- **清单在代码里**：`plugins/<id>/index.js` 导出 `{ id, name, providers, checkinProviders, create(ctx) }`。
+  没有单独的 `plugin.json` —— 多一份 JSON 就多一种「清单与代码不同步」的状态。
+- **能力靠方法存在与否判断**：没有 `balance` 就是「这家不提供余额」，宿主回「未开通」，
+  而不是按 provider 名写死分支。
+- **统一 ABI**：按 provider 分派的方法第一个参数是 provider（一个包可以带多家，
+  Qoder 就是 `qoder` + `qodercn`）。插件入口负责适配到自家后端的签名。
+- **凭据与登录回调由宿主注入**（`ctx.credentials` / `ctx.loginServer`）。插件里
+  **不许** `require('../shared/...')` —— 那等于换了个目录的宿主代码，装进来的第三方包
+  就能直接摸明文凭据。`scripts/verify-channels.js` 有一条断言盯着这件事。
+- **内置插件不可删、只可停用**：删掉记录下次启动会补回来，用户会以为没生效；
+  而删掉 `qoder` 的包会让已登录账号直接读不到目录。
+- **装/卸/启停之后重建运行时**：provider 集合由清单算出来（`channels.reloadPlugins()`）。
 
-1. **去掉宿主自带网关与 loop 续跑**（`mountOpenAiGateway` / `installLoopResume`）：
-   AiRoute 自己就是统一网关，多开一个监听端口只会多一把 key、多一段排查链路。
-2. **数据目录由宿主注入**（`ctx.platform.channelHome`）：不读 DSH 的 home，
-   落到 `<AIROUTE_DATA_DIR>/channels-data/`（已 gitignore，且不进安装包）。
-3. **WASM 改成与产物同目录**：`server/` 是整目录复制的，同目录才能一起分发。
-4. **删掉 schemastery schema**：那是宿主设置页用的，AiRoute 用自己的 Vue 面板。
-5. **`@deepseek-ai/*` 改指 `./contracts.mjs`**：宿主服务在这里由 shim 提供。
+## 协议来源
 
-`worker.mjs` 另有一处差异：不再依赖 OFM 的 `src/messages.js` —— AiRoute 的
-请求体在 HTTP 层就收敛成 OpenAI Chat 形态（Anthropic / Responses 由
-`server/workbuddy/{anthropic,responses}.js` 转换），worker 只做协议到
-`GenerateOptions` 的映射。
+- **TRAE**：trae2api / traework2api 的逆向分析；与 `dsh-our-free-model` 的
+  `vendor/channel-pack/src/trae*.ts` 逐条对齐（那份实现经过大量实测修正）。
+- **Qoder**：Qoder 0.3.4 桌面端逆向；与 `dsh-our-free-model` 的
+  `vendor/channel-pack/src/qoder*.ts` 对齐。加密推理调用的是 Qoder 自带的
+  `qoder_auth_wasm` —— 按 wasm-bindgen 约定接起来直接调用，没有剥离任何混淆。
+- 两家的授权许可见同目录 `LICENSE`。
 
-## 再生成
+## 与渠道包的关系（已移除）
 
-```bash
-# ① 只有改了上游源码才需要重建 pack.js
-(cd vendor/dsh-our-free-model && pnpm channel-pack)
+之前的实现把十个渠道打成一个 2.6 MB 的 `business.mjs`，由 worker 线程跑一套
+模拟的 cordis 宿主。那份产物**不可读也不可审**，判断「某家到底发了什么请求」
+只能回上游源码。现在每个渠道就是一个普通模块，`scripts/verify-channels.js`
+校验清单与实现是否自洽，测试直接调协议函数，不需要 mock 宿主。
 
-# ② 生成 AiRoute 的产物
-OFM_CHANNEL_PACK=vendor/dsh-our-free-model/vendor/channel-pack/pack.js \
-  node scripts/build-channels.js
+旧数据不需要迁移操作：账号凭据仍在 `<AIROUTE_DATA_DIR>/channels-data/channel-credentials.json`，
+键名与格式都没变（`TRAE_ACCOUNT_<8 位>` / `QODER_ACCOUNT_<8 位>` / `QODERCN_ACCOUNT_<8 位>`）。
+启动时 `owned/runtime.js` 的 `importLegacyAccounts()` 会调各插件的 `importLegacy()`
+按凭据文件补出账号清单，所以升级后账号与登录态原样都在，不需要重新登录。
 
-# ③ 校验：产物逐字节等于上游改写结果 + 渠道清单四处对齐
-npm run channels:verify
-```
+> ⚠️ 账号 id 的后缀来自**凭据键名**，不是按 uid 重新 hash —— 两者可能不同
+> （实测旧文件里 `TRAE_ACCOUNT_45AB04E0` 的 uid 是 `15814148757308`）。
+> 重算会让迁移过来的账号读不到凭据，表现就是「登录态全丢」。
 
-脚本对每处替换都要求「唯一命中」：上游改了产物形状会立刻失败，而不是静默
-产出一个能加载、直到某个渠道登录时才炸的文件。产物头部记录了源 `pack.js`
-的 SHA256，便于核对引入的是哪一版。
+## 与 WorkBuddy 的分工
 
-改写规则本身在 `scripts/channel-pack-transform.js`（生成与校验共用一条管线），
-`scripts/verify-channels.js` 用它重跑一遍并与磁盘上的 `business.mjs` 逐字节比对，
-因此手改产物、上游换了产物没重跑、面板/CLI/账号链接漏登记渠道，都会被它抓出来。
-这条校验已挂在 `npm test` 末尾；没有子模块的机器（含 CI 浅检出）会打印「跳过」，
-**跳过不等于通过**。
+WorkBuddy 的账号池、会话、调度器、任务体系都在 `server/workbuddy/`（主进程），
+它有 40+ 个专用接口 `/api/workbuddy/*`。本目录只为它注册**目录**，补全在
+`router.js` 里直接交给 `forwardChat`：
+
+> 若绕进渠道适配器再转回 OpenAI，等于两次有损转换（工具调用、思考帧、图片都会
+> 掉字段），换来的只是「走了一遍适配器」。
 
 ## 注意
 
-- `business.mjs` 是压缩后的单文件产物，**不可读也不可审**。要判断某条行为，
-  以上游 `src/*.ts` 为准（同一提交）；产物与源码不一致时以源码为准并重跑脚本。
-- 渠道包会在启动后自动签到、按定时任务领取积分，属预期行为（日志前缀
-  `[channel-pack]`）。
-- 未登录任何账号时渠道包不播报模型，因此 `channels` Provider 会是空模型列表，
-  这是设计而非故障。
+- Qoder 的推理端点有**排队**（业务码 `10605`）：服务端会给出
+  `retryAfterSeconds`，本实现按它等待后重发。按普通错误快退避重试是等不到的。
+- Qoder 的加密端点只认**目录 key**（`qfmodel` / `dmodel`），公开端点只认通用名，
+  两者不能互换；两个端点的 host 也不同。
+- 未登录任何账号时渠道不播报模型，因此 `channels` Provider 在全新环境下是空列表，
+  这是设计而不是故障。
+- TRAE 的 `machine_id` / `device_id` 必须持久化：前者是设备身份（每次换可能触发
+  风控），后者是签到设备号（同一天两个账号共用会被判「该设备已签到」）。

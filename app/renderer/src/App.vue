@@ -21,22 +21,41 @@
       </div>
     </main>
   </div>
+  <!-- 可见性必须绑到顶层的裸 ref（下面解构出来的 open）：
+       useOnboarding() 返回的是普通对象，setupState 的 ref 解包只走第一层，
+       onboarding.open 在模板里拿到的是 ref 对象本身 —— 恒 truthy，v-if 永远
+       关不掉，点「跳过」只是把 localStorage 写了，浮层照样盖着 -->
+  <OnboardingGuide v-if="open" @close="closeOnboarding" @finish="finishOnboarding" />
   <ToastHost />
 </template>
 
 <script setup>
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import BackButton from './components/BackButton.vue'
 import ToastHost from './components/ToastHost.vue'
+import OnboardingGuide from './components/OnboardingGuide.vue'
 import { useTheme } from './composables/useTheme.js'
 import { getPageActions } from './composables/usePageActions.js'
+import { useOnboarding } from './composables/useOnboarding.js'
 
 const route = useRoute()
+const router = useRouter()
 const actions = getPageActions()
 
 // 尽早应用主题：index.html 的首屏脚本已先铺一次，这里接管后续的切换与系统变化监听
 useTheme().initTheme()
+
+// 启动引导：首次启动自动弹出一次；关掉（跳过）与走完的区别只有「记不记完成」，
+// 由这里统一处理，引导组件本身只负责发事件。
+// open 单独解构到顶层是为了让模板拿到的是解包后的布尔值（见模板注释）
+const { open, launchIfFirstRun, closeOnboarding, finishOnboarding: markOnboardingDone } = useOnboarding()
+launchIfFirstRun()
+
+function finishOnboarding({ openSettings } = {}) {
+  markOnboardingDone()
+  if (openSettings) router.push('/settings')
+}
 </script>
 
 <style>
@@ -47,86 +66,97 @@ useTheme().initTheme()
   color-scheme: light;
 
   /* 品牌色 */
-  --primary: #0082FC;
-  --primary-hover: #006FDB;
-  --primary-bg: rgba(0, 130, 252, 0.08);
-  --primary-bg-hover: rgba(0, 130, 252, 0.14);
-  --primary-text: #1976D2;
+  --primary: #18181b;
+  --primary-hover: #27272a;
+  --primary-bg: #f4f4f5;
+  --primary-bg-hover: #e4e4e7;
+  --primary-text: #27272a;
 
   /* 语义色 */
-  --success: #00B578;
-  --danger: #FF3B30;
-  --danger-hover: #E0342B;
-  --warning: #FF9500;
-  --warning-text: #B45309;
-  --purple: #9C27B0;
-  --purple-text: #7B1FA2;
-  --purple-border: #D6BCFA;
+  --success: #16a34a;
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --warning: #d97706;
+  --warning-text: #92400e;
+  --purple: #7c3aed;
+  --purple-text: #6d28d9;
+  --purple-border: #ddd6fe;
 
   /* 状态色（账号池 / 检测结果）：文字色与底色成对使用 */
-  --ok-text: #16A34A;
-  --ok-bg: #ECFDF5;
-  --warn-text: #D97706;
-  --warn-bg: #FFFBEB;
-  --bad-text: #DC2626;
-  --bad-bg: #FEF2F2;
+  --ok-text: #15803d;
+  --ok-bg: #f0fdf4;
+  --warn-text: #a16207;
+  --warn-bg: #fefce8;
+  --bad-text: #b91c1c;
+  --bad-bg: #fef2f2;
 
   /* 文本色：由深到浅四级 + 场景补充（弱化说明 / 等宽值 / 正文） */
-  --text-1: #1A1A1A;
-  --text-2: #666666;
-  --text-3: #999999;
-  --text-4: #CCCCCC;
-  --text-body: #444444;
-  --text-strong: #555555;
-  --text-weak: #B0B0B0;
-  --text-faint: #C0C0C0;
+  --text-1: #09090b;
+  --text-2: #52525b;
+  --text-3: #71717a;
+  --text-4: #a1a1aa;
+  --text-body: #3f3f46;
+  --text-strong: #3f3f46;
+  --text-weak: #71717a;
+  --text-faint: #a1a1aa;
 
   /* 背景与边框 */
-  --bg-page: #F5F5F5;
-  --bg-card: #FFFFFF;
-  --bg-elevated: #FFFFFF;
-  --bg-hover: #FAFAFA;
-  --bg-subtle: #FAFCFF;
-  --bg-inset: #F8F8F8;
-  --bg-chip: #EEF3FA;
-  --bg-code: #F0F4F8;
-  --bg-note: #EEF6FF;
-  --border-1: #EEEEEE;
-  --border-2: #F0F0F0;
-  --border-3: #E0E0E0;
+  --bg-page: #fafafa;
+  --bg-card: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #f4f4f5;
+  --bg-subtle: #fafafa;
+  --bg-inset: #f4f4f5;
+  --bg-chip: #f4f4f5;
+  --bg-code: #f4f4f5;
+  --bg-note: #f4f4f5;
+  --border-1: #e4e4e7;
+  --border-2: #e4e4e7;
+  --border-3: #d4d4d8;
 
   /* 浅色底：徽标 / 提示块 / 高亮行 */
-  --tint-primary: #F0F7FF;
-  --tint-primary-soft: #E3F2FD;
-  --tint-success: #E6F7F0;
-  --tint-success-soft: #F3FDF8;
-  --tint-danger: #FFEBEA;
-  --tint-warning: #FFF7ED;
-  --tint-warning-soft: #FFF3E0;
-  --tint-purple: #F3E5F5;
-  --tint-purple-soft: #F6EEF8;
-  --tint-neutral: rgba(0, 0, 0, 0.06);
+  --tint-primary: #f4f4f5;
+  --tint-primary-soft: #f4f4f5;
+  --tint-success: #f0fdf4;
+  --tint-success-soft: #f7fef8;
+  --tint-danger: #fef2f2;
+  --tint-warning: #fffbeb;
+  --tint-warning-soft: #fefce8;
+  --tint-purple: #f5f3ff;
+  --tint-purple-soft: #faf8ff;
+  --tint-neutral: rgba(24, 24, 27, 0.06);
 
   /* 遮罩与阴影 */
-  --overlay: rgba(0, 0, 0, 0.35);
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
-  --shadow-hover: 0 2px 10px rgba(0, 0, 0, 0.05);
-  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --overlay: rgba(9, 9, 11, 0.5);
+  --shadow-card: 0 1px 2px rgba(9, 9, 11, 0.04);
+  --shadow-hover: 0 2px 6px rgba(9, 9, 11, 0.08);
+  --shadow-pop: 0 8px 24px rgba(9, 9, 11, 0.12);
 
   /* 滚动条 */
-  --scrollbar-thumb: #D0D0D0;
-  --scrollbar-thumb-hover: #B0B0B0;
+  --scrollbar-thumb: #d4d4d8;
+  --scrollbar-thumb-hover: #a1a1aa;
 
   /* 图表 */
-  --chart-grid: #E0E0E0;
-  --chart-active: #FF5722;
+  --chart-grid: #e4e4e7;
+  --chart-active: #52525b;
 
   /* 圆角阶梯：4 标签/徽标 · 8 小控件 · 10 卡片与按钮 · 14 大面板 · pill 胶囊 */
   --radius-xs: 4px;
-  --radius-lg: 14px;
-  --radius-md: 10px;
-  --radius-sm: 8px;
-  --radius-pill: 20px;
+  --radius-lg: 8px;
+  --radius-md: 6px;
+  --radius-sm: 5px;
+  --radius-pill: 999px;
+
+  /* 字体栈：不打包字体文件，只用各平台自带字体拼回退顺序。
+     西文先走 system-ui（macOS 出 SF、Windows 出 Segoe UI），中文紧跟 PingFang SC /
+     Microsoft YaHei，避免一段文字里中英各挑一套字体。等宽只留这一份，
+     表格里的时间与 Token 靠 tabular-nums 对齐，不靠字体本身的宽度凑齐。
+     以前 body 上写的 'MiSans' 既没随包发布也没人安装，等于白写一层回退，
+     这里去掉，让生效的栈和写出来的一致。 */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans CJK SC', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
 
   /* 字号阶梯：24 大数字 · 22 页面标题 · 18 面板标题 · 16 区块标题 ·
      14 正文 · 13 次要 · 12 辅助 · 11 标签 */
@@ -144,71 +174,71 @@ useTheme().initTheme()
 html[data-theme='dark'] {
   color-scheme: dark;
 
-  --primary: #0082FC;
-  --primary-hover: #2A93FF;
-  --primary-bg: rgba(0, 130, 252, 0.18);
-  --primary-bg-hover: rgba(0, 130, 252, 0.28);
-  --primary-text: #64B5F6;
+  --primary: #fafafa;
+  --primary-hover: #e4e4e7;
+  --primary-bg: #27272a;
+  --primary-bg-hover: #3f3f46;
+  --primary-text: #e4e4e7;
 
-  --success: #00B578;
-  --danger: #FF453A;
-  --danger-hover: #E0342B;
-  --warning: #FF9500;
-  --warning-text: #FBBF24;
-  --purple: #C77DE0;
-  --purple-text: #C79BE8;
-  --purple-border: #6D4A9E;
+  --success: #4ade80;
+  --danger: #f87171;
+  --danger-hover: #ef4444;
+  --warning: #fbbf24;
+  --warning-text: #fcd34d;
+  --purple: #c4b5fd;
+  --purple-text: #c4b5fd;
+  --purple-border: #5b4b85;
 
-  --ok-text: #4ADE80;
-  --ok-bg: rgba(34, 197, 94, 0.16);
-  --warn-text: #FBBF24;
-  --warn-bg: rgba(217, 119, 6, 0.18);
-  --bad-text: #F87171;
-  --bad-bg: rgba(220, 38, 38, 0.18);
+  --ok-text: #86efac;
+  --ok-bg: rgba(34, 197, 94, 0.12);
+  --warn-text: #fcd34d;
+  --warn-bg: rgba(234, 179, 8, 0.12);
+  --bad-text: #fca5a5;
+  --bad-bg: rgba(239, 68, 68, 0.12);
 
-  --text-1: #E8EAED;
-  --text-2: #A8ADB6;
-  --text-3: #7D828C;
-  --text-4: #5A5F68;
-  --text-body: #C4C8D0;
-  --text-strong: #B6BAC3;
-  --text-weak: #8A8F99;
-  --text-faint: #6E737D;
+  --text-1: #fafafa;
+  --text-2: #a1a1aa;
+  --text-3: #a1a1aa;
+  --text-4: #71717a;
+  --text-body: #d4d4d8;
+  --text-strong: #e4e4e7;
+  --text-weak: #a1a1aa;
+  --text-faint: #71717a;
 
-  --bg-page: #141518;
-  --bg-card: #1C1D22;
-  --bg-elevated: #26272E;
-  --bg-hover: #22232A;
-  --bg-subtle: #1F2128;
-  --bg-inset: #17181C;
-  --bg-chip: #2A2D36;
-  --bg-code: #2A2D36;
-  --bg-note: #1E2A3A;
-  --border-1: #2A2C33;
-  --border-2: #26282F;
-  --border-3: #353841;
+  --bg-page: #09090b;
+  --bg-card: #09090b;
+  --bg-elevated: #18181b;
+  --bg-hover: #18181b;
+  --bg-subtle: #18181b;
+  --bg-inset: #18181b;
+  --bg-chip: #27272a;
+  --bg-code: #18181b;
+  --bg-note: #18181b;
+  --border-1: #27272a;
+  --border-2: #27272a;
+  --border-3: #3f3f46;
 
-  --tint-primary: rgba(0, 130, 252, 0.16);
-  --tint-primary-soft: rgba(0, 130, 252, 0.22);
-  --tint-success: rgba(0, 181, 120, 0.16);
-  --tint-success-soft: rgba(0, 181, 120, 0.1);
-  --tint-danger: rgba(255, 69, 58, 0.16);
-  --tint-warning: rgba(255, 149, 0, 0.14);
-  --tint-warning-soft: rgba(255, 149, 0, 0.18);
-  --tint-purple: rgba(199, 125, 224, 0.16);
-  --tint-purple-soft: rgba(199, 125, 224, 0.12);
-  --tint-neutral: rgba(255, 255, 255, 0.1);
+  --tint-primary: #27272a;
+  --tint-primary-soft: #27272a;
+  --tint-success: rgba(34, 197, 94, 0.12);
+  --tint-success-soft: rgba(34, 197, 94, 0.08);
+  --tint-danger: rgba(239, 68, 68, 0.12);
+  --tint-warning: rgba(234, 179, 8, 0.12);
+  --tint-warning-soft: rgba(234, 179, 8, 0.16);
+  --tint-purple: rgba(139, 92, 246, 0.14);
+  --tint-purple-soft: rgba(139, 92, 246, 0.1);
+  --tint-neutral: rgba(250, 250, 250, 0.08);
 
-  --overlay: rgba(0, 0, 0, 0.6);
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.5);
-  --shadow-hover: 0 2px 10px rgba(0, 0, 0, 0.45);
-  --shadow-pop: 0 6px 20px rgba(0, 0, 0, 0.55);
+  --overlay: rgba(0, 0, 0, 0.72);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-hover: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
 
-  --scrollbar-thumb: #3A3D45;
-  --scrollbar-thumb-hover: #4A4E58;
+  --scrollbar-thumb: #3f3f46;
+  --scrollbar-thumb-hover: #52525b;
 
-  --chart-grid: #33363D;
-  --chart-active: #FF7043;
+  --chart-grid: #27272a;
+  --chart-active: #d4d4d8;
 }
 
 * {
@@ -218,28 +248,42 @@ html[data-theme='dark'] {
 }
 
 body {
-  font-family: 'MiSans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  font-family: var(--font-sans);
   background: var(--bg-page);
   color: var(--text-1);
   overflow: hidden;
   height: 100vh;
 }
 
+/* 滚动条：竖向与横向同一套规格。
+   之前只写了 width，横向滚动条走了浏览器默认的 16px 厚直角条，
+   表格底部那道灰杠就是它 —— 和右侧 6px 细条完全不是一个东西。
+   height 必须显式给，否则横向仍是默认厚度 */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
+/* 滑块留出 2px 外边距，看起来是悬在轨道里的细条而不是贴边的一块 */
 ::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
-  border-radius: 3px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+/* 两端按钮：Firefox 不画，Chromium 会画成小方块，这里去掉 */
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .app-layout {
@@ -326,13 +370,17 @@ body {
   padding: 24px 32px 28px;
 }
 
+/* 表单控件默认不继承字体：浏览器会给 input/select/button 各塞一套自己的默认字族
+   （Chrome 里是 Arial），于是同一行里「筛选下拉」和「表格文字」长得不一样。
+   这里统一显式继承，字号仍然按各控件自己的尺寸来，避免 dropdown 被撑大。 */
 input, select, textarea {
   background: var(--bg-card);
   border: 1px solid var(--border-3);
   color: var(--text-1);
-  padding: 10px 14px;
+  padding: 0 11px;
   border-radius: var(--radius-md);
-  font-size: var(--fs-base);
+  font-family: inherit;
+  font-size: var(--field-fs);
   outline: none;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
@@ -351,56 +399,161 @@ select option {
   color: var(--text-1);
 }
 
-select {
-  appearance: auto;
-}
-
 button {
   cursor: pointer;
   border: none;
   border-radius: var(--radius-md);
+  font-family: inherit;
   font-size: var(--fs-base);
   transition: all 0.2s;
 }
 
-.btn-primary {
-  background: var(--primary);
-  color: #fff;
-  padding: 8px 20px;
+/* ==================== 按钮：全站唯一的尺寸规格 ==================== */
+/* 全站只有一档按钮高度（28px，小号）：页头、表单、表格行内、弹窗底部都一样。
+   以前每页各自写 padding，同一行里既有 26px 也有 38px 的按钮，视觉上互相打架。
+   新代码请直接用 components/AppButton.vue；下面这组 .btn-* 类保留给尚未迁移的
+   调用点，取值与 AppButton 完全一致。 */
+:root {
+  --btn-h: 28px;
+  --btn-px: 10px;
+  --btn-fs: 12px;
+
+  /* 表单控件与下拉菜单是大号：输入框、select、菜单项统一 36px。
+     按钮走小号（28px），两者刻意不是一个量级 —— 操作要紧凑，填写要宽松 */
+  --field-h: 36px;
+  --field-fs: 13px;
+}
+
+.btn-primary,
+.btn-danger,
+.btn-ghost,
+.app-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: var(--btn-h);
+  padding: 0 var(--btn-px);
+  font-size: var(--btn-fs);
   font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
 }
 
-.btn-primary:hover {
+.btn-primary,
+.app-btn-primary {
+  background: var(--primary);
+  color: var(--bg-card);
+  border-color: var(--primary);
+  box-shadow: 0 1px 2px rgba(9, 9, 11, 0.08);
+}
+
+.btn-primary:hover,
+.app-btn-primary:hover {
   background: var(--primary-hover);
+  border-color: var(--primary-hover);
 }
 
-.btn-danger {
+.btn-danger,
+.app-btn-danger {
   background: var(--danger);
   color: #fff;
-  padding: 8px 20px;
-  font-weight: 500;
+  border-color: var(--danger);
 }
 
-.btn-danger:hover {
+.btn-danger:hover,
+.app-btn-danger:hover {
   background: var(--danger-hover);
+  border-color: var(--danger-hover);
 }
 
-.btn-ghost {
+.btn-ghost,
+.app-btn-secondary {
   background: var(--bg-card);
+  color: var(--text-1);
+  border-color: var(--border-1);
+  box-shadow: 0 1px 2px rgba(9, 9, 11, 0.04);
+}
+
+.btn-ghost:hover,
+.app-btn-secondary:hover {
+  color: var(--text-1);
+  border-color: var(--border-3);
+  background: var(--bg-hover);
+}
+
+.app-btn-ghost {
+  background: transparent;
   color: var(--text-2);
-  padding: 8px 16px;
-  border: 1px solid var(--border-3);
+  border-color: transparent;
 }
 
-.btn-ghost:hover {
-  color: var(--primary);
-  border-color: var(--primary);
+.app-btn-ghost:hover {
+  color: var(--text-1);
+  background: var(--bg-hover);
 }
 
-.btn-sm {
-  padding: 4px 12px;
-  font-size: var(--fs-xs);
-  border-radius: var(--radius-sm);
+/* 纯图标按钮：正方形，边长等于按钮高度 */
+.app-btn-icon {
+  width: var(--btn-h);
+  padding: 0;
+}
+
+.app-btn-block {
+  width: 100%;
+}
+
+.app-btn-glyph,
+.app-btn-spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.app-btn-spinner {
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: app-btn-spin 0.7s linear infinite;
+}
+
+@keyframes app-btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-btn-spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+/* 禁用态：浏览器默认只是把光标变回箭头，视觉上和可点的按钮一模一样。
+   渠道页把「这家不支持这个端点」的按钮画成禁用（而不是不画），所以必须让
+   「点不动」看得出来 —— 否则用户会以为是点歪了，反复去点 */
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 禁用的按钮不该再有 hover 反馈：那会让人觉得它是可点的 */
+button:disabled:hover {
+  color: inherit;
+  border-color: inherit;
+  background: inherit;
+}
+
+.btn-primary:disabled:hover {
+  background: var(--primary);
+}
+
+.btn-ghost:disabled:hover {
+  color: var(--text-1);
+  border-color: var(--border-1);
+  background: var(--bg-card);
 }
 
 .card {
@@ -473,28 +626,34 @@ button {
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   margin-bottom: 16px;
 }
 
+/* 页签与按钮同高（sm 档），视觉权重比按钮低一档：中性描边 + 浅底高亮，
+   不再用蓝色实心胶囊 —— 主色已经是中性色，实心留给真正的主动作 */
 .tab {
-  padding: 8px 16px;
-  font-size: var(--fs-small);
+  display: inline-flex;
+  align-items: center;
+  height: var(--btn-h);
+  padding: 0 var(--btn-px);
+  font-size: var(--btn-fs);
   color: var(--text-2);
-  background: var(--bg-card);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-pill);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
 }
 
 .tab:hover {
-  color: var(--primary);
-  border-color: var(--primary);
+  color: var(--text-1);
+  background: var(--bg-hover);
 }
 
 .tab.active {
-  color: #fff;
-  background: var(--primary);
-  border-color: var(--primary);
+  color: var(--text-1);
+  background: var(--bg-hover);
+  border-color: var(--border-3);
+  font-weight: 500;
 }
 
 /* 徽标：状态标签（在线/离线、评测状态、渠道可用性、版本提示）。
@@ -643,10 +802,13 @@ button {
   overflow-x: auto;
 }
 
+/* 等宽数字加在整张表上：时间、耗时、Token 这类列每行位数会变，
+   比例数字会让整列左右抖；一处声明覆盖所有用 .table 的页面 */
 .table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
 }
 
 .table th {
@@ -705,7 +867,7 @@ button {
 }
 
 .mono {
-  font-family: 'Courier New', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .nowrap {
@@ -745,17 +907,24 @@ button {
   color: var(--text-1);
 }
 
+/* 关闭按钮：与 AppButton 的 md 图标按钮同尺寸，右对齐在标题行里 */
 .modal-close {
-  padding: 0 4px;
-  font-size: var(--fs-title);
+  width: var(--btn-h);
+  height: var(--btn-h);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
   line-height: 1;
-  color: var(--text-3);
+  color: var(--text-2);
   background: transparent;
   border: none;
+  border-radius: var(--radius-md);
 }
 
 .modal-close:hover {
-  color: var(--danger);
+  color: var(--text-1);
+  background: var(--bg-hover);
 }
 
 .modal-actions {
@@ -763,5 +932,103 @@ button {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 18px;
+}
+/* ==================== 版式增量 ==================== */
+/* 令牌换肤之后，这里只补「原来没有、需要新增」的观感规则；
+   凡是与上方共享版式重名的规则都不要再写第二遍 —— 靠后声明会悄悄覆盖，
+   调一处以为只改一行，实际改的是整站。 */
+body {
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.top-bar {
+  height: 56px;
+  padding: 0 24px;
+}
+
+.top-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.main-scroll {
+  padding: 24px;
+}
+
+/* 表单控件：36px 高与 6px 圆角对齐 shadcn 的 input；聚焦用中性 ring，
+   不用蓝色光圈 —— 主色已经从中性色来，蓝光圈会引入第二种强调色 */
+input,
+select,
+textarea {
+  min-height: var(--field-h);
+  padding: 0 11px;
+  font-size: var(--field-fs);
+  box-shadow: 0 1px 2px rgba(9, 9, 11, 0.025);
+}
+
+/* 下拉框：高度按大号统一，箭头改由自己画。
+   原生箭头紧贴右内边距（Chromium 只会留几像素），看起来像压在边框上；
+   这里换成内联 SVG 背景图，右边距由 padding-right 决定，与边框拉开呼吸。
+   SVG 用 currentColor 画不了，所以按明暗两套主题各给一张（见下方 dark 覆盖） */
+select {
+  height: var(--field-h);
+  padding: 0 30px 0 11px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+  cursor: pointer;
+}
+
+/* 暗色下把描边换成亮灰：同一张深灰箭头在暗底上看不清 */
+html[data-theme='dark'] select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--text-weak);
+  box-shadow: 0 0 0 3px rgba(161, 161, 170, 0.24);
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--text-weak);
+  outline-offset: 2px;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.modal-overlay {
+  backdrop-filter: blur(3px);
+}
+
+@media (max-width: 900px) {
+  .main-scroll {
+    padding: 18px;
+  }
+
+  .top-bar {
+    padding: 0 18px;
+  }
 }
 </style>

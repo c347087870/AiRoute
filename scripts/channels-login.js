@@ -1,16 +1,17 @@
-// 十个账号渠道的命令行登录（面板做出来之前的临时入口）
+// 账号渠道的命令行登录（面板之外的另一条入口）
 //
-//     node scripts/channels-login.js gemini
+//     node scripts/channels-login.js trae
 //     node scripts/channels-login.js --list
 //
-// 走的是**正在运行的服务**的 /api/channels/rpc，而不是自己起一个渠道运行时：
-// 渠道包的账号池与凭据是按数据目录落盘的，两个进程同时写同一份目录会互相覆盖
-//（服务端还有个正在跑的 worker 持有内存态）。
+// 走的是**正在运行的服务**的 /api/channels/rpc，而不是自己起一份渠道运行时：
+// 账号与凭据是按数据目录落盘的，两个进程同时写同一份目录会互相覆盖
+//（服务进程里还有正在跑的登录会话与限流记录）。
 
 const fs = require('fs')
 const paths = require('../server/paths')
 
-const PROVIDERS = ['lobsterai', 'qoder', 'qodercn', 'trae', 'cline', 'loomy', 'raccoon', 'minimax', 'zcode', 'gemini']
+// 自有渠道（WorkBuddy 两区走 /api/workbuddy/*，不在这里）
+const PROVIDERS = ['trae', 'qoder', 'qodercn']
 
 function resolveBase() {
   if (process.env.AIROUTE_PORT) return `http://127.0.0.1:${process.env.AIROUTE_PORT}`
@@ -42,12 +43,13 @@ async function rpc(method, payload) {
 }
 
 async function listAccounts() {
-  // account.list 是按 provider 过滤的（payload 里缺 provider 会过滤成空数组，
-  // 渠道包没有「列全部账号」的方法），所以逐个渠道取一遍
+  // account.list 按 provider 过滤（没有「列全部账号」的方法），逐个渠道取一遍
   const accounts = []
   for (const provider of PROVIDERS) {
     const list = await rpc('account.list', { provider })
-    accounts.push(...list.accounts)
+    // 自有渠道直接返回数组（渠道包时代是 { accounts }），两种都容忍
+    const rows = Array.isArray(list) ? list : list?.accounts ?? []
+    for (const row of rows) accounts.push({ provider, ...row })
   }
   if (!accounts.length) {
     console.log('还没有登录任何渠道账号。')
@@ -55,7 +57,7 @@ async function listAccounts() {
   }
   for (const account of accounts) {
     const state = account.enabled === false ? '已停用' : '启用'
-    console.log(`${account.provider.padEnd(10)} ${String(account.nickname || account.id).padEnd(24)} ${state}`)
+    console.log(`${account.provider.padEnd(10)} ${String(account.name || account.nickname || account.id).padEnd(24)} ${state}`)
   }
 }
 

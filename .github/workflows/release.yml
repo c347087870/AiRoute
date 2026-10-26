@@ -27,12 +27,9 @@ jobs:
     name: 测试与版本校验
     runs-on: ubuntu-latest
     steps:
-      # 带子模块：npm test 末尾的 scripts/verify-channels.js 要拿上游 pack.js 做逐字节
-      # 比对。缺子模块时它会打印「跳过」并以 0 退出，那样这道闸门在 CI 等于没接上。
+      # 不再需要子模块：渠道实现已是仓库内源码，verify-channels.js 校验
+      # 「实现文件 + 面板/CLI/源名清单」是否自洽，不读上游 pack.js。
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -175,31 +172,47 @@ jobs:
 
       # 产物进草稿 Release：不自动发布，人工确认后再点 Publish。
       # 草稿也能按 tag 查到（gh 的 draft 查找走 GraphQL），重跑 workflow 时走覆盖上传，避免 422。
-      - name: 上传资产到草稿 Release
+      # 两条线路的发布方式不同：
+      #   正式版（tag 无后缀）仍建草稿，人工核对资产与 SHA256 后再 Publish——它是所有人的默认更新源
+      #   beta 版（tag 带 -beta.x 这类后缀）直接发布为 pre-release：它只被 beta 线看到，
+      #   而 beta 客户端只会认「已发布」的 Release（草稿在 GitHub 上对匿名调用完全不可见，
+      #   资产下载一律 404），留成草稿等于 beta 线永远收不到更新
+      - name: 创建 Release（正式版草稿 / beta 直接发 pre-release）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # tag 带后缀（v1.7.0-beta.1 这类）视为预发布，发布后不会成为 latest
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; else prerelease=""; fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist-assets/* --clobber
             [ -n "$prerelease" ] && gh release edit "$GITHUB_REF_NAME" --prerelease
             true
+          elif [ -n "$prerelease" ]; then
+            gh release create "$GITHUB_REF_NAME" dist-assets/* \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --prerelease
           else
             gh release create "$GITHUB_REF_NAME" dist-assets/* \
               --title "$GITHUB_REF_NAME" \
               --generate-notes \
-              --draft $prerelease
+              --draft
           fi
 
-      # 草稿在 Actions 页面看不出来，明确告诉人去哪儿发布
-      - name: 提示人工发布
+      - name: 提示后续动作
         run: |
           {
-            echo "### 草稿 Release 已就绪，等你发布"
-            echo
-            echo "- tag：\`$GITHUB_REF_NAME\`"
-            echo "- 入口：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases"
-            echo "- 草稿不会出现在 \`/releases/latest\`，发布后客户端才会检测到新版本"
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              echo "### beta Release 已发布（pre-release）"
+              echo
+              echo "- tag：\`$GITHUB_REF_NAME\`"
+              echo "- beta 线客户端（版本号带 \`-beta\`）现在就能查到它"
+              echo "- 它不会进 \`/releases/latest\`，正式线客户端看不到"
+            else
+              echo "### 草稿 Release 已就绪，等你发布"
+              echo
+              echo "- tag：\`$GITHUB_REF_NAME\`"
+              echo "- 入口：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases"
+              echo "- 草稿不会出现在 \`/releases/latest\`，发布后正式线客户端才会检测到新版本"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 

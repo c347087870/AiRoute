@@ -1,19 +1,24 @@
-// 十个账号渠道（LobsterAI / Qoder / Qoder 中国版 / TRAE / Cline / Loomy /
-// Raccoon / MiniMax Code / ZCode / Gemini）在 AiRoute 里的入口。
+// 账号渠道在 AiRoute 里的入口。
 //
-// 和 server/workbuddy/ 的关系：两者解决同一类问题（多账号、换号、额度），但
-// 渠道这十个的登录流程与 wire 协议量级是 6 万行，重写不现实 —— 所以它们跑
-// vendor 进来的渠道包（business.mjs），本目录只提供宿主接口与协议转换。
+// 三条来路，互不耦合：
+//   - WorkBuddy 两区：账号池、会话、模型目录都在主进程 server/workbuddy/，
+//     本目录只为它注册目录、补全直通（见下面的 runtime facade）；
+//   - TRAE / Qoder / Qoder 国内版：**以插件形式装进来**（server/channels/plugins/），
+//     由 plugin-host 发现、加载，经 ./owned/runtime 聚合成与面板一致的那一套接口。
+//     装了什么、开没开在 channels-plugins.json（见 plugin-store.js）；
+//   - 渠道包（business.mjs）已整体移除 —— 那 2.6 MB 打包产物不可读也不可审，
+//     无法核对一家渠道实际发了什么。
 //
-// 对外只暴露四件事：目录、RPC、补全、关停。渠道自己的状态（账号池、黑名单、
-// 积分）一律由渠道包持有并落盘到 dataDir —— AiRoute 不缓存副本，避免两份真相。
+// 对外暴露：目录、RPC、补全、插件管理、关停。账号与黑名单状态一律由各渠道自己
+// 持有并落盘到 dataDir —— AiRoute 不缓存副本，避免两份真相。
 
 const path = require('path')
 const fs = require('fs-extra')
 const paths = require('../paths')
 const workbuddy = require('../workbuddy/runtime')
 const accountHealth = require('../account-health')
-const { createChannelRuntime } = require('./runtime')
+const { createOwnedRuntime } = require('./owned/runtime')
+const { BUILTIN_PLUGINS } = require('./plugin-store')
 
 // 渠道数据目录与代码目录分开：server/channels 是随包分发的代码，
 // 账号凭据与状态绝不能写进去（dev 模式下两者同父目录，极易混淆）
@@ -23,6 +28,7 @@ function resolveDataDir() {
 
 let runtime = null
 let initializing = null
+let owned = null
 
 // WorkBuddy 作为渠道包里的两个 provider（workbuddy / workbuddy-global）接进来。
 // 它的账号池与会话状态在主进程，worker 里的适配器只做代理 —— 这里就是被代理的
@@ -42,6 +48,81 @@ function createHost() {
   }
 }
 
+// 本模块对外暴露的运行时：WorkBuddy 两个区域的目录由主进程提供，
+// 其余交给 owned runtime（TRAE / Qoder）。
+//
+// 为什么 WorkBuddy 不并进 owned：它的账号池、会话、调度器、任务体系都在
+// server/workbuddy/（1.4 万行，40+ 个 /api/workbuddy/* 接口），本目录只提供
+// 「目录 + 补全直通」这两件事，补全在 router 层直接交给 forwardChat。
+function createRuntimeFacade(ownedRuntime) {
+  let rows = []
+  let refreshing = null
+
+  const workbuddyRows = () => {
+    if (!workbuddy.getRuntime()) return []
+    const out = []
+    for (const [provider, realm] of [['workbuddy', 'cn'], ['workbuddy-global', 'global']]) {
+      const models = workbuddy.getEnabledModelsWithEfforts(realm)
+      // 没有启用任何模型时整组不出现（与「没有账号的渠道不播报」同口径）
+      if (models.length === 0) continue
+      for (const model of models) {
+        out.push({
+          id: `${provider}/${model.id}`,
+          name: model.displayName || model.id,
+          owned_by: provider,
+          context_window: model.maxContext || undefined,
+          max_tokens: model.maxOutput || undefined,
+          vision: true,
+        })
+      }
+    }
+    return out
+  }
+
+  // provider 清单 = 插件声明的那几家 + WorkBuddy 两区。顺序按清单来
+  // （面板与目录都照这个先后），插件没装/停用的话这里自然就没有它。
+  const providers = () => {
+    const ids = [...ownedRuntime.providers]
+    if (workbuddy.getRuntime()) ids.push('workbuddy', 'workbuddy-global')
+    return ids
+  }
+
+  function refresh() {
+    if (refreshing) return refreshing
+    refreshing = (async () => {
+      await ownedRuntime.refresh()
+      rows = [...workbuddyRows(), ...ownedRuntime.publicModelRows()]
+      return rows
+    })().finally(() => { refreshing = null })
+    return refreshing
+  }
+
+  return {
+    get providers() { return providers() },
+    state: () => ({ state: 'ready', error: '' }),
+    publicModelRows: () => rows,
+    refresh,
+    handles: model => providers().some(provider => model.startsWith(`${provider}/`)),
+    rpc: (body, signal) => ownedRuntime.rpc(body, signal),
+    complete: (request, onChunk, signal) => ownedRuntime.complete(request, onChunk, signal),
+    // 插件现状与加载失败原因：面板 / CLI 都从这里读，不另存一份
+    plugins: () => ownedRuntime.plugins(),
+    pluginFailures: () => ownedRuntime.pluginFailures(),
+    // 插件清单（装/卸/启停的执行者）：router 的 /api/channels/plugins 直接用它。
+    // 少了这一条，POST 会一路拿到 503「运行时未初始化」而 GET 却是好的 ——
+    // 面板里就表现为「看得到插件列表、但点不动」。
+    store: ownedRuntime.store,
+    close: () => ownedRuntime.close(),
+  }
+}
+
+// WorkBuddy 的目录在每次账号/模型清单变化后要重算：它的清单不在插件里
+// （插件只管自己声明的那几家），所以这里单独摆一个刷新入口给 router 用。
+async function refreshWorkbuddyOnly() {
+  if (!runtime) return
+  await runtime.refresh()
+}
+
 // 幂等初始化：服务启动时调一次；失败不抛给调用方（渠道不可用不该让
 // AiRoute 起不来，与 WorkBuddy 的初始化口径一致）
 function init(options = {}) {
@@ -50,16 +131,24 @@ function init(options = {}) {
   const logger = options.logger || console
   initializing = (async () => {
     const dataDir = options.dataDir || resolveDataDir()
-    // 凭据与状态由渠道包直接写文件：目录不存在时第一次登录会 ENOENT
+    // 凭据与状态要写文件：目录不存在时第一次登录会 ENOENT
     fs.ensureDirSync(dataDir)
-    const created = createChannelRuntime({
-      dataDir,
-      logger,
-      onChanged: options.onChanged,
-      host: createHost(),
-    })
+    owned = createOwnedRuntime({ dataDir, logger, onChanged: options.onChanged })
+    // 认领渠道包时代留下的账号：同一份凭据文件、同一套键名，
+    // 这里只补账号清单，所以用户不需要重新登录
+    try {
+      owned.importLegacyAccounts()
+    } catch (error) {
+      // 认领失败不该让渠道整个起不来：新用户本来就没有旧账号
+      logger.warn?.(`[channels] 旧账号认领失败：${error.message}`)
+    }
+    const created = createRuntimeFacade(owned)
+    // 调用方（route）会 await runtime.ready：这里就是一个已完成的 Promise，
+    // 目录刷新刻意**不**并进 ready（不可用的渠道不该拖住服务启动）
+    created.ready = Promise.resolve(created)
     runtime = created
-    await created.ready
+    // 目录刷新放在后台：某个渠道登录态异常不该拖住服务启动
+    created.refresh().catch(error => logger.warn?.(`[channels] 模型目录刷新失败：${error.message}`))
     return created
   })().catch(error => {
     // 初始化失败就把句柄清掉：留着一个已关闭的运行时会让请求拿到 404
@@ -136,6 +225,23 @@ async function markAccountDisabled(accountId, reason) {
   }
 }
 
+// 插件管理动作（装 / 卸 / 启停）之后必须重建运行时：
+// provider 集合是由清单算出来的，不重建的话界面会显示新清单、请求还在按旧的走。
+//
+// 重建期间要先把旧的关掉（停掉在途登录会话与目录缓存），否则两个宿主
+// 会同时持有同一份 dataDir 的注册表，后写的覆盖前写的。
+async function reloadPlugins() {
+  const dataDir = owned?.dataDir || resolveDataDir()
+  if (!runtime) return init({ dataDir })
+  const onChanged = owned?.onChanged
+  const closing = runtime.close()
+  runtime = null
+  initializing = null
+  await closing
+  owned = null
+  return init({ dataDir, onChanged })
+}
+
 async function shutdown() {
   // 初始化可能还在飞：先等它落定，否则关掉之后旧 promise 会把 runtime 又设回来
   if (initializing) {
@@ -150,11 +256,19 @@ async function shutdown() {
   await closing
 }
 
+// 内置插件清单（随包分发的那几家）：给面板/CLI 判断「这一家是内置的还是外部装的」
+function listBuiltinPlugins() {
+  return BUILTIN_PLUGINS.map(item => ({ id: item.id, builtin: true, source: item.path }))
+}
+
 module.exports = {
   init,
+  listBuiltinPlugins,
   getRuntime,
   refreshModels,
+  refreshWorkbuddyOnly,
   rpc,
+  reloadPlugins,
   shutdown,
   resolveDataDir,
 }

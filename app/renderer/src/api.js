@@ -76,6 +76,11 @@ export function getSystemStatus() {
   return api.get('/api/system/status').then(r => r.data)
 }
 
+// 开发面板：进程 / 数据目录 / 运行时快照。正式版里服务端不注册这个端点（404）
+export function getDevInfo() {
+  return api.get('/api/dev/info').then(r => r.data)
+}
+
 // 请求统计（今日/累计，含失败数），与 Token 统计同源
 export function getStats() {
   return api.get('/api/stats').then(r => r.data)
@@ -86,12 +91,10 @@ export function getTokenStats() {
   return api.get('/api/token-stats').then(r => r.data)
 }
 
-export function getTokenStatsToday() {
-  return api.get('/api/token-stats/today').then(r => r.data)
-}
-
-export function getTokenStatsMonth() {
-  return api.get('/api/token-stats/month').then(r => r.data)
+// 状态面板四个时间维度（当日 / 本月 / 近三月 / 本年），一次请求取回。
+// 月维度由服务端按月汇总桶聚合，前端不再自己把按日明细加起来
+export function getTokenStatsRange() {
+  return api.get('/api/token-stats/range').then(r => r.data)
 }
 
 export function getTokenStatsByModel(modelName) {
@@ -106,6 +109,12 @@ export function getTokenStatsByPeriod(days) {
 // 获取某一天的按小时统计，date 为 YYYY-MM-DD
 export function getTokenStatsHourly(date) {
   return api.get(`/api/token-stats/hourly/${date}`).then(r => r.data)
+}
+
+// 按日历边界取用量统计（week / month / quarter / year），带回逐天明细。
+// 「本日」走 getTokenStatsHourly：它要按小时画图，粒度与这里不同
+export function getTokenStatsCalendar(range) {
+  return api.get(`/api/token-stats/calendar/${range}`).then(r => r.data)
 }
 
 // 清空全部 Token 统计（不可恢复）

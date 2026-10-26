@@ -27,6 +27,8 @@ const configIO = require('./config-io')
 const modelHealth = require('./model-health')
 const modelHealthAudit = require('./model-health-audit')
 const accountHealth = require('./account-health')
+// 开发面板的数据源（只在开发模式注册对应端点，见下面的 /api/dev/info）
+const devInfo = require('./dev-info')
 // 「这次失败算谁的」判定（客户端取消 vs 上游卡死），见 server/failure-class.js
 const { isAbortFailure, classifyChannelFailure, stallMessage, CHANNEL_FIRST_CHUNK_TIMEOUT_MS } = require('./failure-class')
 const {
@@ -2249,10 +2251,16 @@ app.delete('/api/logs', (req, res) => {
   res.json({ ok: true })
 })
 
-// 系统状态：本地版本与当前监听端口（设置页「系统状态」用；未监听时回落配置端口）
+// 系统状态：本地版本、更新线路与当前监听端口（设置页「系统状态」用；未监听时回落配置端口）
+// line 与 /api/update/check 的判定同一套规则：版本号带 beta/rc 等标识走 beta 线
 app.get('/api/system/status', (req, res) => {
   const addr = server && server.address()
-  res.json({ version: update.getLocalVersion(), port: (addr && addr.port) || engine.getServerConfig().port || 3000 })
+  const version = update.getLocalVersion()
+  res.json({
+    version,
+    line: update.releaseLine(version),
+    port: (addr && addr.port) || engine.getServerConfig().port || 3000
+  })
 })
 
 // 请求数统计与 Token 统计同源，均来自持久化的按天汇总，避免两个数字口径不一致
@@ -2276,6 +2284,31 @@ app.get('/api/token-stats/today', (req, res) => {
 
 app.get('/api/token-stats/month', (req, res) => {
   res.json(tokenStats.getMonthStats())
+})
+
+// 时间维度一次取回：当日 / 本周 / 本月 / 近三月 / 本年。
+// 拆成多个请求会让面板各自闪烁、各自失败；而且月维度必须走月汇总桶
+// （按日明细只留 35 天，月初用日明细加会少一截），聚合口径只放服务端一处
+app.get('/api/token-stats/range', (req, res) => {
+  res.json(tokenStats.getRangeStats())
+})
+
+// 用量统计页的日历维度明细：本日 / 本周 / 本月 / 近三月 / 本年。
+// 与 /range 的区别是「要画图」，所以连带返回逐天明细（本日走 /hourly/:date）。
+// 近三月与本年超过明细保留期时，明细只从保留期内最早的那天开始，summary 仍是完整口径
+app.get('/api/token-stats/calendar/:range', (req, res) => {
+  const ranges = tokenStats.getCalendarRanges()
+  const picked = ranges[req.params.range]
+  if (!picked) {
+    return res.status(400).json({ error: `未知的时间维度：${req.params.range}` })
+  }
+  res.json({
+    range: req.params.range,
+    start: picked.start.getTime(),
+    end: picked.end.getTime(),
+    summary: picked.summary,
+    details: tokenStats.getDaysDetailBetween(picked.start.getTime(), picked.end.getTime())
+  })
 })
 
 app.get('/api/token-stats/model/:name', (req, res) => {
@@ -2521,6 +2554,17 @@ app.get('/api/health', (req, res) => {
   })
 })
 
+// ==================== 开发面板 ====================
+//
+// 只在开发模式下回数据：回的是绝对路径、环境变量与运行时文件清单，对用户手里的
+// 正式版没有用途，只是多一层泄漏面。打包后主进程会把 NODE_ENV 设成 production
+// 再 require 本文件（见 app/main/main.js），所以正式版这个路由直接 404 ——
+// 光靠界面藏入口不够，接口本身就不该给。
+app.get('/api/dev/info', (req, res) => {
+  if (!devInfo.isDevMode()) return res.status(404).json({ error: '开发面板只在开发模式可用' })
+  res.json(devInfo.collect())
+})
+
 // 初始化 WorkBuddy 运行时（无账号时也可启动，转发时才报无可用账号）
 function initWorkbuddy() {
   try {
@@ -2552,15 +2596,21 @@ initWorkbuddy()
 // 渠道包自己持有账号池、登录态、模型黑名单与积分，AiRoute 只在外面做两件事：
 // 把它的模型目录同步成一个 Provider，以及把请求转进 worker。
 //
-// 为什么只建一个 Provider 而不是十一家：渠道包的模型 id 本来就是
-// `provider/model` 形态（gemini/gemini-2.5-pro、workbuddy/auto），而 AiRoute 的
+// 为什么只建一个 Provider 而不是五家：渠道的模型 id 本来就是
+// `provider/model` 形态（trae/glm-5.2、workbuddy/auto），而 AiRoute 的
 // 引用格式是 `providerName/modelId` 且 modelId 允许含斜杠 —— 一个 `channels` 源
 // 即可无损表达，配置里也不用为每家各留一条会自动重生的记录。
 const CHANNEL_PROVIDER_ID = 'channels'
-const CHANNEL_PROVIDER_NAME = '账号渠道（11 家）'
-// 历次默认名。渠道数变了（10 → 11）之后，只有用户自己改过名字才需要保留，
-// 还是旧默认值的应当跟着升级 —— 否则界面上会长期写着「10 家」。
-const LEGACY_CHANNEL_NAMES = ['账号渠道', '账号渠道（10 家）']
+// 渠道数是**算出来的**：插件装了几家（WorkBuddy 两区也各算一家）就写几家。
+// 插件可以装/卸/停用，写死一个数字就会在用户装了第三方插件后一直显示旧值。
+const CHANNEL_PROVIDER_FALLBACK_COUNT = 5
+function channelProviderName() {
+  const count = channels.getRuntime()?.providers.length || CHANNEL_PROVIDER_FALLBACK_COUNT
+  return `账号渠道（${count} 家）`
+}
+// 历次默认名。渠道数变了（10 → 11 → 5 → N）之后，只有用户自己改过名字才需要
+// 保留，还是旧默认值的应当跟着升级 —— 否则界面上会长期写着「11 家」。
+const LEGACY_CHANNEL_NAMES = ['账号渠道', '账号渠道（10 家）', '账号渠道（11 家）', '账号渠道（5 家）']
 
 // 旧形态迁移：WorkBuddy 曾经是独立的 `type: 'workbuddy'` 源（每个区域一个），
 // 现在是渠道包里的第 11 家（两个 provider：workbuddy / workbuddy-global）。
@@ -2600,7 +2650,7 @@ function migrateWorkbuddyProviders() {
     }
     config[CHANNEL_PROVIDER_ID] = {
       ...existing,
-      displayName: existing.displayName || CHANNEL_PROVIDER_NAME,
+      displayName: existing.displayName || channelProviderName(),
       type: 'channel',
       models: merged
     }
@@ -2688,7 +2738,7 @@ function syncChannelProvider(rows) {
     config[CHANNEL_PROVIDER_ID] = {
       ...existing,
       // 旧默认名跟着升级，用户改过的保留
-      displayName: !previousName || LEGACY_CHANNEL_NAMES.includes(previousName) ? CHANNEL_PROVIDER_NAME : previousName,
+      displayName: !previousName || LEGACY_CHANNEL_NAMES.includes(previousName) ? channelProviderName() : previousName,
       type: 'channel',
       models: models.sanitizeModels(merged)
     }
@@ -2764,9 +2814,71 @@ app.get('/api/channels/status', async (req, res) => {
     state: state.state,
     error: state.error,
     providers: rt.providers,
-    models: rt.publicModelRows().length
+    models: rt.publicModelRows().length,
+    // 插件现状：装了什么、哪家没起来。面板与 CLI 都读这一份
+    plugins: typeof rt.plugins === 'function' ? rt.plugins() : [],
+    pluginFailures: typeof rt.pluginFailures === 'function' ? rt.pluginFailures() : []
   })
 })
+
+// ===== 渠道插件管理 =====
+//
+// 插件就是这个目录里的普通包（见 server/channels/plugin-store.js）：
+// 装/卸/启停改的是清单，然后**重建运行时** —— provider 集合由清单算出来，
+// 不重建的话界面显示新清单、请求还按旧的走。
+//
+// 这里刻意不做「在线从 npm 拉包」：装一个第三方插件等于让它读本机的账号凭据，
+// 来源必须是用户显式给的本地路径。要装远程包，先自己解到本机再指过来。
+
+app.get('/api/channels/plugins', async (req, res) => {
+  const rt = channels.getRuntime()
+  if (!rt) return res.json({ ok: true, plugins: [], failures: [], available: [] })
+  res.json({
+    ok: true,
+    plugins: typeof rt.plugins === 'function' ? rt.plugins() : [],
+    failures: typeof rt.pluginFailures === 'function' ? rt.pluginFailures() : [],
+    // 内置包里还没被装上的（正常情况为空：内置插件在清单里默认全启用）
+    available: channels.listBuiltinPlugins(),
+  })
+})
+
+app.post('/api/channels/plugins', async (req, res) => {
+  const action = String(req.body?.action || '')
+  const id = String(req.body?.id || '')
+  const source = String(req.body?.source || '')
+  try {
+    const store = channels.getRuntime()?.store
+    if (!store) return res.status(503).json({ ok: false, error: '渠道运行时未初始化' })
+    if (action === 'add') {
+      if (!id || !source) return res.status(400).json({ ok: false, error: '添加插件需要 id 与 source（本地目录或 npm 包名）' })
+      store.add({ id, source })
+    } else if (action === 'remove') {
+      if (!id) return res.status(400).json({ ok: false, error: '缺少插件 id' })
+      store.remove(id)
+    } else if (action === 'enable' || action === 'disable') {
+      if (!id) return res.status(400).json({ ok: false, error: '缺少插件 id' })
+      store.setEnabled(id, action === 'enable')
+    } else {
+      return res.status(400).json({ ok: false, error: `未知动作：${action}` })
+    }
+    // 重建之后再同步目录：新插件的模型要立刻出现在 channels 源里
+    await channels.reloadPlugins()
+    await syncChannelProviderFromRuntime()
+    res.json({ ok: true, ...(await channelPluginInfo()) })
+  } catch (err) {
+    res.status(err.statusCode && err.statusCode >= 400 ? err.statusCode : 400).json({ ok: false, error: err.message })
+  }
+})
+
+async function channelPluginInfo() {
+  const rt = channels.getRuntime()
+  if (!rt) return { plugins: [], failures: [], available: channels.listBuiltinPlugins() }
+  return {
+    plugins: typeof rt.plugins === 'function' ? rt.plugins() : [],
+    failures: typeof rt.pluginFailures === 'function' ? rt.pluginFailures() : [],
+    available: channels.listBuiltinPlugins(),
+  }
+}
 
 // 实时目录（渠道包口径）：登录完就能看到该账号的模型
 app.get('/api/channels/models', async (req, res) => {
@@ -2859,13 +2971,17 @@ app.post('/api/channels/test', async (req, res) => {
       }
     } catch { /* 计数不可用：退回全量目录 */ }
   }
+  // 目录行带的是 `owned_by`（就是 provider），没有 `channel` 字段。
+  // 按 `row.channel` 判可用会让每一行都落到「没有账号」那一侧 —— 渠道明明登录了，
+  // 测试却统一报「先登录该渠道的账号」。这里统一取行自己的 provider。
+  const rowProvider = row => (row && (row.channel || row.owned_by)) || String(row?.id || '').split('/')[0]
   const candidates = wantModel
     ? [wantModel]
     : rows
-      .filter(row => (!provider || row.channel === provider || row.id.startsWith(`${provider}/`))
+      .filter(row => (!provider || rowProvider(row) === provider || row.id.startsWith(`${provider}/`))
         // WorkBuddy 不在渠道包的 provider.status 里（它不是包内 provider），
         // 只要运行时在就当作可用，让真实调用给出答案
-        && (live === null || live.has(row.channel) || (!!workbuddy.getRuntime() && !!channelWorkbuddyRealm(row.id))))
+        && (live === null || live.has(rowProvider(row)) || (!!workbuddy.getRuntime() && !!channelWorkbuddyRealm(row.id))))
       .map(row => row.id)
       .slice(0, TEST_MODEL_CANDIDATES)
   if (!candidates.length) {

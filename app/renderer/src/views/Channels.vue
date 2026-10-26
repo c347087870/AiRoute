@@ -6,7 +6,6 @@
         :model-value="tab"
         :options="VIEW_TABS"
         label="渠道账号页视图切换"
-        size="sm"
         @update:model-value="switchTab"
       />
       <div class="header-actions">
@@ -15,16 +14,9 @@
           <span class="stat ok">账号 <b>{{ accounts.length + wbList.length }}</b></span>
           <span class="stat">模型 <b>{{ modelCount }}</b></span>
         </div>
-        <button
-          class="btn-primary btn-sm"
-          :disabled="checkinAll.running || creditBusy !== '' || wbBusyAll !== '' || checkinTotal === 0"
-          :title="checkinTotal === 0
-            ? '没有可签到的账号'
-            : `依次对支持签到的 ${checkinTotal} 处（渠道 + WorkBuddy 国内版）签到：逐渠道顺序执行，避免触发上游风控；没有签到端点的渠道自动跳过`"
-          @click="runCheckinAll"
-        >
-          {{ checkinAll.running ? `签到中… ${checkinAll.done}/${checkinAll.total}` : '一键签到' }}
-        </button>
+        <AppButton variant="primary" :disabled="checkinAll.running || wbBusyAll !== '' || checkinPending === 0" :title="checkinPending === 0 ? (checkinTotal === 0 ? '没有可签到的账号' : '今天都已经签到过了，明天再来') : `依次对支持签到的 ${checkinPending} 处（渠道 + WorkBuddy 国内版）签到：逐渠道顺序执行，避免触发上游风控；没有签到端点的渠道自动跳过`" @click="runCheckinAll">
+          {{ checkinAll.running ? `签到中… ${checkinAll.done}/${checkinAll.total}` : allChecked ? '已签' : '一键签到' }}
+        </AppButton>
       </div>
     </div>
 
@@ -110,51 +102,31 @@
                 </div>
               </div>
               <div class="ch-account-actions">
-                <button
+                <AppButton
+                  variant="secondary"
                   class="ch-icon-btn"
                   :title="`用浏览器打开${acct.realm === 'global' ? '国际版' : '国内版'}个人中心看明细`"
                   @click="openConsole('workbuddy', slotKeyOf('workbuddy', acct))"
                 >
-                  <AppIcon name="externalLink" />
-                </button>
-                <button
-                  class="btn-ghost btn-sm"
-                  :disabled="wbBusy === acct.uid + ':checkin' || acct.realm === 'global' || checkinAll.running"
-                  :title="acct.realm === 'global' ? '国际版没有签到端点' : ''"
-                  @click="wbCheckin(acct)"
-                >
-                  {{ wbBusy === acct.uid + ':checkin' ? '签到中…' : '签到' }}
-                </button>
-                <button
-                  class="btn-ghost btn-sm"
-                  :disabled="wbBusy === acct.uid + ':balance'"
-                  @click="wbBalance(acct)"
-                >
-                  {{ wbBusy === acct.uid + ':balance' ? '查询中…' : '余额' }}
-                </button>
+                  个人中心
+                </AppButton>
+                <AppButton variant="secondary" :disabled="wbBusy === acct.uid + ':checkin' || acct.realm === 'global' || acct.checkinDone || checkinAll.running" :title="acct.realm === 'global' ? '国际版没有签到端点' : acct.checkinDone ? '今天已签到，明天再来' : ''" @click="wbCheckin(acct)">
+                  {{ wbBusy === acct.uid + ':checkin' ? '签到中…' : acct.checkinDone ? '已签' : '签到' }}
+                </AppButton>
                 <!-- 解冻与启停是两件事：冷却 / 熔断是上游暂时不可用，
                      仍算「启用」，所以它单列一个按钮，不塞进勾选框 -->
-                <button v-if="acct.cooling" class="btn-ghost btn-sm" @click="wbRevive(acct)">解冻</button>
-                <button
-                  class="btn-ghost btn-sm ch-danger"
+                <AppButton variant="secondary" v-if="acct.cooling" @click="wbRevive(acct)">解冻</AppButton>
+                <AppButton
+                  variant="secondary"
+                  class="ch-danger"
                   :disabled="wbBusy === acct.uid + ':delete'"
                   @click="wbRemove(acct)"
                 >
                   删除
-                </button>
+                </AppButton>
               </div>
             </div>
           </div>
-
-          <!-- 个人中心链接：默认值只有官方域名，用户可以改成准确的明细页 -->
-          <ChannelLinkEditor
-            v-if="linkEditor === 'workbuddy'"
-            :slots="slotsOf('workbuddy')"
-            :values="linkValuesOf('workbuddy')"
-            @submit="draft => saveLinks('workbuddy', draft)"
-            @reset="resetLinks('workbuddy')"
-            @close="linkEditor = ''"
-          />
 
           <!-- 登录中：和渠道卡片一样走页内区块，不弹窗 -->
           <div v-if="wbLogin" class="ch-login">
@@ -163,9 +135,9 @@
             </div>
             <div class="ch-login-url" :title="wbLogin.url">{{ wbLogin.url }}</div>
             <div class="ch-login-actions">
-              <button class="btn-primary btn-sm" @click="wbOpenLoginUrl">打开授权链接</button>
-              <button class="btn-ghost btn-sm" @click="wbCopyLoginUrl">复制链接</button>
-              <button class="btn-ghost btn-sm" @click="wbCancelLogin">停止等待</button>
+              <AppButton variant="primary" @click="wbOpenLoginUrl">打开授权链接</AppButton>
+              <AppButton variant="secondary" @click="wbCopyLoginUrl">复制链接</AppButton>
+              <AppButton variant="secondary" @click="wbCancelLogin">停止等待</AppButton>
             </div>
             <div class="ch-login-status">
               {{ wbLogin.message || '等待浏览器完成授权，每 3 秒自动检测一次…' }}
@@ -173,48 +145,34 @@
           </div>
 
           <div class="ch-actions">
-            <button class="btn-primary btn-sm" :disabled="!!wbLogin || wbBusy === ':login'" @click="wbStartLogin">
+            <AppButton variant="primary" :disabled="!!wbLogin || wbBusy === ':login'" @click="wbStartLogin">
               + 登录账号
-            </button>
+            </AppButton>
             <!-- 两个区域的域名与 OAuth 入口不同，登录前必须先选（同 ZCode 的处理） -->
             <select v-model="wbRealm" class="ch-select" :disabled="!!wbLogin">
               <option value="cn">国内版（copilot.tencent.com）</option>
               <option value="global">国际版（workbuddy.ai）</option>
             </select>
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="wbBusyAll !== '' || !wbCnCount || checkinAll.running"
-              :title="wbCnCount ? '逐账号顺序签到（并发易触发上游风控）' : '国际版账号不支持签到'"
-              @click="wbCheckinAll"
-            >
-              {{ wbBusyAll === 'checkin' ? '签到中…' : '全部签到' }}
-            </button>
-            <button class="btn-ghost btn-sm" :disabled="wbBusyAll !== ''" @click="wbRefreshBalances">
-              {{ wbBusyAll === 'balance' ? '查询中…' : '刷新余额' }}
-            </button>
-            <button class="ch-icon-btn" title="设置个人中心链接" @click="toggleLinkEditor('workbuddy')">
-              <AppIcon name="settings" />
-            </button>
             <router-link to="/workbuddy" class="ch-more">积分 / 成长任务 / 定时任务 →</router-link>
-          </div>
-
-          <!-- 签到的结果只有一行汇总（调度器口径），逐账号明细在 /workbuddy -->
-          <div v-if="wbCheckinSummary" class="ch-result">
-            <div class="ch-result-line">{{ wbCheckinSummary }}</div>
           </div>
         </div>
 
+        <!-- 一张卡 = 一个产品；合并卡是同一产品的两个区域（Qoder 国际版 / 国内版）。
+             三层结构（卡头 / 账号盒 / 操作行）与 WorkBuddy 卡完全同构：
+             · 徽标与渠道级开关在卡头右侧，作用于**本卡全部账号**；
+             · 账号统一放进一个描边盒子，每行一个账号，右侧是明细 / 测试 / 删除；
+             · 登录排在账号盒下面的一行里。
+             合并卡与单渠道卡只有两处差别，都是照 WorkBuddy 的做法：
+             账号行多一个区域标签（对应它的「国内版 / 国际版」），操作行多一个区域
+             下拉 —— 登录按所选区域执行，因为两边的凭据与端点各自独立 -->
         <div
           v-for="group in CARD_GROUPS"
           :key="group.id"
           class="card ch-card"
-          :class="[cardClass(group.id), { 'ch-card-merged': group.providers.length > 1 }]"
+          :class="cardClass(group.id)"
           :style="{ order: cardOrderIndex(group.id) }"
           :data-card-id="group.id"
         >
-          <!-- 卡头：产品名 + 卡 id。徽标与「渠道级开关」属于单个渠道而不是产品，
-               所以它们跟着分段走：单渠道卡只有一段，就直接画在卡头里（不额外画段头），
-               合并卡每段各有自己的段头 -->
           <div class="ch-card-head">
             <div class="ch-title">
               <span
@@ -227,188 +185,122 @@
               <span class="ch-name">{{ group.name }}</span>
               <span class="ch-id mono">{{ group.providers.map(item => item.id).join(' / ') }}</span>
             </div>
-            <!-- 单渠道卡：徽标 + 渠道级开关就在卡头，不额外画段头（合并卡见下面的段头） -->
-            <div v-if="group.providers.length === 1" class="ch-head-right">
-              <template v-for="p in group.providers" :key="p.id">
-                <span class="badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
-                <label class="ch-switch" :title="switchTitle(p)">
-                  <input
-                    type="checkbox"
-                    class="ch-check"
-                    :checked="hasAccounts(p) && !accountsAllDisabled(p)"
-                    :disabled="busyKey === p.id + ':enable' || !hasAccounts(p)"
-                    @change="toggleProvider(p, $event)"
-                  />
-                  <span class="ch-switch-text">{{ !hasAccounts(p) ? '无账号' : accountsAllDisabled(p) ? '已停用' : '启用' }}</span>
-                </label>
-              </template>
+            <div class="ch-head-right">
+              <span class="badge" :class="badgeClass(group)">{{ badgeText(group) }}</span>
+              <!-- 渠道级开关：合并卡上它管的是这张卡里的全部账号，
+                   和 WorkBuddy 卡一样只看「参不参与轮转」，冷却 / 熔断与模型开关都不动 -->
+              <label class="ch-switch" :title="switchTitle(group)">
+                <input
+                  type="checkbox"
+                  class="ch-check"
+                  :checked="hasAccounts(group) && !accountsAllDisabled(group)"
+                  :disabled="busyKey === group.id + ':enable' || !hasAccounts(group)"
+                  @change="toggleProvider(group, $event)"
+                />
+                <span class="ch-switch-text">{{ !hasAccounts(group) ? '无账号' : accountsAllDisabled(group) ? '已停用' : '启用' }}</span>
+              </label>
             </div>
           </div>
 
-          <!-- 一个渠道一段。合并卡（Qoder / Qoder 中国版）里两段各自带段头：
-               它们是同一个产品的两个区域，账号、登录、签到、余额各走各的 provider 端点，
-               但并排放在一张卡里才能直接对比两边 —— 这正是合并的目的 -->
-          <div v-for="p in group.providers" :key="p.id" class="ch-provider-seg">
-            <div v-if="group.providers.length > 1" class="ch-provider-head">
-              <div class="ch-title">
-                <!-- 卡头已经列了两个 provider id，段头只说区域名（照抄渠道包的 displayName） -->
-                <span class="ch-name">{{ p.name }}</span>
-              </div>
-              <div class="ch-head-right">
-                <span class="badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
-                <label class="ch-switch" :title="switchTitle(p)">
-                  <input
-                    type="checkbox"
-                    class="ch-check"
-                    :checked="hasAccounts(p) && !accountsAllDisabled(p)"
-                    :disabled="busyKey === p.id + ':enable' || !hasAccounts(p)"
-                    @change="toggleProvider(p, $event)"
-                  />
-                  <span class="ch-switch-text">{{ !hasAccounts(p) ? '无账号' : accountsAllDisabled(p) ? '已停用' : '启用' }}</span>
-                </label>
-              </div>
-            </div>
-
-            <!-- 账号列表 -->
-            <div v-if="!accountsOf(p).length" class="empty">还没有账号</div>
-            <div v-else class="ch-accounts">
-              <div v-for="acct in accountsOf(p)" :key="acct.id" class="ch-account">
-                <label class="ch-check-wrap" :title="acct.enabled === false ? '已停用：不参与选号' : '启用中'">
-                  <input
-                    type="checkbox"
-                    class="ch-check"
-                    :checked="acct.enabled !== false"
-                    :disabled="busyKey === acct.id + ':enable' || busyKey === p.id + ':enable'"
-                    @change="toggleAccount(acct, $event)"
-                  />
-                </label>
-                <div class="ch-account-main">
-                  <div class="ch-account-name">
-                    {{ acct.nickname || acct.id }}
-                    <span v-if="acct.accountName" class="ch-extra">{{ acct.accountName }}</span>
-                    <span v-if="acct.phone" class="ch-extra mono">{{ acct.phone }}</span>
-                  </div>
-                  <div class="ch-account-sub">
-                    <span>{{ expiryText(acct) }}</span>
-                    <span
-                      v-if="accountTagMap[acct.id]"
-                      class="ch-tag"
-                      :class="{ bad: accountTagMap[acct.id].bad }"
-                      :title="accountTagMap[acct.id].title"
-                    >{{ accountTagMap[acct.id].text }}</span>
-                    <span v-if="acct.refreshable" class="ch-tag">可续期</span>
-                    <span v-if="acct.refreshError" class="ch-tag bad" :title="acct.refreshError">刷新失败</span>
-                  </div>
+          <!-- 账号列表：不分区域拆盒子。分区域拆开时每段都要自带标题、徽标、开关和
+               一整行操作，同一张卡里出现两套一样的东西，反而不如直接标在行上 -->
+          <div v-if="!accountsOf(group).length" class="empty">还没有账号</div>
+          <div v-else class="ch-accounts">
+            <div v-for="acct in accountsOf(group)" :key="acct.id" class="ch-account">
+              <label class="ch-check-wrap" :title="acct.enabled === false ? '已停用：不参与选号' : '启用中'">
+                <input
+                  type="checkbox"
+                  class="ch-check"
+                  :checked="acct.enabled !== false"
+                  :disabled="busyKey === acct.id + ':enable' || busyKey === group.id + ':enable'"
+                  @change="toggleAccount(acct, $event)"
+                />
+              </label>
+              <div class="ch-account-main">
+                <div class="ch-account-name">
+                  {{ accountName(acct) }}
+                  <span v-if="group.providers.length > 1" class="ch-extra">{{ providerRegionOf(acct.provider) }}</span>
+                  <span v-if="acct.accountName" class="ch-extra">{{ acct.accountName }}</span>
+                  <span v-if="acct.phone" class="ch-extra mono">{{ acct.phone }}</span>
                 </div>
-                <div class="ch-account-actions">
-                  <button class="ch-icon-btn" :title="`用浏览器打开 ${p.name} 个人中心看明细`" @click="openConsole(p.id, 'default')">
-                    <AppIcon name="externalLink" />
-                  </button>
-                  <button class="btn-ghost btn-sm" :disabled="busyKey === acct.id + ':test'" @click="testAccount(acct)">
-                    {{ busyKey === acct.id + ':test' ? '测试中…' : '测试' }}
-                  </button>
-                  <button
-                    v-if="supportsOnboarding(p)"
-                    class="btn-ghost btn-sm"
-                    :disabled="busyKey === acct.id + ':onboarding'"
-                    :title="p.id === 'loomy' ? 'Loomy 新手任务（一次性）' : 'Raccoon 桌面端登录奖励'"
-                    @click="claimOnboarding(p, acct)"
-                  >
-                    {{ busyKey === acct.id + ':onboarding' ? '领取中…' : '新手任务' }}
-                  </button>
-                  <button class="btn-ghost btn-sm ch-danger" :disabled="busyKey === acct.id + ':delete'" @click="removeAccount(acct)">
-                    删除
-                  </button>
+                <div class="ch-account-sub">
+                  <!-- 与 WorkBuddy 账号行同一个顺序：先说状态（可用 / 已停用），
+                       再说有效期与标签。少了这一项，两张卡的第一行信息起点不同 -->
+                  <span :class="acct.enabled === false ? 'text-muted' : 'ch-ok'">
+                    {{ acct.enabled === false ? '已停用' : '可用' }}
+                  </span>
+                  <span>{{ expiryText(acct) }}</span>
+                  <span
+                    v-if="accountTagMap[acct.id]"
+                    class="ch-tag"
+                    :class="{ bad: accountTagMap[acct.id].bad }"
+                    :title="accountTagMap[acct.id].title"
+                  >{{ accountTagMap[acct.id].text }}</span>
+                  <span v-if="acct.refreshable" class="ch-tag">可续期</span>
+                  <span v-if="acct.refreshError" class="ch-tag bad" :title="acct.refreshError">刷新失败</span>
                 </div>
               </div>
-            </div>
-
-            <!-- 个人中心链接：默认值只有官方域名，用户可以改成准确的明细页 -->
-            <ChannelLinkEditor
-              v-if="linkEditor === p.id"
-              :slots="slotsOf(p.id)"
-              :values="linkValuesOf(p.id)"
-              @submit="draft => saveLinks(p.id, draft)"
-              @reset="resetLinks(p.id)"
-              @close="linkEditor = ''"
-            />
-
-            <!-- 登录中：授权链接 + 轮询状态（页内区块，不弹窗） -->
-            <div v-if="login && login.provider === p.id" class="ch-login">
-              <div class="ch-login-title">在浏览器中完成 {{ p.name }} 授权</div>
-              <div class="ch-login-url" :title="login.url">{{ login.url }}</div>
-              <div class="ch-login-actions">
-                <button class="btn-primary btn-sm" @click="openLoginUrl">打开授权链接</button>
-                <button class="btn-ghost btn-sm" @click="copyLoginUrl">复制链接</button>
-                <button class="btn-ghost btn-sm" @click="cancelLogin">停止等待</button>
-              </div>
-              <div class="ch-login-status">
-                {{ login.message || '等待浏览器完成授权，每 2.5 秒自动检测一次…' }}
-              </div>
-            </div>
-
-            <!-- 操作行 -->
-            <div class="ch-actions">
-              <button
-                class="btn-primary btn-sm"
-                :disabled="!!login || busyKey === p.id + ':login'"
-                @click="startLogin(p)"
-              >
-                + 登录账号
-              </button>
-              <!-- ZCode 有两个 OAuth 入口，凭据落点不同，登录前必须先选 -->
-              <select v-if="p.id === 'zcode'" v-model="zcodeRealm" class="ch-select" :disabled="!!login">
-                <option value="bigmodel">智谱开放平台（bigmodel.cn）</option>
-                <option value="zai">z.ai 国际版（chat.z.ai）</option>
-              </select>
-              <button
-                v-if="canClaim(p)"
-                class="btn-ghost btn-sm"
-                :disabled="creditBusy === p.id + ':claim' || checkinAll.running"
-                title="逐账号顺序领取（并发易触发上游风控）"
-                @click="claimCredits(p)"
-              >
-                {{ creditBusy === p.id + ':claim' ? '领取中…' : '领取积分' }}
-              </button>
-              <button
-                class="btn-ghost btn-sm"
-                :disabled="creditBusy === p.id + ':balance'"
-                @click="loadBalances(p)"
-              >
-                {{ creditBusy === p.id + ':balance' ? '查询中…' : '余额' }}
-              </button>
-              <button class="ch-icon-btn" title="设置个人中心链接" @click="toggleLinkEditor(p.id)">
-                <AppIcon name="settings" />
-              </button>
-            </div>
-
-            <!-- 领取结果 -->
-            <div v-if="claimResults[p.id]" class="ch-result">
-              <div class="ch-result-line">{{ claimSummaryText(p, claimResults[p.id].summary) }}</div>
-              <div v-for="row in claimResults[p.id].results" :key="row.accountId" class="ch-result-row">
-                <span class="ch-result-name">{{ row.nickname }}</span>
-                <span :class="outcomeClass(row.outcome)">{{ outcomeText(row.outcome) }}</span>
+              <div class="ch-account-actions">
+                <AppButton
+                  variant="secondary"
+                  class="ch-icon-btn"
+                  :title="`用浏览器打开 ${providerNameOf(acct.provider)} 个人中心看明细`"
+                  @click="openConsole(acct.provider, 'default')"
+                >
+                  个人中心
+                </AppButton>
+                <!-- 行内签到：与 WorkBuddy 账号行同一组按钮、同一顺序
+                     （明细 → 签到 → 删除）。这家不支持的置灰并写明原因 ——
+                     WorkBuddy 国际版那枚「签到」也是这样处理的，两张卡才同构。
+                     今天已签过的同样置灰：再点只会回「今天已签过」，
+                     留着可点等于把「已签」这个事实藏起来 -->
+                <AppButton variant="secondary" :disabled="!supportsCheckinOf(acct) || busyKey === acct.id + ':checkin' || acct.checkinDone" :title="!supportsCheckinOf(acct) ? `${providerNameOf(acct.provider)} 没有每日签到端点` : acct.checkinDone ? `今天已签到${acct.lastCheckinAt ? '（' + formatTime(acct.lastCheckinAt) + '）' : ''}` : '只给这个账号签到'" @click="checkinAccount(acct)">
+                  {{ busyKey === acct.id + ':checkin' ? '签到中…' : acct.checkinDone ? '已签' : '签到' }}
+                </AppButton>
+                <AppButton variant="secondary" v-if="supportsAccountTest(acct)" :disabled="busyKey === acct.id + ':test'" @click="testAccount(acct)">
+                  {{ busyKey === acct.id + ':test' ? '测试中…' : '测试' }}
+                </AppButton>
+                <AppButton variant="secondary" v-if="supportsOnboarding(acct)" :disabled="busyKey === acct.id + ':onboarding'" @click="claimOnboarding(acct)">
+                  {{ busyKey === acct.id + ':onboarding' ? '领取中…' : '新手任务' }}
+                </AppButton>
+                <AppButton variant="secondary" class="ch-danger" :disabled="busyKey === acct.id + ':delete'" @click="removeAccount(acct)">
+                  删除
+                </AppButton>
               </div>
             </div>
+          </div>
 
-            <!-- 积分余额 -->
-            <div v-if="balances[p.id]" class="ch-result">
-              <div v-for="row in balances[p.id].accounts" :key="row.accountId" class="ch-result-row">
-                <span class="ch-result-name">
-                  {{ row.nickname }}
-                  <span v-if="row.extra && row.extra.accountTier" class="ch-tag" :title="row.extra.accountTier.title">
-                    {{ row.extra.accountTier.label }}
-                  </span>
-                </span>
-                <span v-if="row.balance">
-                  {{ formatCredit(row.balance.total) }}
-                  <span v-if="row.balance.expiredTotal > 0" class="text-muted">
-                    （另有 {{ formatCredit(row.balance.expiredTotal) }} 已失效）
-                  </span>
-                </span>
-                <span v-else class="ch-bad">{{ row.error || '查询失败' }}</span>
-              </div>
+          <!-- 登录中：授权链接 + 轮询状态（页内区块，不弹窗）。
+               判据是「本卡有哪个区域正在登录」而不是下拉当前值 —— 用户在等授权时
+               切了区域，这块不该跟着消失 -->
+          <div v-if="login && group.providers.some(p => p.id === login.provider)" class="ch-login">
+            <div class="ch-login-title">在浏览器中完成 {{ providerNameOf(login.provider) }} 授权</div>
+            <div class="ch-login-url" :title="login.url">{{ login.url }}</div>
+            <div class="ch-login-actions">
+              <AppButton variant="primary" @click="openLoginUrl">打开授权链接</AppButton>
+              <AppButton variant="secondary" @click="copyLoginUrl">复制链接</AppButton>
+              <AppButton variant="secondary" @click="cancelLogin">停止等待</AppButton>
             </div>
+            <div class="ch-login-status">
+              {{ login.message || '等待浏览器完成授权，每 2.5 秒自动检测一次…' }}
+            </div>
+          </div>
+
+          <!-- 操作行：与 WorkBuddy 同一顺序 —— 登录、区域下拉。
+               区域下拉只在合并卡上出现（WorkBuddy 是「国内版 / 国际版」，这里是
+               「国际版 / 国内版」），登录作用于选中的那个区域 -->
+          <div class="ch-actions">
+            <AppButton variant="primary" :disabled="!!login || busyKey === activeProviderOf(group).id + ':login'" @click="startLogin(activeProviderOf(group))">
+              + 登录账号
+            </AppButton>
+            <select
+              v-if="group.providers.length > 1"
+              v-model="loginTargets[group.id]"
+              class="ch-select"
+              :disabled="!!login"
+            >
+              <option v-for="p in group.providers" :key="p.id" :value="p.id">{{ p.option }}</option>
+            </select>
           </div>
         </div>
       </div>
@@ -432,16 +324,9 @@
             <span class="ch-group-actions">
               <!-- 测试中这个按钮变成「停止」：同一个位置点两次就是开始 / 取消，
                    不用扫到工具栏另一端去找「中止」，也不会被误当成「再开一轮」 -->
-              <button
-                class="btn-ghost btn-sm"
-                :disabled="(!!testRun && !isTestRunning('enabled')) || !!busyKey || !enabledModels.length"
-                :title="isTestRunning('enabled')
-                  ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败`
-                  : `逐个真实调用这里列出的 ${enabledModels.length} 个已开启模型（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）；关闭的与已失效 / 已失活的本来就不在这张清单里`"
-                @click="toggleModelTests('enabled')"
-              >
+              <AppButton variant="secondary" :disabled="(!!testRun && !isTestRunning('enabled')) || !!busyKey || !enabledModels.length" :title="isTestRunning('enabled') ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败` : `逐个真实调用这里列出的 ${enabledModels.length} 个已开启模型（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）；关闭的与已失效 / 已失活的本来就不在这张清单里`" @click="toggleModelTests('enabled')">
                 {{ isTestRunning('enabled') ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
-              </button>
+              </AppButton>
             </span>
           </div>
           <div v-if="enabledModels.length" class="ch-models">
@@ -491,52 +376,11 @@
           <span v-if="modelFilterActive" class="text-muted ch-model-filter-hit">
             匹配 <span class="ch-ok">{{ filteredModelTotal }}</span> / {{ modelTotal }} 个
           </span>
-          <button
-            v-if="!testRun && testedModelCount"
-            class="btn-ghost btn-sm"
-            :title="`清除全部 ${testedModelCount} 个模型的测试标记，让下一次测试从干净状态开始`"
-            @click="clearTestResults"
-          >
-            清除标记（{{ testedModelCount }}）
-          </button>
-          <!-- 测试与批量开关同一侧、同一顺序（测试 / 全部开启 / 全部关闭），
-               与每个渠道组头那一排对齐：它们是同一类操作，只是作用范围不同，
-               位置一致才不会点错。测试按钮本身不受 testRun 禁用 ——
-               测试中它就地变成「停止 x/y」 -->
-          <span class="ch-toolbar-right">
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="(!!testRun && !isTestRunning('all')) || modelsLoading"
-              :title="isTestRunning('all')
-                ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败`
-                : modelFilterActive
-                  ? `只把匹配当前过滤、且已启动的模型逐个真实调用一次（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）`
-                  : `把每个渠道里已启动的模型逐个真实调用一次，通过的标绿点、失败的标红点（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）`"
-              @click="toggleModelTests('all')"
-            >
-              {{ isTestRunning('all') ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
-            </button>
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="modelsLoading || !!busyKey || !!testRun || !filteredModelGroups.length"
-              :title="modelFilterActive
-                ? `打开匹配当前过滤的 ${filteredModelTotal} 个模型（标「已失效」的不动，那是上游下线判定，要逐点点开才能复活）`
-                : `打开所有渠道的全部模型（标「已失效」的不动，那是上游下线判定，要逐点点开才能复活）`"
-              @click="setAllModelsEverywhere(false)"
-            >
-              {{ busyKey === 'all:on' ? '开启中…' : '全部开启' }}
-            </button>
-            <button
-              class="btn-ghost btn-sm"
-              :disabled="modelsLoading || !!busyKey || !!testRun || !filteredModelGroups.length"
-              :title="modelFilterActive
-                ? `关闭匹配当前过滤的 ${filteredModelTotal} 个模型：关掉的模型会从 /v1/models 和对话的模型选择里消失，但配置还在，随时能再开回来`
-                : `关闭所有渠道的全部模型：关掉的模型会从 /v1/models 和对话的模型选择里消失，但配置还在，随时能再开回来`"
-              @click="setAllModelsEverywhere(true)"
-            >
-              {{ busyKey === 'all:off' ? '关闭中…' : '全部关闭' }}
-            </button>
-          </span>
+          <!-- 「清除标记」已移除：批量清空测试结论会把每一格「多早测的、因为什么挂的」
+               一起抹掉，而重测本身就会覆盖对应那条 —— 要清掉某条的陈旧结论，重测它即可 -->
+          <!-- 全渠道的「测试 / 全部开启 / 全部关闭」已移除：
+               渠道组头保留了同一排按钮（作用范围是单家渠道），全渠道批量操作容易一次点错
+               就把几十个模型关掉，且影响面不在同一行的上下文里 -->
         </div>
 
         <!-- 按钮移除后没有别的读取中指示，这里补一句：否则空目录时会先闪一段「没读到」再出现列表 -->
@@ -561,20 +405,11 @@
               <!-- 这几个按钮作用于当前过滤命中的模型；把范围写在按钮旁边，
                    免得「筛出 3 条点全部关闭」时以为整家渠道都被关了（或反过来） -->
               <span v-if="modelFilterActive" class="text-muted ch-filter-scope">作用于匹配的 {{ group.models.length }} 个</span>
-              <button
-                class="btn-ghost btn-sm"
-                :disabled="(!!testRun && !isTestRunning(group.id)) || !!busyKey"
-                :title="isTestRunning(group.id)
-                  ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败`
-                  : modelFilterActive
-                    ? `只测本渠道里匹配当前过滤、且已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`
-                    : `逐个真实调用这个渠道里已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`"
-                @click="toggleModelTests(group.id)"
-              >
+              <AppButton variant="secondary" :disabled="(!!testRun && !isTestRunning(group.id)) || !!busyKey" :title="isTestRunning(group.id) ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败` : modelFilterActive ? `只测本渠道里匹配当前过滤、且已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）` : `逐个真实调用这个渠道里已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`" @click="toggleModelTests(group.id)">
                 {{ isTestRunning(group.id) ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
-              </button>
-              <button class="btn-ghost btn-sm" :disabled="!!busyKey" @click="setAllModels(group.id, false)">全部打开</button>
-              <button class="btn-ghost btn-sm" :disabled="!!busyKey" @click="setAllModels(group.id, true)">全部关闭</button>
+              </AppButton>
+              <AppButton variant="secondary" :disabled="!!busyKey" @click="setAllModels(group.id, false)">全部打开</AppButton>
+              <AppButton variant="secondary" :disabled="!!busyKey" @click="setAllModels(group.id, true)">全部关闭</AppButton>
             </span>
           </div>
           <div class="ch-models">
@@ -609,7 +444,7 @@
         <!-- 过滤没有命中任何模型：分组区会整块消失，不给一句话就成了白屏 -->
         <div v-if="modelGroups.length && modelFilterActive && !filteredModelGroups.length" class="empty">
           没有匹配「{{ modelFilter.trim() }}」的模型（全量目录共 {{ modelTotal }} 个）。
-          <button class="btn-ghost btn-sm" @click="clearModelFilter">清除过滤</button>
+          <AppButton variant="secondary" @click="clearModelFilter">清除过滤</AppButton>
         </div>
       </div>
     </template>
@@ -618,14 +453,15 @@
 
 <script setup>
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { showToast } from '../composables/useToast.js'
 import AppIcon from '../components/AppIcon.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
-import ChannelLinkEditor from '../components/ChannelLinkEditor.vue'
-import { slotsOf, linkKeyOf, readCustomLinks, saveCustomLinks } from '../utils/channel-links.js'
+import { slotsOf } from '../utils/channel-links.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
 import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, reviveModel, getAccountHealth } from '../api.js'
+import AppButton from '../components/AppButton.vue'
 // WorkBuddy 走独立的一组端点（/api/workbuddy/*），和渠道包 RPC 是两套账号体系。
 // 函数名统一加 wb 前缀并与本页已有的 removeAccount / testAccount 等区分开。
 import {
@@ -633,8 +469,6 @@ import {
   wbOauthStart,
   wbOauthPoll,
   wbCheckin as wbCheckinApi,
-  wbRefreshBalance,
-  wbRefreshAllBalances,
   wbRemoveAccount,
   wbDisable as wbDisableApi,
   wbEnable as wbEnableApi,
@@ -645,66 +479,62 @@ import {
   wbSaveEnabledModels
 } from '../api.js'
 
-// 十个渠道的 id 与展示名（id 取自渠道包各 product 配置，展示名照抄 displayName）
+// 渠道的 id 与展示名。WorkBuddy 两区在下面的 WB_MODEL_PROVIDERS 里，
+// 其余三家来自 AiRoute 自己的实现（server/channels/plugins/{trae,qoder}）。
+// `option` 是合并卡操作行下拉里的写法，与 WorkBuddy 的「国内版（copilot.tencent.com）」
+// 同一种格式：同一产品的两个区域，光写「国际版 / 国内版」看不出站点，写域名才够
 const PROVIDERS = [
-  { id: 'lobsterai', name: 'LobsterAI (有道)' },
-  { id: 'qoder', name: 'Qoder' },
-  { id: 'qodercn', name: 'Qoder (中国版)' },
-  { id: 'trae', name: 'TRAE (字节)' },
-  { id: 'cline', name: 'Cline' },
-  { id: 'loomy', name: 'Loomy (讯飞)' },
-  { id: 'raccoon', name: 'Raccoon (商汤)' },
-  { id: 'minimax', name: 'MiniMax Code' },
-  { id: 'zcode', name: 'ZCode (智谱)' },
-  { id: 'gemini', name: 'Gemini Code Assist' }
+  { id: 'trae', name: 'TRAE (字节)', option: 'TRAE (字节)', region: '' },
+  { id: 'qoder', name: 'Qoder', option: '国际版（qoder.com）', region: '国际版' },
+  { id: 'qodercn', name: 'Qoder (国内版)', option: '国内版（qoder.cn）', region: '国内版' }
 ]
 
-// 只有这两家有「新手任务 / 登录奖励」端点（onboarding.status 只认这两个 provider）
-const ONBOARDING_PROVIDERS = ['loomy', 'raccoon']
-// 有签到端点的渠道：渠道包 credits.claimAll 里真正写了分支的这几家
-// （qoder / qodercn 共用 Qoder 家族那一段，WorkBuddy 走调度器，不在这里）。
-//
-// 用白名单而不是「排除 Gemini」的黑名单：渠道包对 Cline、Raccoon 是**显式**返回
-// 「不支持每日签到」，其余没写分支的一律 unsupported provider。黑名单得跟着上游一家家补，
-// 漏一家就变成「一键签到里多一条必然失败的渠道」，用户只能对着报错猜是哪家不支持。
-const CLAIM_PROVIDERS = ['lobsterai', 'qoder', 'qodercn', 'trae', 'loomy', 'minimax', 'zcode']
+// 有「新手任务 / 登录奖励」端点的渠道。当前三家都没有这种端点
+const ONBOARDING_PROVIDERS = []
+// 有签到端点的渠道。只有 TRAE 有 checkin_credits；Qoder 没有签到端点，
+// 给它一个必然失败的按钮只会让用户对着报错猜是哪家不支持。
+const CLAIM_PROVIDERS = ['trae']
 
-// 同一产品的多个区域合成一张卡。Qoder 在渠道包里是两套独立凭据
+// 同一产品的多个区域合成一张卡。Qoder 是两套独立凭据
 // （`qoder` → qoder.com、`qodercn` → qoder.cn），但它们是同一个产品：
-// 分成两张卡时用户要来回滚动才能对比两边的账号、余额和签到结果。
+// 分成两张卡时用户要来回滚动才能对比两边的账号。
 //
-// 合并的只有**展示**：账号体系、启用开关、登录入口、签到/余额端点仍然按 provider 各自走，
-// 所以卡片内部按渠道分段，每段自带徽标与渠道级开关。
+// 合并的是**整张卡的骨架**：一个卡头（徽标 + 开关）、一个账号盒、一行操作，
+// 与 WorkBuddy 卡同构；区域之间的差别只留在账号行的标签和操作行的下拉上。
+// `defaultTarget` 决定操作行默认作用于哪个区域（国际版在前，与 Qoder 主站一致）。
 // 卡 id 取第一个成员（`qoder`）：拖拽顺序是按卡 id 存在 localStorage 的，
 // 沿用旧 id 用户排好的位置就不会丢。
 const MERGED_CARDS = [
-  { id: 'qoder', name: 'Qoder', members: ['qoder', 'qodercn'] }
+  { id: 'qoder', name: 'Qoder', members: ['qoder', 'qodercn'], defaultTarget: 'qoder' }
 ]
 
-// 账号页的卡片清单：一个分组一张卡。名称照抄渠道包的 displayName，
-// 单成员分组的卡头与分段内标题都写这个名字，所以不另起叫法。
+// 账号页的卡片清单：一个分组一张卡。名称照抄 displayName。
 const CARD_GROUPS = (() => {
   const byId = new Map(PROVIDERS.map(provider => [provider.id, provider]))
   const groups = []
   for (const provider of PROVIDERS) {
     const merged = MERGED_CARDS.find(card => card.members.includes(provider.id))
     if (!merged) {
-      groups.push({ id: provider.id, name: provider.name, providers: [provider] })
+      groups.push({ id: provider.id, name: provider.name, providers: [provider], defaultTarget: provider.id })
       continue
     }
     if (groups.some(group => group.id === merged.id)) continue
+    const providers = merged.members.map(id => byId.get(id)).filter(Boolean)
     groups.push({
       id: merged.id,
       name: merged.name,
-      providers: merged.members.map(id => byId.get(id)).filter(Boolean)
+      providers,
+      defaultTarget: providers.some(p => p.id === merged.defaultTarget)
+        ? merged.defaultTarget
+        : (providers[0]?.id || '')
     })
   }
   return groups
 })()
 
-// WorkBuddy 在渠道包里是「只提供目录」的适配器（见 server/channels/worker.mjs），
+// WorkBuddy 的目录由主进程直通提供（server/channels/index.js 的运行时门面），
 // 而那份目录就是它的**启用清单** —— 已关掉的模型根本没进渠道目录，所以模型页不能
-// 靠 model.list 拿它（对 workbuddy 调 model.list 会回 provider-unsupported），
+// 靠 model.list 拿它（owned runtime 只管 TRAE / Qoder），
 // 只能单独走 /api/workbuddy/*：上游全量算出「有哪些可选」，启用清单算出「现在开着哪些」。
 const WB_MODEL_PROVIDERS = [
   { id: 'workbuddy', name: 'WorkBuddy（国内版）', region: 'cn' },
@@ -729,7 +559,7 @@ function loadSavedOrder() {
   try {
     const raw = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]')
     // 过滤掉已经不存在的 id：渠道包升级删了某个 provider 时旧顺序里会留着它；
-    // Qoder 中国版并进 Qoder 卡之后，旧的 `qodercn` 也会在这里被丢掉
+    // Qoder 国内版并进 Qoder 卡之后，旧的 `qodercn` 也会在这里被丢掉
     if (Array.isArray(raw)) return raw.filter(id => DEFAULT_ORDER.includes(id))
   } catch {
     /* 存坏了就当没存过，不值得为一条排序偏好报错 */
@@ -1025,6 +855,8 @@ function finishDrag({ cancel = false } = {}) {
   persistOrder()
 }
 
+const route = useRoute()
+const router = useRouter()
 const tab = ref('accounts')
 // 视图切换的选项表放常量里：模板只需要绑一次，标签文案改动不必动结构
 const VIEW_TABS = [
@@ -1040,11 +872,7 @@ const statuses = ref({})
 const accounts = ref([])
 
 const login = ref(null) // { provider, accountId, url, message }
-const zcodeRealm = ref('bigmodel') // ZCode 的 OAuth 入口：bigmodel（国内）/ zai（国际）
 const busyKey = ref('') // 行内/卡内按钮的互斥键，形如 `${id}:${action}`
-const creditBusy = ref('')
-const claimResults = ref({}) // provider → { results, summary }
-const balances = ref({}) // provider → { accounts, windowDays }
 const modelsByProvider = ref({}) // provider → RpcModelListEntry[]
 // WorkBuddy 的模型行与「上游全量」分开存：行用于渲染（和渠道包同结构），
 // 上游全量用于保存启用清单时补齐 displayName / maxContext 等字段
@@ -1063,7 +891,6 @@ const testController = ref(null)
 // 它是「我这台机器上试过什么」的本地记录，不跟渠道包的数据目录走 ——
 // 渠道状态是账号池的事实，测试结论只是观察结果，两者混在同一个文档里迟早互相干扰。
 const modelTestResults = ref(readTestResults())
-const testedModelCount = computed(() => Object.keys(modelTestResults.value).length)
 
 // 失活台账：键是模型 id（gemini/gemini-2.5-pro）→ { ref, offline, reason, detail }
 // 与配置引用一一对应（服务端用 resolveRef 补的 modelId），界面按 modelId 匹配。
@@ -1148,9 +975,7 @@ const wbCounts = ref({ total: 0, healthy: 0, cooling: 0, disabled: 0 })
 const wbRealm = ref('cn') // 国内版 / 国际版：域名与 OAuth 入口不同
 const wbLogin = ref(null) // { state, url, realm, message }
 const wbBusy = ref('') // `${uid}:${action}`
-const wbBusyAll = ref('') // '' | 'checkin' | 'balance'
-// 最近一次「全部签到 / 一键签到」里 WorkBuddy 那一段的汇总（调度器只回一行文字）
-const wbCheckinSummary = ref('')
+const wbBusyAll = ref('') // '' | 'toggle'
 const wbError = ref('')
 let wbLoginTimer = null
 
@@ -1178,8 +1003,13 @@ async function reload({ silent = false } = {}) {
     const failed = []
     const lists = await Promise.all(targets.map(async p => {
       try {
-        const { accounts: rows } = await channelsRpc('account.list', { provider: p.id })
-        return rows || []
+        // 自有实现的 account.list 直接回数组（渠道包时代是 { accounts }），两种都认；
+        // 行里不带 provider 字段，而模板是按 provider 分卡的（accountsOf），
+        // 所以在这里补上 —— 漏了它每张卡都会显示成「还没有账号」，
+        // 徽标却是「1/1 账号」，自相矛盾
+        const value = await channelsRpc('account.list', { provider: p.id })
+        const rows = Array.isArray(value) ? value : (value?.accounts || [])
+        return rows.map(row => ({ provider: p.id, ...row }))
       } catch (err) {
         failed.push(p.id)
         return []
@@ -1222,8 +1052,10 @@ async function loadModels() {
     const failed = []
     const entries = await Promise.all(targets.map(async p => {
       try {
-        const { models } = await channelsRpc('model.list', { provider: p.id })
-        return [p.id, models || []]
+        // model.list 的 value 就是模型数组本身（不是 { models }）：按对象解构只会
+        // 拿到 undefined，三家插件渠道于是在模型页整组消失，只剩 WorkBuddy 两区
+        const models = await channelsRpc('model.list', { provider: p.id })
+        return [p.id, Array.isArray(models) ? models : []]
       } catch (err) {
         failed.push(p.id)
         return [p.id, []]
@@ -1301,12 +1133,9 @@ function openInBrowser(url) {
 }
 
 // ==================== 个人中心 / 明细 ====================
-// 链接来自 utils/channel-links.js：默认值只放能确证的官方域名，用户可以改，
-// 覆盖值存在本机。放在这里而不是子组件里，是因为卡片上的按钮也读它，
-// 保存后要立刻反映到「明细」按钮的可用状态上。
-
-const customLinks = ref(readCustomLinks())
-const linkEditor = ref('') // 正在编辑链接的 provider id，空表示没展开
+// 链接一律用 utils/channel-links.js 里的内置默认值（只放能确证的官方域名）。
+// 这里是**只读**的：卡片上的「明细」按钮直接取默认值打开浏览器，
+// 页面不再提供改链接的入口 —— 少了一个要解释「这条链接存在哪」的地方。
 
 // WorkBuddy 的国内版 / 国际版是两个站点，别的渠道只有一个入口
 function slotKeyOf(providerId, acct) {
@@ -1316,54 +1145,17 @@ function slotKeyOf(providerId, acct) {
 
 function consoleUrlOf(providerId, slotKey) {
   const slot = slotsOf(providerId).find(item => item.key === slotKey)
-  const custom = (customLinks.value[linkKeyOf(providerId, slotKey)] || '').trim()
-  return custom || slot?.url || ''
-}
-
-// 已保存的覆盖值，传给编辑器当回填
-function linkValuesOf(providerId) {
-  const out = {}
-  for (const slot of slotsOf(providerId)) {
-    const value = customLinks.value[linkKeyOf(providerId, slot.key)]
-    if (value) out[slot.key] = value
-  }
-  return out
-}
-
-function toggleLinkEditor(providerId) {
-  linkEditor.value = linkEditor.value === providerId ? '' : providerId
+  return slot?.url || ''
 }
 
 function openConsole(providerId, slotKey) {
   const url = consoleUrlOf(providerId, slotKey)
   if (!url) {
-    // 没有默认值的渠道（目前只有 Raccoon）：直接把编辑框打开，别让用户猜
-    linkEditor.value = providerId
-    showToast('这家还没有内置链接，先填一个个人中心地址', 'error', 3500)
+    // 没有默认值的渠道（目前只有 Raccoon）：如实说没有，别弹一个填不了的编辑器
+    showToast('这家还没有内置的个人中心链接', 'error', 3500)
     return
   }
   openInBrowser(url)
-}
-
-function saveLinks(providerId, draft) {
-  const next = { ...customLinks.value }
-  for (const slot of slotsOf(providerId)) {
-    const value = String(draft[slot.key] || '').trim()
-    if (value) next[linkKeyOf(providerId, slot.key)] = value
-    else delete next[linkKeyOf(providerId, slot.key)]
-  }
-  customLinks.value = next
-  saveCustomLinks(next)
-  linkEditor.value = ''
-  showToast('个人中心链接已保存')
-}
-
-function resetLinks(providerId) {
-  const next = { ...customLinks.value }
-  for (const slot of slotsOf(providerId)) delete next[linkKeyOf(providerId, slot.key)]
-  customLinks.value = next
-  saveCustomLinks(next)
-  showToast('已恢复内置默认链接')
 }
 
 async function startLogin(p) {
@@ -1371,8 +1163,6 @@ async function startLogin(p) {
   busyKey.value = p.id + ':login'
   try {
     const payload = { provider: p.id }
-    // ZCode 有两个 OAuth 入口，凭据落点不同，必须由用户选（缺省是智谱开放平台）
-    if (p.id === 'zcode') payload.zcodeProvider = zcodeRealm.value
     const started = await channelsRpc('account.create', payload)
     login.value = { provider: p.id, accountId: started.accountId, url: started.loginUrl, message: '' }
     // 渠道包已经起好本地回调页/授权页，这里直接交给系统浏览器；
@@ -1467,76 +1257,136 @@ async function copyLoginUrl() {
 }
 
 // ==================== 账号 ====================
+//
+// 卡片是一个**分组**：单渠道卡只有一家，合并卡（Qoder）是同一产品的两个区域。
+// 下面这些 helper 都吃 group 而不是 provider —— 徽标、开关、账号列表、
+// 操作行都是整卡的，两个区域不再各画一套。要按区域做的事（登录 /
+// 领取）由 activeProviderOf(group) 选中的那一家执行。
 
-function accountsOf(p) {
-  return accounts.value.filter(a => a.provider === p.id)
+// 分组内某个区域的信息
+function providerOfId(id) {
+  return PROVIDERS.find(p => p.id === id) || { id, name: id, option: id }
+}
+
+function providerNameOf(id) {
+  return providerOfId(id).name
+}
+
+// 账号行上的区域标签：与 WorkBuddy 账号行的「国内版 / 国际版」同一个位置、
+// 同一种写法（短标签，不重复产品名 —— 卡头已经写了 Qoder）
+function providerRegionOf(id) {
+  return providerOfId(id).region || providerOfId(id).name
+}
+
+// 合并卡当前选中的区域（登录 / 余额 / 领取的作用对象）；单渠道卡就是它自己。
+// WorkBuddy 卡的「国内版 / 国际版」下拉是同一套交互，这里保持位置与语义一致。
+// 必须用 defaultTarget 预填：留空时 <select> 的 v-model 是 undefined，浏览器
+// 会渲染成一个空白框（它只显示「已选中的 option」，不会自动选第一项）
+const loginTargets = ref(Object.fromEntries(CARD_GROUPS.map(group => [group.id, group.defaultTarget])))
+
+function activeProviderOf(group) {
+  const picked = loginTargets.value[group.id] || group.defaultTarget
+  return group.providers.find(p => p.id === picked) || group.providers[0]
+}
+
+// 账号属于哪个区域 -> 展示名。合并卡里账号行靠它标「国际版 / 国内版」，
+// 与 WorkBuddy 账号行上的「国内版 / 国际版」是同一个位置、同一套写法
+function accountsOf(group) {
+  const ids = new Set(group.providers.map(p => p.id))
+  return accounts.value.filter(a => ids.has(a.provider))
+}
+
+// 账号行标题：自有渠道的行字段是 name，WorkBuddy 是 nickname；都没有才退回 id。
+// 直接写 `nickname || id` 会让 TRAE / Qoder 显示成 trae-45ab04e0 这种内部 id
+function accountName(acct) {
+  return acct.nickname || acct.name || acct.uid || acct.id
 }
 
 // 账号开关与模型开关是两回事：没有账号也能在「模型」页开启模型（转发时才失败，
 // 测试会标红点）。所以卡片右上角的开关只看账号状态，不读 provider.status 的 closed ——
 // 那是「模型是否全关」的判据。
-function hasAccounts(p) {
-  return accountsOf(p).length > 0
+function hasAccounts(group) {
+  return accountsOf(group).length > 0
 }
 
 // 判据与账号行的勾选框一致：enabled !== false 视为启用（老账号可能没有该字段）
-function accountsAllDisabled(p) {
-  const rows = accountsOf(p)
+function accountsAllDisabled(group) {
+  const rows = accountsOf(group)
   return rows.length > 0 && rows.every(a => a.enabled === false)
 }
 
-function badgeText(p) {
-  const st = statuses.value[p.id]
-  if (!st || !st.accounts || st.accounts.total === 0) return '未登录'
-  if (st.accounts.enabled === 0) return `${st.accounts.total} 个（全停用）`
-  return `${st.accounts.enabled}/${st.accounts.total} 账号`
+// 徽标按**整卡**算：合并卡有两家，各画一个「1/1 账号」会让人以为卡里有两套体系。
+// 计数优先用 provider.status（与后端同源），读不到时退回本地账号行
+function badgeCounts(group) {
+  const ids = group.providers.map(p => p.id)
+  const known = ids.map(id => statuses.value[id]).filter(st => st && st.accounts)
+  if (known.length === ids.length) {
+    return {
+      total: known.reduce((sum, st) => sum + (Number(st.accounts.total) || 0), 0),
+      enabled: known.reduce((sum, st) => sum + (Number(st.accounts.enabled) || 0), 0),
+    }
+  }
+  const rows = accountsOf(group)
+  return { total: rows.length, enabled: rows.filter(row => row.enabled !== false).length }
 }
 
-function badgeClass(p) {
-  const st = statuses.value[p.id]
-  if (!st || !st.accounts || st.accounts.total === 0) return 'warn'
-  if (st.accounts.enabled === 0) return 'bad'
+// 文案口径与 WorkBuddy 卡的 wbBadgeText 一致：全部可用时只写「N 账号」，
+// 有停用才写成分数。两张卡并排时一个写「2 账号」、一个写「2/2 账号」，
+// 会让人以为它们统计的不是同一件事
+function badgeText(group) {
+  const { total, enabled } = badgeCounts(group)
+  if (total === 0) return '未登录'
+  if (enabled === 0) return `${total} 个（全停用）`
+  if (enabled === total) return `${total} 账号`
+  return `${enabled}/${total} 账号`
+}
+
+function badgeClass(group) {
+  const { total, enabled } = badgeCounts(group)
+  if (total === 0) return 'warn'
+  if (enabled === 0) return 'bad'
   return 'ok'
 }
 
-function switchTitle(p) {
-  const rows = accountsOf(p)
+function switchTitle(group) {
+  const rows = accountsOf(group)
   if (!rows.length) return '还没有账号：登录后这里控制该渠道全部账号的启用/停用；模型开关在「模型」页独立设置'
   const enabled = rows.filter(a => a.enabled !== false).length
-  return `渠道级开关：停用/启用该渠道全部账号（当前 ${enabled}/${rows.length} 个启用）；`
+  const scope = group.providers.length > 1 ? `本卡两个区域的 ${rows.length} 个账号` : `${rows.length} 个账号`
+  return `渠道级开关：停用/启用${scope}（当前 ${enabled}/${rows.length} 个启用）；`
     + '模型开关在「模型」页独立设置，不受这里影响'
 }
 
 // 只逐号改 enabled，不用 provider.setEnabled：那个端点会连带关掉/打开全部模型，
 // 与「账号与模型相互独立」的约定冲突。
-async function toggleProvider(p, event) {
+async function toggleProvider(group, event) {
   const enabled = event.target.checked
-  const rows = accountsOf(p)
+  const rows = accountsOf(group)
   if (!rows.length) {
     event.target.checked = !enabled
-    showToast(`${p.name} 还没有账号，先登录后再试`, 'error', 5000)
+    showToast(`${group.name} 还没有账号，先登录后再试`, 'error', 5000)
     return
   }
-  busyKey.value = p.id + ':enable'
+  busyKey.value = group.id + ':enable'
   const failed = []
   let changed = 0
   try {
     for (const acct of rows) {
       try {
-        await channelsRpc('account.update', { accountId: acct.id, patch: { enabled } })
+        await channelsRpc('account.update', { accountId: acct.id, provider: acct.provider, patch: { enabled } })
         changed++
       } catch (err) {
-        failed.push(`${acct.nickname || acct.id}：${err.message}`)
+        failed.push(`${accountName(acct)}：${err.message}`)
       }
     }
     if (failed.length) {
       showToast(
-        `${p.name} ${enabled ? '启用' : '停用'} ${changed}/${rows.length} 个账号失败 ${failed.length} 个：${failed[0]}`,
+        `${group.name} ${enabled ? '启用' : '停用'} ${changed}/${rows.length} 个账号失败 ${failed.length} 个：${failed[0]}`,
         'error',
         6000
       )
     } else {
-      showToast(`${p.name} 已${enabled ? '启用' : '停用'} ${changed} 个账号`)
+      showToast(`${group.name} 已${enabled ? '启用' : '停用'} ${changed} 个账号`)
     }
     // 逐号改可能部分失败：以重新读取的结果为准，别让开关停在「看起来全生效」的猜测上
     await reload()
@@ -1549,7 +1399,7 @@ async function toggleAccount(acct, event) {
   const enabled = event.target.checked
   busyKey.value = acct.id + ':enable'
   try {
-    await channelsRpc('account.update', { accountId: acct.id, patch: { enabled } })
+    await channelsRpc('account.update', { accountId: acct.id, provider: acct.provider, patch: { enabled } })
     await reload()
   } catch (err) {
     event.target.checked = !enabled
@@ -1559,11 +1409,35 @@ async function toggleAccount(acct, event) {
   }
 }
 
+// 单个账号的签到：回执走 toast。卡片里不再留结果块 ——
+// 那块要占一整行、跨账号累加，而用户点的是某一行，回执就该在点的地方出现
+async function checkinAccount(acct) {
+  busyKey.value = acct.id + ':checkin'
+  try {
+    const value = await channelsRpc('account.checkin', { provider: acct.provider, accountId: acct.id }, 180000)
+    const outcome = value.outcome === 'claimed'
+      ? { kind: 'claimed', credit: value.credit, unit: 'credit' }
+      : value.outcome === 'done'
+        ? { kind: 'already-claimed', message: '今天已签过' }
+        : value.outcome === 'ineligible'
+          ? { kind: 'inactive', message: value.message || '未开通' }
+          : { kind: 'failed', message: value.message || '签到失败' }
+    showToast(`${accountName(acct)}：${outcomeText(outcome)}`, outcome.kind === 'failed' ? 'error' : undefined)
+    // 签到会写下「今天签过」与积分，重读一次让按钮立刻置灰、积分立刻更新。
+    // 不重读的话要等下一轮 5 秒轮询，用户会以为没生效又点一次
+    await reload({ silent: true })
+  } catch (err) {
+    showToast('签到失败：' + err.message, 'error', 6000)
+  } finally {
+    busyKey.value = ''
+  }
+}
+
 async function testAccount(acct) {
   busyKey.value = acct.id + ':test'
   try {
-    const value = await channelsRpc('account.test', { accountId: acct.id }, 180000)
-    const label = acct.nickname || acct.id
+    const value = await channelsRpc('account.test', { accountId: acct.id, provider: acct.provider }, 180000)
+    const label = accountName(acct)
     // 服务端拿到「账号已被禁用」的证据时会在池里停用它，所以这里重新读一遍：
     // 勾选框和「已禁用」标签要立刻对上，否则界面还显示可用，用户会再点一次
     await reload({ silent: true })
@@ -1579,11 +1453,11 @@ async function testAccount(acct) {
 }
 
 async function removeAccount(acct) {
-  const label = acct.nickname || acct.id
+  const label = accountName(acct)
   if (!window.confirm(`确定删除账号「${label}」吗？\n凭据文件会一并删除，该账号不再参与请求。`)) return
   busyKey.value = acct.id + ':delete'
   try {
-    await channelsRpc('account.delete', { accountId: acct.id })
+    await channelsRpc('account.delete', { accountId: acct.id, provider: acct.provider })
     showToast(`已删除「${label}」`)
     await reload()
     if (tab.value === 'models') await loadModels()
@@ -1594,17 +1468,17 @@ async function removeAccount(acct) {
   }
 }
 
-async function claimOnboarding(p, acct) {
+async function claimOnboarding(acct) {
   busyKey.value = acct.id + ':onboarding'
   try {
-    const before = await channelsRpc('onboarding.status', { provider: p.id, accountId: acct.id })
+    const before = await channelsRpc('onboarding.status', { provider: acct.provider, accountId: acct.id })
     if (before.earned >= before.total && before.total > 0) {
-      showToast(`${acct.nickname || acct.id} 的新手任务已全部领取（${before.earned}/${before.total}）`)
+      showToast(`${accountName(acct)} 的新手任务已全部领取（${before.earned}/${before.total}）`)
       return
     }
-    const value = await channelsRpc('onboarding.claim', { provider: p.id, accountId: acct.id }, 300000)
+    const value = await channelsRpc('onboarding.claim', { provider: acct.provider, accountId: acct.id }, 300000)
     showToast(
-      `${acct.nickname || acct.id} 领取 ${value.claimed.length} 项、跳过 ${value.skipped.length} 项，`
+      `${accountName(acct)} 领取 ${value.claimed.length} 项、跳过 ${value.skipped.length} 项，`
       + `累计 ${value.earned}/${value.total}`
     )
   } catch (err) {
@@ -1616,56 +1490,43 @@ async function claimOnboarding(p, acct) {
 
 // ==================== 积分 ====================
 
+// 端点支持与否由后端的 provider.status.capabilities 回答（插件没实现那个方法
+// 就是这家不支持，见 plugin-api.js 的可选方法表）。面板不再靠「按钮点了报错」
+// 让用户自己发现这件事：
+//   · 签到：只有 TRAE 有 checkin_credits；
+//   · 账号测试：account.test 还留在旧 RPC 表里，当前插件没实现。
+// 读不到 capabilities 时按「支持」处理（宁可显示也不突然消失），
+// 只有明确为 false 才隐藏。
+function capabilityOf(providerId, key) {
+  const caps = statuses.value[providerId]?.capabilities
+  return !caps || caps[key] !== false
+}
+
+function supportsCheckinOf(acct) {
+  return capabilityOf(acct.provider, 'checkin')
+}
+
+function supportsAccountTest(acct) {
+  const caps = statuses.value[acct.provider]?.capabilities
+  return caps ? caps.test === true : false
+}
+
 function canClaim(p) {
   return CLAIM_PROVIDERS.includes(p.id)
 }
 
-function supportsOnboarding(p) {
-  return ONBOARDING_PROVIDERS.includes(p.id)
+// 传 provider（操作行按区域判断）或账号行（行上的「新手任务」按钮）都行
+function supportsOnboarding(target) {
+  return ONBOARDING_PROVIDERS.includes(target?.id || target?.provider)
 }
 
-async function claimCredits(p) {
-  creditBusy.value = p.id + ':claim'
-  try {
-    // 逐账号顺序领取，10 个账号可能要几分钟，超时给足
-    const value = await channelsRpc('credits.claimAll', { provider: p.id }, 600000)
-    claimResults.value = { ...claimResults.value, [p.id]: value }
-    showToast(claimSummaryText(p, value.summary), 'success', 6000)
-  } catch (err) {
-    showToast(`${p.name} 领取积分失败：` + err.message, 'error', 6000)
-  } finally {
-    creditBusy.value = ''
-  }
-}
-
-async function loadBalances(p) {
-  creditBusy.value = p.id + ':balance'
-  try {
-    const value = await channelsRpc('credits.balances', { provider: p.id }, 300000)
-    balances.value = { ...balances.value, [p.id]: value }
-  } catch (err) {
-    showToast(`${p.name} 余额查询失败：` + err.message, 'error', 6000)
-  } finally {
-    creditBusy.value = ''
-  }
-}
-
-// 合计按单位分组：token 与积分不同量纲，渠道包刻意分开给（见 credits.ts），
-// 加在一起会得出「1 亿 token + 100 积分 = 100000100 积分」这种错读数
-function claimSummaryText(p, summary) {
-  if (!summary) return `${p.name}：已执行`
-  const byUnit = summary.totalByUnit || {}
-  const gains = []
-  if (Number(byUnit.token) > 0) gains.push(`+${formatToken(Number(byUnit.token))} Token`)
-  if (Number(byUnit.credit) > 0) gains.push(`+${formatCredit(Number(byUnit.credit))} 积分`)
-  const gained = gains.length ? gains.join('，') : '无新增'
-  return `${p.name}：领取 ${summary.claimed}（${gained}），已领过 ${summary.alreadyClaimed}，`
-    + `未开通 ${summary.inactive}，失败 ${summary.failed}`
-}
-
+// 单条签到结果的文案：只用于行内 toast（卡片里的结果块已移除）
 function outcomeText(outcome) {
   if (!outcome) return '—'
   if (outcome.kind === 'claimed') {
+    // 上游没回报金额时只说「领取成功」：不写「+?」（像算错了），
+    // 也不写「未返回金额」（把内部细节摊给用户看）
+    if (outcome.credit === undefined || outcome.credit === null) return '领取成功'
     const unit = outcome.unit === 'token' ? 'Token' : '积分'
     const amount = outcome.unit === 'token' ? formatToken(outcome.credit) : formatCredit(outcome.credit)
     return `+${amount} ${unit}`
@@ -1673,14 +1534,6 @@ function outcomeText(outcome) {
   if (outcome.kind === 'already-claimed') return outcome.message || '今天已领过'
   if (outcome.kind === 'inactive') return outcome.message || '活动未开通'
   return outcome.message || '失败'
-}
-
-function outcomeClass(outcome) {
-  if (!outcome) return 'text-muted'
-  if (outcome.kind === 'claimed') return 'ch-ok'
-  if (outcome.kind === 'already-claimed') return 'text-muted'
-  if (outcome.kind === 'inactive') return 'ch-warn'
-  return 'ch-bad'
 }
 
 // ==================== 模型 ====================
@@ -1818,12 +1671,6 @@ function recordTestResult(key, result) {
   saveTestResults()
 }
 
-function clearTestResults() {
-  modelTestResults.value = {}
-  saveTestResults()
-  showToast('已清除全部测试标记')
-}
-
 // 绿点要长期挂着，就得让人看出来「这是多久以前的结论」——
 // 只显示绿点不显示年龄，三天前的通过和刚才的通过长得一模一样
 function testedAtText(at) {
@@ -1931,49 +1778,6 @@ async function setAllModels(providerId, disabled) {
     await loadStatus()
   } catch (err) {
     showToast('批量开关失败：' + err.message, 'error', 6000)
-  } finally {
-    busyKey.value = ''
-  }
-}
-
-// 所有渠道一起开关。逐渠道并发：每个渠道一次写入（渠道包一个 provider 一次落盘，
-// WorkBuddy 一个区域整份清单一次保存），比按模型逐个写少几百次。
-//
-// 注意：开启不动 dead。dead 是上游下线的系统推断，只有逐点模型本身（clearDead）
-// 才能清掉，批量接口没有这个语义 —— 顺手开回来会把上游已经没有的模型塞回目录。
-//
-// 过滤生效时只作用于命中的模型（没有命中的渠道整批跳过，不为它发一次空写入）
-async function setAllModelsEverywhere(disabled) {
-  if (busyKey.value) return
-  const batches = filteredModelGroups.value.map(group => ({
-    provider: group.id,
-    modelIds: group.models.map(m => m.id)
-  }))
-  if (!batches.length) return
-  const total = batches.reduce((sum, batch) => sum + batch.modelIds.length, 0)
-  busyKey.value = disabled ? 'all:off' : 'all:on'
-  try {
-    const results = await Promise.allSettled(batches.map(batch =>
-      setModelsDisabled(batch.provider, batch.modelIds, disabled)))
-    const failed = results
-      .map((result, i) => (result.status === 'rejected' ? { provider: batches[i].provider, error: result.reason } : null))
-      .filter(Boolean)
-
-    await loadModels()
-    await loadStatus()
-
-    const action = disabled ? '关闭' : '打开'
-    const scope = modelFilterActive.value ? `匹配的 ${total} 个模型（${batches.length} 个渠道）` : `全部 ${batches.length} 个渠道的所有模型`
-    if (!failed.length) {
-      showToast(`已${action}${scope}`)
-    } else {
-      showToast(
-        `${batches.length - failed.length} 个渠道已${action}，${failed.length} 个失败（${failed[0].provider}：${failed[0].error?.message || '未知错误'}）`,
-        'error', 8000
-      )
-    }
-  } catch (err) {
-    showToast(`全部${disabled ? '关闭' : '开启'}失败：` + err.message, 'error', 6000)
   } finally {
     busyKey.value = ''
   }
@@ -2282,6 +2086,8 @@ function wbStopPolling() {
 }
 
 function wbCancelLogin() {
+  // WorkBuddy 走的是设备授权：账号要等轮询成功才落盘，取消时服务端没有占位账号
+  // 可删（不像渠道包那样会先登记一条空账号），所以这里只停掉前端的等待
   wbStopPolling()
   wbLogin.value = null
 }
@@ -2311,22 +2117,6 @@ async function wbCheckin(acct) {
     await loadWorkbuddy()
   } catch (err) {
     showToast('签到失败：' + wbErrText(err), 'error')
-  } finally {
-    wbBusy.value = ''
-  }
-}
-
-async function wbBalance(acct) {
-  wbBusy.value = acct.uid + ':balance'
-  try {
-    const res = await wbRefreshBalance(acct.uid)
-    showToast(
-      res.ok ? `积分 ${res.credits}（快过期 ${res.expiring}）` : `余额刷新失败：${res.message || ''}`,
-      res.ok ? 'success' : 'error'
-    )
-    await loadWorkbuddy()
-  } catch (err) {
-    showToast('余额刷新失败：' + wbErrText(err), 'error')
   } finally {
     wbBusy.value = ''
   }
@@ -2431,21 +2221,6 @@ async function wbRemove(acct) {
   }
 }
 
-// 全部签到复用调度器里的签到任务：它自带全账号限速与连登管家，比这里循环调用稳妥
-async function wbCheckinAll() {
-  wbBusyAll.value = 'checkin'
-  try {
-    const res = await wbSchedulerRun('checkin')
-    wbCheckinSummary.value = `WorkBuddy 全部签到：${(res && res.summary) || '已执行'}`
-    showToast(`全部签到完成：${(res && res.summary) || '已执行'}`)
-    await loadWorkbuddy()
-  } catch (err) {
-    showToast('全部签到失败：' + wbErrText(err), 'error', 5000)
-  } finally {
-    wbBusyAll.value = ''
-  }
-}
-
 // ==================== 一键签到 ====================
 // 覆盖渠道包里能领积分的九个渠道 + WorkBuddy 国内版账号，逐渠道顺序执行：
 //   · 渠道包的 credits.claimAll 内部已经是逐账号顺序领取，这里再并发只会一起撞上游风控；
@@ -2455,8 +2230,29 @@ const checkinAll = ref({ running: false, done: 0, total: 0 })
 const checkinSummary = ref('')
 const checkinFailed = ref(false)
 
-const claimableProviders = computed(() => PROVIDERS.filter(p => canClaim(p) && accountsOf(p).length > 0))
+const accountsOfProvider = computed(() => {
+  const map = new Map(PROVIDERS.map(p => [p.id, []]))
+  for (const acct of accounts.value) map.get(acct.provider)?.push(acct)
+  return map
+})
+const claimableProviders = computed(() => PROVIDERS.filter(p => canClaim(p) && (accountsOfProvider.value.get(p.id) || []).length > 0))
 const checkinTotal = computed(() => claimableProviders.value.length + (wbCnCount.value > 0 ? 1 : 0))
+
+// 「今天还剩谁没签」：一键签到按「渠道」为单位（一个渠道一次 claimAll），
+// 所以一个渠道算不算已签，看它名下所有支持签到的账号是不是都已经签过；
+// WorkBuddy 那边同理，看国内版账号是不是全签过。
+// 混着「有的签了有的没签」的渠道仍然算待签 —— 只签剩下的那几个才是对的。
+function providerPending(p) {
+  const list = (accountsOfProvider.value.get(p.id) || []).filter(supportsCheckinOf)
+  if (!list.length) return false
+  return list.some(a => !a.checkinDone)
+}
+
+const pendingProviders = computed(() => claimableProviders.value.filter(providerPending))
+const wbPending = computed(() => wbList.value.some(a => a.realm !== 'global' && !a.checkinDone))
+const checkinPending = computed(() => pendingProviders.value.length + (wbPending.value ? 1 : 0))
+// 全部签过：按钮置灰成「已签」，别再让人点一个必然回「今天已签过」的动作
+const allChecked = computed(() => checkinTotal.value > 0 && checkinPending.value === 0)
 
 function checkinSummaryText(totals, errors) {
   const gains = []
@@ -2472,13 +2268,14 @@ function checkinSummaryText(totals, errors) {
 }
 
 async function runCheckinAll() {
-  if (checkinAll.value.running || checkinTotal.value === 0) return
-  const targets = claimableProviders.value.map(p => ({ kind: 'channel', provider: p }))
-  if (wbCnCount.value > 0) targets.push({ kind: 'workbuddy' })
+  if (checkinAll.value.running || checkinPending.value === 0) return
+  // 已经全签过的目标不进名单：省掉一次必然返回「今天已签过」的请求，
+  // 顺带让进度里的分母等于真正还要签的处数
+  const targets = pendingProviders.value.map(p => ({ kind: 'channel', provider: p }))
+  if (wbPending.value) targets.push({ kind: 'workbuddy' })
   checkinAll.value = { running: true, done: 0, total: targets.length }
   checkinSummary.value = ''
   checkinFailed.value = false
-  wbCheckinSummary.value = ''
   const totals = { claimed: 0, alreadyClaimed: 0, inactive: 0, failed: 0, token: 0, credit: 0 }
   const errors = []
   try {
@@ -2487,7 +2284,6 @@ async function runCheckinAll() {
         const p = target.provider
         try {
           const value = await channelsRpc('credits.claimAll', { provider: p.id }, 600000)
-          claimResults.value = { ...claimResults.value, [p.id]: value }
           const s = value.summary || {}
           totals.claimed += Number(s.claimed) || 0
           totals.alreadyClaimed += Number(s.alreadyClaimed) || 0
@@ -2497,23 +2293,14 @@ async function runCheckinAll() {
           totals.credit += Number(byUnit.credit) || 0
           totals.token += Number(byUnit.token) || 0
         } catch (err) {
-          errors.push(p.name)
-          // 失败的渠道也占一张卡片的结果区：顶部只有渠道名，原因得留在这里
-          claimResults.value = {
-            ...claimResults.value,
-            [p.id]: {
-              summary: { claimed: 0, alreadyClaimed: 0, inactive: 0, failed: 1, totalByUnit: {} },
-              results: [{ accountId: '', nickname: p.name, outcome: { kind: 'failed', message: err.message } }]
-            }
-          }
+          // 失败原因并进顶部汇总：卡片里不再有结果块，这里不记就彻底没地方看了
+          errors.push(`${p.name}（${err.message}）`)
         }
       } else {
         try {
-          const res = await wbSchedulerRun('checkin')
-          wbCheckinSummary.value = `WorkBuddy 全部签到：${(res && res.summary) || '已执行'}`
+          await wbSchedulerRun('checkin')
         } catch (err) {
-          errors.push('WorkBuddy')
-          wbCheckinSummary.value = 'WorkBuddy 全部签到失败：' + wbErrText(err)
+          errors.push(`WorkBuddy（${wbErrText(err)}）`)
         }
       }
       checkinAll.value = { ...checkinAll.value, done: checkinAll.value.done + 1 }
@@ -2521,28 +2308,14 @@ async function runCheckinAll() {
     checkinSummary.value = checkinSummaryText(totals, errors)
     checkinFailed.value = errors.length > 0 || totals.failed > 0
     showToast(checkinSummary.value, checkinFailed.value ? 'error' : 'success', 8000)
-    // 签到会改积分与账号状态，重读一次让卡片上的数字跟得上
-    await loadWorkbuddy()
+    // 签到会改积分与「今天签过」的状态，重读一次让卡片上的数字与按钮跟得上
+    await reload({ silent: true })
   } catch (err) {
     checkinFailed.value = true
     checkinSummary.value = '一键签到中断：' + (err?.message || '未知错误')
     showToast(checkinSummary.value, 'error', 8000)
   } finally {
     checkinAll.value = { ...checkinAll.value, running: false }
-  }
-}
-
-async function wbRefreshBalances() {
-  wbBusyAll.value = 'balance'
-  try {
-    const res = await wbRefreshAllBalances()
-    const list = res.results || []
-    showToast(`余额刷新完成：成功 ${list.filter(r => r.ok).length}/${list.length}`)
-    await loadWorkbuddy()
-  } catch (err) {
-    showToast('刷新失败：' + wbErrText(err), 'error')
-  } finally {
-    wbBusyAll.value = ''
   }
 }
 
@@ -2563,8 +2336,21 @@ function formatToken(value) {
   return String(Math.round(n))
 }
 
+// ==================== 启动引导跳转 ====================
+
+// 引导的「登录免费账号」直接落到 WorkBuddy 卡上并把登录点下去：让用户来这里只为
+// 找一次按钮的话，这一步就白讲了。?add=workbuddy 是契约，别的取值忽略。
+// 参数处理完立刻 replace 掉 —— 刷新页面不该再自动发起一次登录
+function runOnboardingRequest() {
+  if (route.query.add !== 'workbuddy') return
+  router.replace({ path: route.path, query: {} })
+  if (wbBusy.value || wbLogin.value) return
+  wbStartLogin()
+}
+
 onMounted(() => {
   reload()
+  runOnboardingRequest()
 })
 onUnmounted(() => {
   stopPolling()
@@ -2754,39 +2540,10 @@ body.ch-drag-active * {
   flex-shrink: 0;
 }
 
-/* ===== 合并卡里的「渠道分段」 ===== */
-/* 一段 = 一个渠道。单渠道卡只有一段，段内间距与原来的卡片间距一致（10px），
-   所以合并与否都不改变单渠道卡的样子 */
-.ch-provider-seg {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-/* 段与段之间加一条分割线：两段各有账号列表和操作行，只靠间距会连成一片，
-   看起来像同一个渠道的两组账号 */
-.ch-card-merged .ch-provider-seg + .ch-provider-seg {
-  padding-top: 10px;
-  border-top: 1px solid var(--border-1);
-}
-
-/* 段头：卡头已经写了产品名，这里写 region 名（照抄渠道包的 displayName），
-   字号比卡头小一号，层级分明 */
-.ch-provider-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-
-.ch-provider-head .ch-name {
-  font-size: var(--fs-small);
-  font-weight: 500;
-}
-
-
-
-
+/* 合并卡（Qoder 国际版 / 国内版）不再有自己的骨架：它和 WorkBuddy 一样是
+   卡头 + 一个账号盒 + 一行操作，区域只体现在账号行的标签与操作行的下拉上。
+   所以这里没有「分段」样式 —— 上一版的 ch-provider-seg / ch-provider-head
+   随模板一起去掉了，留着只会是没人再命中的死规则。 */
 
 .ch-switch {
   display: flex;
@@ -2810,10 +2567,20 @@ body.ch-drag-active * {
   white-space: nowrap;
 }
 
+/* 区域下拉：与旁边的按钮同高（28px）才对得齐 —— 它是操作行里的一个「选择器按钮」，
+   不是表单里的填写框，所以不跟随全局的 --field-h（36px）。
+   宽度跟着选项文字走：width:auto 让「国内版（copilot.tencent.com）」一次显示完整，
+   切到短选项时自动收窄；flex:none 防止它在换行前被拉满整行 */
 .ch-select {
-  font-size: var(--fs-xs);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
+  height: var(--btn-h);
+  /* 全局表单规则给了 min-height:--field-h（36px），不解除的话高度会被它顶回去 */
+  min-height: var(--btn-h);
+  padding: 0 26px 0 10px;
+  background-position: right 8px center;
+  font-size: var(--btn-fs);
+  width: auto;
+  max-width: 100%;
+  flex: 0 0 auto;
 }
 
 /* ===== 账号行 ===== */
@@ -2877,22 +2644,10 @@ body.ch-drag-active * {
   flex-shrink: 0;
 }
 
-/* 图标按钮：账号行与操作行的文字按钮已经不少，「明细」和「设置链接」用图标省地方 */
+/* 「个人中心」按钮：账号行与操作行的文字按钮已经不少，用文字按钮占位省地方 */
+/* 尺寸与外观由 AppButton 提供，这里只让它不参与 flex 压缩 */
 .ch-icon-btn {
-  width: 22px;
-  height: 22px;
-  padding: 3px;
   flex: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.ch-icon-btn:hover {
-  color: var(--primary);
-  background: var(--primary-bg);
 }
 
 .ch-danger:hover {
@@ -2955,8 +2710,11 @@ body.ch-drag-active * {
 }
 
 /* ===== 操作行 / 结果 ===== */
+/* 登录按钮（小号 28px）与区域下拉（大号 36px）并排：抬高对齐方向按居中，
+   两者的中线齐平才不显得错位；右侧链接由 margin-left:auto 推到底 */
 .ch-actions {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -2964,40 +2722,16 @@ body.ch-drag-active * {
 /* 卡片右下角的「去子页面」入口：低频功能不在卡片里展开 */
 .ch-more {
   margin-left: auto;
-  align-self: center;
-  font-size: var(--fs-mini);
-  color: var(--primary);
+  padding-left: 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .ch-more:hover {
   text-decoration: underline;
 }
-
-.ch-result {
-  padding: 8px 10px;
-  font-size: var(--fs-mini);
-  border: 1px dashed var(--border-1);
-  border-radius: var(--radius-md);
-}
-
-.ch-result-line {
-  margin-bottom: 4px;
-  color: var(--text-1);
-}
-
-.ch-result-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 2px 0;
-}
-
-.ch-result-name {
-  color: var(--text-2);
-  word-break: break-all;
-}
-
 
 .ch-ok {
   color: var(--ok-text);
@@ -3026,18 +2760,9 @@ body.ch-drag-active * {
   font-size: var(--fs-xs);
 }
 
-/* 批量开关推到工具栏右端：和每个渠道组头那一排按钮同一侧、同一顺序，
-   区别只在作用范围（全渠道 vs 单渠道） */
-.ch-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-left: auto;
-}
-
 /* 模型过滤输入框：工具栏里唯一的文本控件。
-   宽度固定而不 flex:1 —— 拉满会把右侧那组动作（测试 / 全部开启 / 全部关闭）
-   推到最边上，和过滤的「作用范围」拉开距离，反而看不清筛完之后在操作什么 */
+   宽度固定而不 flex:1 —— 拉满会把它和右侧那点留白拉开距离，
+   反而看不清筛完之后在操作什么 */
 .ch-model-filter {
   position: relative;
   display: inline-flex;
@@ -3135,15 +2860,18 @@ body.ch-drag-active * {
   gap: 6px;
 }
 
+/* 开启中的模型是这张清单的主角：实心底 + 实线边框 + 加重字重，
+   和「关闭」（透明底 + 虚线 + 灰字）拉开一档，一眼能数出开着几个 */
 .ch-model {
   display: flex;
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
   font-size: var(--fs-xs);
+  font-weight: 500;
   color: var(--text-1);
-  background: var(--bg-hover);
-  border: 1px solid var(--border-1);
+  background: var(--primary-bg-hover);
+  border: 1px solid var(--border-3);
   border-radius: var(--radius-pill);
 }
 
@@ -3151,9 +2879,12 @@ body.ch-drag-active * {
   border-color: var(--primary);
 }
 
+/* 关闭态：透明底 + 虚线 + 灰字 —— 看起来「不在列表里」 */
 .ch-model.off {
+  font-weight: 400;
   color: var(--text-4);
   background: transparent;
+  border-color: var(--border-2);
   border-style: dashed;
 }
 
@@ -3191,3 +2922,4 @@ body.ch-drag-active * {
 }
 
 </style>
+

@@ -1,12 +1,13 @@
 <template>
-  <button type="button" class="back-btn" title="返回" aria-label="返回" @click="goBack">
+  <AppButton variant="secondary" iconOnly class="back-btn" title="返回" aria-label="返回" @click="goBack">
     <AppIcon name="arrowLeft" />
-  </button>
+  </AppButton>
 </template>
 
 <script setup>
 import { useRouter } from 'vue-router'
 import AppIcon from './AppIcon.vue'
+import AppButton from './AppButton.vue'
 
 const router = useRouter()
 
@@ -20,32 +21,14 @@ function goBack() {
 </script>
 
 <style scoped>
-/* 与 .btn-ghost 同一套观感，但只放一个图标，做成正方形按钮 */
+/* 尺寸与描边沿用 AppButton 的 md 图标按钮，这里只调整图标大小：
+   全局默认 14px，标题栏里的返回箭头稍大一点更醒目 */
 .back-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
   flex: none;
-  color: var(--text-2);
-  background: var(--bg-card);
-  border: 1px solid var(--border-3);
-  border-radius: var(--radius-md);
 }
 
-.back-btn:hover {
-  color: var(--primary);
-  border-color: var(--primary);
-}
-
-.back-btn svg {
-  width: 18px;
-  height: 18px;
-}
-
-.back-btn:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
+.back-btn :deep(svg) {
+  width: 16px;
+  height: 16px;
 }
 </style>

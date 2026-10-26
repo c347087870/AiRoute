@@ -17,7 +17,7 @@
                 <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </optgroup>
             </select>
-            <button class="btn-primary" @click="saveFallback">保存</button>
+            <AppButton variant="primary" @click="saveFallback">保存</AppButton>
           </div>
         </div>
         <div class="config-hint">
@@ -56,11 +56,11 @@
               <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </optgroup>
           </select>
-          <button class="btn-danger" @click="removeRule(i)" v-if="rule.condition !== 'default'">删除</button>
+          <AppButton variant="danger" @click="removeRule(i)" v-if="rule.condition !== 'default'">删除</AppButton>
         </div>
         <div class="section-actions">
-          <button class="btn-ghost" @click="addRule">+ 添加规则</button>
-          <button class="btn-primary" @click="saveAll('路由规则已保存')">保存路由规则</button>
+          <AppButton variant="secondary" @click="addRule">+ 添加规则</AppButton>
+          <AppButton variant="primary" @click="saveAll('路由规则已保存')">保存路由规则</AppButton>
         </div>
       </div>
     </div>
@@ -79,11 +79,11 @@
               <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </optgroup>
           </select>
-          <button class="btn-danger" @click="removeCustomRule(i)">删除</button>
+          <AppButton variant="danger" @click="removeCustomRule(i)">删除</AppButton>
         </div>
         <div class="section-actions">
-          <button class="btn-ghost" @click="addCustomRule">+ 添加匹配规则</button>
-          <button class="btn-primary" @click="saveAll('匹配规则已保存')">保存匹配规则</button>
+          <AppButton variant="secondary" @click="addCustomRule">+ 添加匹配规则</AppButton>
+          <AppButton variant="primary" @click="saveAll('匹配规则已保存')">保存匹配规则</AppButton>
         </div>
       </div>
     </div>
@@ -96,6 +96,7 @@ import { getProviders, getRules, updateRules, getFallback, updateFallback } from
 import { showToast } from '../composables/useToast.js'
 import { buildModelGroups, listModels, resolveRefLabel } from '../utils/models.js'
 
+import AppButton from '../components/AppButton.vue'
 const providers = ref({}) // Provider 配置表，键为 provider 名
 const fallbackModel = ref('') // 兜底模型引用（provider/model），空字符串表示不启用兜底
 const rules = ref([]) // 智能路由规则列表

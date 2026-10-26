@@ -7,10 +7,10 @@
           <label class="config-label">监听端口</label>
           <div class="config-control">
             <input v-model.number="serverPort" type="number" class="port-input" />
-            <button class="btn-primary" @click="saveServerPort">保存端口</button>
-            <button class="btn-ghost" @click="doRestart" :disabled="restarting">
+            <AppButton variant="primary" @click="saveServerPort">保存端口</AppButton>
+            <AppButton variant="secondary" @click="doRestart" :disabled="restarting">
               {{ restarting ? '重启中…' : '重启 Server' }}
-            </button>
+            </AppButton>
           </div>
         </div>
         <div v-if="portChanged" class="warning-box">⚠ 端口已保存，重启 Server 后生效</div>
@@ -57,9 +57,9 @@
           <div class="config-control">
             <span v-if="cacheSize" class="sys-value">{{ formatBytes(cacheSize.totalSize) }} · {{ cacheSize.fileCount }} 个文件</span>
             <span v-else class="config-hint inline">—</span>
-            <button class="btn-ghost btn-sm" :disabled="clearing" @click="clearLogCache">
+            <AppButton variant="secondary" :disabled="clearing" @click="clearLogCache">
               {{ clearing ? '清空中…' : '清空' }}
-            </button>
+            </AppButton>
           </div>
         </div>
         <div class="config-hint">清空后日志页历史一并删除，不影响账号池与用量统计</div>
@@ -79,12 +79,12 @@
               class="file-input"
               @change="onImportFile"
             />
-            <button class="btn-ghost" :disabled="exporting" @click="exportConfigFile">
+            <AppButton variant="secondary" :disabled="exporting" @click="exportConfigFile">
               {{ exporting ? '导出中…' : '导出到文件' }}
-            </button>
-            <button class="btn-ghost" :disabled="importing" @click="importInput?.click()">
+            </AppButton>
+            <AppButton variant="secondary" :disabled="importing" @click="importInput?.click()">
               {{ importing ? '导入中…' : '选择文件导入' }}
-            </button>
+            </AppButton>
             <span class="config-hint inline">导出含账号凭据 · 导入整体覆盖并先备份</span>
           </div>
         </div>
@@ -96,22 +96,32 @@
       <h2 class="section-title">关于与更新</h2>
       <div class="card">
         <div class="config-row">
+          <label class="config-label">新手引导</label>
+          <div class="config-control">
+            <AppButton variant="secondary" @click="replayOnboarding">从头再放一遍</AppButton>
+            <span class="config-hint inline">
+              {{ onboardingDone ? '首次启动时已播放（或已跳过）' : '还没播放过，下次启动会自动弹出' }}
+            </span>
+          </div>
+        </div>
+        <div class="config-row">
           <label class="config-label">版本</label>
           <div class="config-control">
-            <span class="version-text">v{{ info?.current || '未检查' }}</span>
+            <span class="version-text">{{ currentVersion ? 'v' + currentVersion : '—' }}</span>
+            <span class="badge" :class="releaseLine === 'beta' ? 'warn' : 'ok'">{{ releaseLine === 'beta' ? 'beta 线' : '正式线' }}</span>
             <span v-if="info" class="badge" :class="info.hasUpdate ? 'info' : 'ok'">
               {{ info.hasUpdate ? '可升级到 v' + info.latest : '已是最新' }}
             </span>
-            <button class="btn-ghost btn-sm" :disabled="checking || busy" @click="runCheck(false, true)">
+            <AppButton variant="secondary" :disabled="checking || busy" @click="runCheck(false, true)">
               {{ checking ? '检查中…' : '检查更新' }}
-            </button>
+            </AppButton>
           </div>
         </div>
         <div v-if="supported && backup" class="config-row">
           <label class="config-label">版本回滚</label>
           <div class="config-control">
             <span class="sys-value">已备份 v{{ backup.version }}</span>
-            <button class="btn-ghost btn-sm" :disabled="busy" @click="rollback">回滚到该版本</button>
+            <AppButton variant="secondary" :disabled="busy" @click="rollback">回滚到该版本</AppButton>
           </div>
         </div>
         <div v-if="error" class="warning-box">⚠ {{ error }}</div>
@@ -120,12 +130,12 @@
         </div>
         <div v-if="info && info.hasUpdate" class="update-block">
           <div class="config-control">
-            <button class="btn-primary" :disabled="busy || !supported" @click="oneClickUpdate">
+            <AppButton variant="primary" :disabled="busy || !supported" @click="oneClickUpdate">
               {{ primaryLabel }}
-            </button>
-            <button class="btn-ghost btn-sm" :disabled="busy" @click="manualDownload">手动下载</button>
-            <button v-if="savedPath" class="btn-ghost btn-sm" @click="openFolder">打开文件夹</button>
-            <button class="btn-ghost btn-sm" @click="openReleasePage">Release 页面</button>
+            </AppButton>
+            <AppButton variant="secondary" :disabled="busy" @click="manualDownload">手动下载</AppButton>
+            <AppButton variant="secondary" v-if="savedPath" @click="openFolder">打开文件夹</AppButton>
+            <AppButton variant="secondary" @click="openReleasePage">Release 页面</AppButton>
             <span v-if="info.publishedAt" class="config-hint inline">发布于 {{ formatTime(info.publishedAt) }}</span>
           </div>
           <div v-if="busy" class="progress-track">
@@ -151,7 +161,9 @@ import { showToast } from '../composables/useToast.js'
 import { formatBytes, formatTime } from '../utils/format.js'
 import { useUpdate } from '../composables/useUpdate.js'
 import { useModel } from '../composables/useModel.js'
+import { useOnboarding } from '../composables/useOnboarding.js'
 
+import AppButton from '../components/AppButton.vue'
 const serverPort = ref(3000) // 端口输入框的值
 const portChanged = ref(false) // 端口已保存但尚未重启生效
 const restarting = ref(false) // 是否正在重启服务
@@ -174,6 +186,27 @@ const {
   runCheck, oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus,
   isMacPlatform, isWinInstaller
 } = useUpdate()
+
+// 新手引导：这里只负责「重播」与显示当前状态；播放本身由 App.vue 的浮层接管
+const { isDone: onboardingIsDone, startOnboarding } = useOnboarding()
+const onboardingDone = ref(onboardingIsDone())
+
+// 不清 localStorage：重播只是再打开一次，用户中途关掉时不该判定成「完成」
+function replayOnboarding() {
+  startOnboarding(0)
+}
+
+// 本地版本号：优先取服务端 /api/system/status（打开页面就有，不依赖联网），
+// 再退回更新检查结果。原来只读 info.current，检查更新没成功（离线 / 静默检查失败）时
+// 这一行会渲染成「v未检查」—— 版本是本地事实，不该等一次网络往返才敢说
+const currentVersion = computed(() => sysStatus.value?.version || info.value?.current || '')
+
+// 更新线路：服务端是唯一判定方（server/update.js 的 releaseLine），这里只在它还没回话时
+// 按同一套规则本地预判一次，避免徽标先闪「正式线」再变「beta 线」。
+// 判据与 releaseLine 一致：只认 beta / rc / alpha / next / dev 这类试跑标识，
+// v1.6.1-macos.1 这种制品标记仍算正式线
+const BETA_MARKER = /-(alpha|beta|rc|next|dev)([.\-]|$)/i
+const releaseLine = computed(() => info.value?.line || sysStatus.value?.line || (BETA_MARKER.test(currentVersion.value) ? 'beta' : 'stable'))
 
 // 一键升级按钮文案：按阶段展示当前动作，失败后变成重试
 const primaryLabel = computed(() => {
@@ -451,21 +484,25 @@ onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导�
   display: none;
 }
 
+/* 开关形态的按钮：高度与小号按钮一致，圆角做胶囊以示「状态」而非「动作」 */
 .toggle-btn {
-  padding: 6px 20px;
+  display: inline-flex;
+  align-items: center;
+  height: var(--btn-h);
+  padding: 0 14px;
   border-radius: var(--radius-pill);
-  font-size: var(--fs-small);
+  font-size: var(--btn-fs);
   font-weight: 500;
-  background: var(--border-2);
-  color: var(--text-3);
-  border: 1px solid var(--border-3);
+  background: var(--bg-hover);
+  color: var(--text-2);
+  border: 1px solid var(--border-1);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .toggle-btn.active {
-  background: var(--primary-bg);
-  color: var(--primary);
+  background: var(--primary);
+  color: var(--bg-card);
   border-color: var(--primary);
 }
 
@@ -487,3 +524,4 @@ onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导�
   padding: 0;
 }
 </style>
+

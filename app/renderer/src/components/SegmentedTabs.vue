@@ -88,27 +88,29 @@ function onKeydown(event, index) {
 </script>
 
 <style scoped>
-/* 极简形态：没有容器描边、没有凹槽底色，也没有抬起的激活块。
-   页头那一行本来就有「一键签到」这种主按钮和一堆统计数字，
-   再来一层带边框的胶囊会显得很吵。当前项靠「主色浅底 + 主色文字」区分，
-   未选中项是次级灰，悬停才提亮 —— 一眼能看出选了哪档，又不抢视线。 */
+/* 分段控件延续 shadcn 的 muted 槽底与轻量选中态，仍由原生按钮实现。 */
 .seg {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  padding: 3px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
 }
 
 .seg-item {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 14px;
-  font-size: var(--fs-small);
+  height: var(--btn-h);
+  padding: 0 12px;
+  font-size: var(--btn-fs);
   font-weight: 500;
   line-height: 1.5;
-  color: var(--text-3);
+  color: var(--text-2);
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: color 0.15s, background-color 0.15s;
@@ -125,8 +127,10 @@ function onKeydown(event, index) {
    文字用 --primary-text 而不是 --primary：11px 小字压在 8% 浅底上，
    纯主色（#0082FC）对比度只有 3:1 上下，深一层的主色文字才够看 */
 .seg-item.active {
-  color: var(--primary-text);
-  background: var(--primary-bg);
+  color: var(--text-1);
+  background: var(--bg-card);
+  border-color: var(--border-1);
+  box-shadow: var(--shadow-card);
 }
 
 /* 键盘焦点单独画：:focus-visible 才画，鼠标点击不出现描边 */
@@ -157,7 +161,8 @@ function onKeydown(event, index) {
 /* 小号：给工具条里的次级切换用（与旁边的 btn-ghost btn-sm 同高、同字号）。
    竖直内边距补上原容器内边距 + 描边占掉的那几像素，否则会比旁边的按钮矮一头 */
 .seg-sm .seg-item {
-  padding: 5px 12px;
+  height: 24px;
+  padding: 0 10px;
   font-size: var(--fs-xs);
 }
 
