@@ -1,6 +1,6 @@
 <template>
   <div class="dashboard">
-    <!-- 时间维度：默认「当日」，切档后顶部两张卡与用量概览一起换口径 ——
+    <!-- 时间维度：默认「当日」，切档后请求数与用量概览一起换口径 ——
          页面上的数字必须属于同一个区间，否则「请求数」和「用量」会各说各话 -->
     <div class="page-toolbar dashboard-toolbar">
       <SegmentedTabs
@@ -10,56 +10,47 @@
       />
     </div>
 
-    <div class="stats-grid">
-      <div class="card stat-card">
-        <div class="stat-label">Router 状态</div>
-        <div class="stat-value" :class="isOnline ? 'green' : 'red'">
-          {{ isOnline ? '运行中' : '离线' }}
-        </div>
-      </div>
-      <div class="card stat-card">
-        <div class="stat-label">请求数</div>
-        <div class="stat-value">
-          {{ formatNumber(periodStats.requests) }}
-        </div>
-        <div
-          class="stat-subtitle"
-          :title="`${currentRange.label}成功 ${formatNumber(periodStats.count)} 次、失败 ${formatNumber(periodStats.failed)} 次；请求数 = 成功 + 失败，与用量统计同源`"
-        >
-          {{ currentRange.label }} · 失败 {{ formatNumber(periodStats.failed) }}
-        </div>
-      </div>
-    </div>
-
     <!-- 用量概览：当前区间只展示一份，输入 / 命中缓存 / 输出 + 命中率，
-         缓存写明细与趋势图在用量统计页 -->
+         缓存写明细与趋势图在用量统计页。请求数与用量概览并排放在同一行 -->
     <div class="section">
       <div class="section-header">
         <h2 class="section-title">用量概览</h2>
         <router-link class="link-more" to="/token-stats">用量统计 →</router-link>
       </div>
-      <div class="card usage-card">
-        <div class="usage-group">
-          <div class="usage-total">
-            <span class="usage-total-value">{{ formatNumber(usageGroup.total) }}</span>
-            <span class="usage-total-unit">Token</span>
+      <div class="usage-grid">
+        <div class="card stat-card">
+          <div class="stat-label">请求数</div>
+          <AnimatedNumber class="stat-value" :value="periodStats.requests" />
+          <div
+            class="stat-subtitle"
+            :title="`${currentRange.label}成功 ${formatNumber(periodStats.count)} 次、失败 ${formatNumber(periodStats.failed)} 次；请求数 = 成功 + 失败，与用量统计同源`"
+          >
+            {{ currentRange.label }} · 失败 {{ formatNumber(periodStats.failed) }}
           </div>
-          <div class="usage-split">
-            <span class="usage-part">
-              <span class="usage-part-label">输入</span>
-              <span class="usage-part-value input">{{ formatNumber(usageGroup.input) }}</span>
-            </span>
-            <span class="usage-part">
-              <span class="usage-part-label">命中缓存</span>
-              <span class="usage-part-value cacheRead">{{ formatNumber(usageGroup.cacheRead) }}</span>
-            </span>
-            <span class="usage-part">
-              <span class="usage-part-label">输出</span>
-              <span class="usage-part-value output">{{ formatNumber(usageGroup.output) }}</span>
-            </span>
-          </div>
-          <div class="usage-rate" :title="usageGroup.rateTitle">
-            缓存命中率 {{ formatPercent(usageGroup.hitRate) }}
+        </div>
+        <div class="card usage-card">
+          <div class="usage-group">
+            <div class="usage-total">
+              <AnimatedNumber class="usage-total-value" :value="usageGroup.total" />
+              <span class="usage-total-unit">Token</span>
+            </div>
+            <div class="usage-split">
+              <span class="usage-part">
+                <span class="usage-part-label">输入</span>
+                <span class="usage-part-value input"><AnimatedNumber :value="usageGroup.input" /></span>
+              </span>
+              <span class="usage-part">
+                <span class="usage-part-label">命中缓存</span>
+                <span class="usage-part-value cacheRead"><AnimatedNumber :value="usageGroup.cacheRead" /></span>
+              </span>
+              <span class="usage-part">
+                <span class="usage-part-label">输出</span>
+                <span class="usage-part-value output"><AnimatedNumber :value="usageGroup.output" /></span>
+              </span>
+            </div>
+            <div class="usage-rate" :title="usageGroup.rateTitle">
+              缓存命中率 {{ formatPercent(usageGroup.hitRate) }}
+            </div>
           </div>
         </div>
       </div>
@@ -105,9 +96,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
+import AnimatedNumber from '../components/AnimatedNumber.vue'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { getLogs, getHealth, getTokenStatsRange } from '../api.js'
+import { getLogs, getTokenStatsRange } from '../api.js'
 import { formatNumber, formatPercent, formatTime, calcCacheHitRate } from '../utils/format.js'
 
 // 总计单元格：上游未返回用量时服务端给 null，显示 '-'（与日志页口径一致），
@@ -128,7 +120,6 @@ const RANGE_TABS = [
 
 const selectedRange = ref('day') // 默认当日
 const recentLogs = ref([]) // 最近 5 条请求日志
-const isOnline = ref(false) // Router 是否在线，只由健康检查决定
 
 // 四个区间的 Token 统计，键与 RANGE_TABS 的 value 对应
 const rangeStats = ref(emptyRangeStats())
@@ -168,16 +159,6 @@ const usageGroup = computed(() => {
   }
 })
 
-// 加载 Router 健康状态，只有这个接口的成败影响在线状态
-async function loadHealth() {
-  try {
-    await getHealth()
-    isOnline.value = true
-  } catch {
-    isOnline.value = false
-  }
-}
-
 // 加载最近 5 条请求日志
 async function loadLogs() {
   try {
@@ -200,7 +181,7 @@ async function loadTokenStats() {
 
 // 加载所有 Dashboard 数据，各接口独立失败互不影响
 async function loadData() {
-  await Promise.all([loadHealth(), loadLogs(), loadTokenStats()])
+  await Promise.all([loadLogs(), loadTokenStats()])
 }
 
 // 顶部栏的「实时」角标由布局渲染，5 秒轮询由 usePolling 统一负责
@@ -217,11 +198,11 @@ onMounted(() => { loadData() })
   justify-content: flex-start;
 }
 
-.stats-grid {
+/* 请求数卡与用量概览并排一行 */
+.usage-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: 1fr 2fr;
   gap: 16px;
-  margin-bottom: 28px;
 }
 
 .stat-card {
@@ -371,7 +352,7 @@ onMounted(() => { loadData() })
     padding: 16px 18px;
   }
 
-  .stats-grid {
+  .usage-grid {
     grid-template-columns: 1fr;
   }
 }

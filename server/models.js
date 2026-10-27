@@ -147,6 +147,8 @@ function listModelRefs(config) {
       refs.push({
         ref: makeRef(name, model.id),
         providerName: name,
+        provider: raw,
+        providerType: provider.type || '',
         providerDisplayName: provider.displayName || name,
         model
       })

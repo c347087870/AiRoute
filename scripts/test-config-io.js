@@ -165,6 +165,26 @@ test('备份只保留最近 5 份', () => {
   assert.ok(backups.length >= 1)
 })
 
+test('清空配置抹掉模型、规则与账号，保留服务端设置并留快照', () => {
+  writeFixtures()
+  const result = configIO.clearAll()
+  assert.equal(result.ok, true)
+  assert.ok(fs.existsSync(result.backupFile))
+
+  assert.deepEqual(readJson('models.json'), {})
+  assert.deepEqual(readJson('rules.json'), { rules: [], customRules: [] })
+  assert.deepEqual(readJson('fallback.json'), { model: '' })
+  assert.deepEqual(readJson('state.json'), { current: 'auto' })
+  // 端口属于服务端设置，不该被清掉
+  assert.equal(readJson('server-config.json').port, 3111)
+  assert.equal(fs.existsSync(path.join(dataDir, 'workbuddy-auths')), false)
+  assert.equal(fs.existsSync(path.join(dataDir, 'channels-data')), false)
+
+  // 快照可以再导入回来
+  configIO.importAll(fs.readJsonSync(result.backupFile))
+  assert.equal(readJson('models.json').custom.apiKey, 'sk-test')
+})
+
 function deleteAccounts(payload) {
   delete payload.accounts
   return payload

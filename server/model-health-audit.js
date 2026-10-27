@@ -31,7 +31,13 @@ function splitBySource(refs) {
   const channelGroups = new Map()
   const wbGroups = { cn: [], global: [] }
   for (const item of refs) {
-    if (!models.isChannelProvider(item.provider)) continue
+    if (item.providerType !== 'channel') {
+      if (item.providerType === 'workbuddy') {
+        const realm = item.provider?.region === 'global' ? 'global' : 'cn'
+        wbGroups[realm].push(item)
+      }
+      continue
+    }
     const prefix = String(item.model.id || '').split('/')[0]
     if (WORKBUDDY_PREFIXES[prefix]) {
       wbGroups[WORKBUDDY_PREFIXES[prefix]].push(item)
@@ -53,12 +59,13 @@ async function bestChannelBalance(rt, providerId) {
     // 走 channels.rpc 而不是 rt.rpc：渠道包的账号入口统一在那里，「账号被上游
     // 禁用」的证据也由它收口 —— 余额查询是唯一会主动问到每个号的定时动作，
     // 不经过它，被禁用的号要等到用户手点测试才会被标记。
-    reply = await channels.rpc({ method: 'credits.balances', payload: { provider: providerId } })
+    reply = await rt.rpc({ method: 'credits.balances', payload: { provider: providerId } })
   } catch {
     return null
   }
   if (reply?.ok !== true) return null
   const accounts = Array.isArray(reply.value?.accounts) ? reply.value.accounts : []
+  if (!accounts.length || accounts.every(account => account && typeof account.error === 'string' && account.error)) return null
   let best = null
   for (const account of accounts) {
     if (account && typeof account.error === 'string' && account.error) continue

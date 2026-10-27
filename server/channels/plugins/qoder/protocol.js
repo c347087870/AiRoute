@@ -23,6 +23,14 @@ const DEVICE_SELECT_PATH = '/device/selectAccounts'
 const POLL_PATH = '/api/v1/deviceToken/poll'
 const REFRESH_PATH = '/api/v1/deviceToken/refresh'
 const USERINFO_PATH = '/api/v1/userinfo'
+// 积分余额（挂 openApiBase）。⚠️ 与模型列表不同，这个端点**不需要 WASM 签名**，
+// 只要 Bearer；早期因「模型列表要签名」而误判 Qoder 无积分端点。
+// 响应形状（实测 2026-09）：
+//   { displayMode:"qoder", qoderUsage:{ userQuota:{total,used,remaining},
+//     addOnQuota:{…}, dedicatedResourcePackages:[…] } }
+// ⚠️ 余额不只在 userQuota：实测有账号 userQuota.remaining=0 而 addOnQuota.remaining=100，
+// 只读一层会显示 0 —— 三层（套餐/资源包/专用资源包）都要加。
+const USAGE_PATH = '/sash/api/v2/me/usage'
 
 // PKCE 字符集：RFC 7636 的 unreserved（66 个），与官方实现同一集合
 const PKCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
@@ -225,6 +233,64 @@ function applyRefresh(credential, payload) {
   return next
 }
 
+// ── 积分余额 ──
+
+// 安全读数字：上游可能发字符串数字；解析不出返回 undefined（不编造 0）
+function readNumberField(source, key) {
+  if (typeof source !== 'object' || source === null) return undefined
+  const value = source[key]
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+// 一个 quota 对象 → { total, used, remaining }；三个字段都缺时返回 undefined。
+// remaining 优先取服务端字段，缺失按 total-used 算；负值钳到 0（计量回滚时上游会发负数）。
+function parseQuota(quota) {
+  const total = readNumberField(quota, 'total')
+  const used = readNumberField(quota, 'used')
+  const remainingRaw = readNumberField(quota, 'remaining')
+  if (total === undefined && used === undefined && remainingRaw === undefined) return undefined
+  const totalValue = Math.max(0, total ?? 0)
+  const usedValue = Math.max(0, used ?? 0)
+  const remaining = remainingRaw !== undefined
+    ? Math.max(0, remainingRaw)
+    : Math.max(0, totalValue - usedValue)
+  return { total: totalValue, used: usedValue, remaining }
+}
+
+/**
+ * 解析 /sash/api/v2/me/usage 的响应。
+ *
+ * 返回 { total, packages }（packages 仅用于测试与排查，面板只显示 total）；
+ * 一个包都没解析出来（企业版 / 形状不符）返回 null —— 那是「查不到」，
+ * 与「余额为 0」严格区分，后者会让用户以为额度被清空了。
+ */
+function parseUsageBalance(body) {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null
+  // 企业版没有额度数字，只有外部链接；报 0 会误导
+  if (body.displayMode === 'enterprise') return null
+  const usage = body.qoderUsage
+  if (typeof usage !== 'object' || usage === null) return null
+  const packages = []
+  const plan = parseQuota(usage.userQuota)
+  if (plan) packages.push({ name: '套餐额度', ...plan })
+  const addOn = parseQuota(usage.addOnQuota)
+  if (addOn) packages.push({ name: '资源包', ...addOn })
+  const dedicated = Array.isArray(usage.dedicatedResourcePackages) ? usage.dedicatedResourcePackages : []
+  for (const item of dedicated) {
+    const pkg = parseQuota(item)
+    if (pkg) packages.push({ name: '专用资源包', ...pkg })
+  }
+  if (packages.length === 0) return null
+  // 逐包保留两位再合计，抑制浮点尾数
+  const total = Math.round(packages.reduce((sum, pkg) => sum + pkg.remaining, 0) * 100) / 100
+  return { total, packages }
+}
+
 // ── 响应信封 ──
 
 function innerTextOf(payload) {
@@ -259,6 +325,54 @@ function classifyInner(inner) {
   return 'heartbeat'
 }
 
+// 排队信息解析（与 vendor channel-pack 的 model-queue.parseQueueError 同口径）：
+// 广度优先展开 data / result / message / body，字符串再 JSON.parse 一次 ——
+// 排队参数藏在外层 code 的 message JSON 字符串里，只看顶层永远拿不到。
+//
+// ⚠️ 判据是「命中 code=10605 或出现排队字段」而不是「isQueued === true」：
+// 内层帧没有 code 字段，且瞬时排队实测为 isQueued:false + serviceAvailable:true，
+// 那也是排队（该按服务端给的 waitTime 重发）。
+function parseQueueInfo(value) {
+  let root = value
+  if (typeof root === 'string') {
+    try {
+      root = JSON.parse(root)
+    } catch {
+      return undefined
+    }
+  }
+  if (root === null || typeof root !== 'object') return undefined
+  const seen = new Set()
+  const nodes = []
+  const queue = [root]
+  while (queue.length > 0) {
+    const node = queue.shift()
+    if (node === null || typeof node !== 'object' || seen.has(node)) continue
+    seen.add(node)
+    nodes.push(node)
+    for (const key of ['data', 'result', 'message', 'body']) {
+      const child = node[key]
+      if (child !== null && typeof child === 'object') queue.push(child)
+      else if (typeof child === 'string' && child.length > 0) {
+        try { queue.push(JSON.parse(child)) } catch { /* 非 JSON，忽略 */ }
+      }
+    }
+  }
+  const info = nodes.find(node => node.isQueued !== undefined || node.serviceAvailable !== undefined)
+  if (!info) return undefined
+  const codeHit = nodes.some(node => String(node.code) === '10605')
+  if (!codeHit && info.isQueued === undefined) return undefined
+  const out = {}
+  if (typeof info.isQueued === 'boolean') out.isQueued = info.isQueued
+  if (typeof info.subCode === 'string' && info.subCode.length > 0) out.subCode = info.subCode
+  if (typeof info.queueType === 'string' && info.queueType.length > 0) out.queueType = info.queueType
+  for (const key of ['retryAfterSeconds', 'waitTime']) {
+    const num = Number(info[key])
+    if (Number.isFinite(num)) out[key] = Math.trunc(num)
+  }
+  return out
+}
+
 // 把信封 SSE 转成标准 OpenAI SSE 文本。
 //
 // ⚠️ 业务错误的 `code` 必须保持为**独立字段**、`message` 原样：
@@ -291,6 +405,7 @@ module.exports = {
   POLL_INTERVAL_MS,
   REFRESH_PATH,
   USERINFO_PATH,
+  USAGE_PATH,
   PRODUCTS,
   createPkce,
   createDeviceSession,
@@ -305,6 +420,8 @@ module.exports = {
   bearerToken,
   displayName,
   applyRefresh,
+  parseUsageBalance,
   unwrapEnvelopeChunk,
+  parseQueueInfo,
   classifyInner,
 }

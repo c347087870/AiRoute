@@ -34,8 +34,8 @@
               class="ch-add-item"
               @click="pickAdd(entry)"
             >
-              <!-- logo：Qoder 有官方图（public/brand-qoder.png），其余用品牌色字母标 ——
-                   上游应用对这几家也是这么画的（源码里只声明 accent 色 + 名称） -->
+              <!-- logo：三家的官方品牌图都在 public/ 下（brand-*.png/svg），
+                   没有官方图时退回品牌色字母标 -->
               <img v-if="entry.logo" class="ch-add-logo-img" :src="entry.logo" alt="" />
               <span v-else class="ch-add-logo" :style="{ background: entry.logoBg }">{{ entry.logoText }}</span>
               {{ entry.label }}
@@ -87,8 +87,8 @@
               >
                 <AppIcon name="gripVertical" />
               </span>
+              <img class="ch-card-logo" src="/brand-workbuddy.svg" alt="" />
               <span class="ch-name">{{ card.name }}</span>
-              <span class="ch-id mono">workbuddy</span>
             </div>
             <div class="ch-head-right">
               <!-- 低频页面（积分构成 / 成长任务 / 定时任务）的入口收进「更多」，
@@ -161,13 +161,8 @@
           </div>
         </div>
 
-        <!-- 一张卡 = 一个产品；合并卡是同一产品的两个区域（Qoder 国际版 / 国内版）。
-             两层结构（卡头 / 账号盒）与 WorkBuddy 卡完全同构：
-             · 徽标与渠道级开关在卡头右侧，作用于**本卡全部账号**；
-             · 账号统一放进一个描边盒子，每行一个账号，右侧是明细 / 测试 / 删除。
-             合并卡与单渠道卡的差别只剩一处：账号行多一个区域标签
-             （对应它的「国内版 / 国际版」）。登录入口统一在页面右上角的
-             「添加账号」菜单里，卡片上不再放登录按钮与区域下拉 -->
+        <!-- 每张卡对应一个渠道区域：账号放进统一描边盒子，每行一个账号，右侧是明细 / 测试 / 删除。
+             登录入口统一在页面右上角的「添加账号」菜单里。 -->
         <div
           v-for="group in visibleCardGroups"
           :key="group.id"
@@ -185,8 +180,11 @@
               >
                 <AppIcon name="gripVertical" />
               </span>
+              <!-- 卡头渠道名前的品牌标：与「添加账号」菜单同一组图（public/brand-*.png/svg），
+                   一眼认出这张卡是哪家渠道；缺图时退回品牌色字母标 -->
+              <img v-if="cardLogo(group.id)" class="ch-card-logo" :src="cardLogo(group.id)" alt="" />
+              <span v-else class="ch-card-logo-text" :style="{ background: cardLogoBg(group.id) }">{{ cardLogoText(group.id) }}</span>
               <span class="ch-name">{{ group.name }}</span>
-              <span class="ch-id mono">{{ group.providers.map(item => item.id).join(' / ') }}</span>
             </div>
             <div class="ch-head-right">
               <!-- 卡头右侧原本还有「N 账号」徽标与渠道级总开关：徽标与账号行重复，
@@ -213,24 +211,26 @@
               <div class="ch-account-main">
                 <div class="ch-account-name">
                   {{ accountName(acct) }}
-                  <span v-if="group.providers.length > 1" class="ch-extra">{{ providerRegionOf(acct.provider) }}</span>
                   <span v-if="acct.accountName" class="ch-extra">{{ acct.accountName }}</span>
                   <span v-if="acct.phone" class="ch-extra mono">{{ acct.phone }}</span>
                 </div>
                 <div class="ch-account-sub">
                   <!-- 与 WorkBuddy 账号行同一个顺序：先说状态（可用 / 已停用），
-                       再说有效期与标签。少了这一项，两张卡的第一行信息起点不同 -->
+                       再说标签。少了这一项，两张卡的第一行信息起点不同 -->
                   <span :class="acct.enabled === false ? 'text-muted' : 'ch-ok'">
                     {{ acct.enabled === false ? '已停用' : '可用' }}
                   </span>
-                  <span>{{ expiryText(acct) }}</span>
+                  <!-- 有余额端点的渠道显示积分：查不到时如实说「查询失败」，不显示 0 -->
+                  <span v-if="balanceText(acct)" :class="{ 'ch-bad': balances[acct.id]?.error }">{{ balanceText(acct) }}</span>
+                  <!-- 今日已用 token：账号级内存账本（WorkBuddy 池与插件各记各的）。
+                       字段缺失就不显示 —— 与 WorkBuddy 行同一写法，不写 0 -->
+                  <span v-if="Number.isFinite(acct.tokenUsageToday)">今日 {{ formatToken(acct.tokenUsageToday) }} token</span>
                   <span
                     v-if="accountTagMap[acct.id]"
                     class="ch-tag"
                     :class="{ bad: accountTagMap[acct.id].bad }"
                     :title="accountTagMap[acct.id].title"
                   >{{ accountTagMap[acct.id].text }}</span>
-                  <span v-if="acct.refreshable" class="ch-tag">可续期</span>
                   <span v-if="acct.refreshError" class="ch-tag bad" :title="acct.refreshError">刷新失败</span>
                 </div>
               </div>
@@ -251,7 +251,7 @@
                 <AppButton variant="secondary" :disabled="!supportsCheckinOf(acct) || busyKey === acct.id + ':checkin' || acct.checkinDone" :title="!supportsCheckinOf(acct) ? `${providerNameOf(acct.provider)} 没有每日签到端点` : acct.checkinDone ? `今天已签到${acct.lastCheckinAt ? '（' + formatTime(acct.lastCheckinAt) + '）' : ''}` : '只给这个账号签到'" @click="checkinAccount(acct)">
                   {{ busyKey === acct.id + ':checkin' ? '签到中…' : acct.checkinDone ? '已签' : '签到' }}
                 </AppButton>
-                <AppButton variant="secondary" v-if="supportsAccountTest(acct)" :disabled="busyKey === acct.id + ':test'" @click="testAccount(acct)">
+                                <AppButton variant="secondary" v-if="supportsAccountTest(acct)" :disabled="busyKey === acct.id + ':test'" @click="testAccount(acct)">
                   {{ busyKey === acct.id + ':test' ? '测试中…' : '测试' }}
                 </AppButton>
                 <AppButton variant="secondary" v-if="supportsOnboarding(acct)" :disabled="busyKey === acct.id + ':onboarding'" @click="claimOnboarding(acct)">
@@ -283,35 +283,43 @@
 
     <!-- ==================== Tab 2：模型 ==================== -->
     <template v-else>
-      <!-- Auto 策略：客户端只填 `auto` 时按哪一档口径挑模型。
-           放在模型页最上面，因为它是「自动路由」的总开关 —— 下面的模型清单
-           决定候选有哪些，这一档决定怎么从候选里挑。
-           与页面顶部的视图切换同一个控件（SegmentedTabs）；
-           说明文字进 title（悬停才看），不占版面 -->
-      <div class="ch-strategy-bar">
-        <span class="ch-strategy-title">Auto 策略</span>
-        <SegmentedTabs
-          :model-value="strategy"
-          :options="strategyTabs"
-          label="Auto 策略切换"
-          size="sm"
-          :disabled="strategySaving"
-          @update:model-value="pickStrategy"
-        />
+      <!-- 三块内容是三个平级的问题，互不包含，所以做成三张同级的卡片：
+           策略决定「怎么挑」，已开启模型是「现在能调到什么」，
+           全量目录是「有哪些可选」。套在一起会让人以为下面的目录是上面那块的明细 -->
+      <!-- 整张卡按「有没有选项」决定在不在：留着空卡片会被当成页面坏了 -->
+      <div v-if="strategyTabs.length" class="card ch-strategy-card">
+        <!-- Auto 策略：客户端只填 `auto` 时按哪一档口径挑模型。
+             与页面顶部的视图切换同一个控件（SegmentedTabs）；
+             说明文字进 title（悬停才看），不占版面。
+             选项由服务端给 -->
+        <div class="ch-strategy-bar">
+          <span class="ch-strategy-title">Auto 策略</span>
+          <SegmentedTabs
+            :model-value="strategy"
+            :options="strategyTabs"
+            label="Auto 策略切换"
+            size="sm"
+            :disabled="strategySaving"
+            @update:model-value="pickStrategy"
+          />
+        </div>
+      </div>
+      <div v-else class="ch-strategy-empty">
+        策略选项读取失败：当前运行的服务可能是旧版本，重启 AiRoute 后再试
       </div>
 
-      <div class="card ch-models-card">
-        <!-- 已开启模型：跨渠道拍平的可调用清单，放在最上面。
+      <div v-if="modelGroups.length" class="card ch-enabled-card">
+        <!-- 已开启模型：跨渠道拍平的可调用清单。
              下面的分组是**全量目录**（cline 一家就 493 条，绝大多数是灰的），
              而用户真正要回答的问题只有一个：我的客户端现在能选到哪些模型。
-             放在工具栏之上还有个作用：过滤输入框在它下面，能一眼看出它没被筛 ——
-             这块是完整清单，被截断会让人以为模型掉线 -->
-        <div v-if="modelGroups.length" class="ch-enabled-block">
+             单列一张卡片，不受模型过滤影响 —— 过滤输入框在下一张卡里，
+             让人一眼看出它没被筛（这张是完整清单，被截断会让人以为模型掉线） -->
+        <div class="ch-enabled-block">
           <div class="ch-model-group-head">
             <span class="ch-name">已开启模型</span>
             <span class="text-muted">共 <span class="ch-ok">{{ enabledModels.length }}</span> 个</span>
             <!-- 这块自己的测试入口：只打这里列出的模型，也就是客户端现在真能调到的那些。
-                 和工具栏的「测试」不是一回事 —— 那个按渠道铺开、且受过滤收窄；
+                 和下面的「测试」不是一回事 —— 那个按渠道铺开、且受过滤收窄；
                  这个不看过滤，关闭 / 已失效 / 已失活的本来就不在这张清单里 -->
             <span class="ch-group-actions">
               <!-- 测试中这个按钮变成「停止」：同一个位置点两次就是开始 / 取消，
@@ -319,6 +327,8 @@
               <AppButton variant="secondary" :disabled="(!!testRun && !isTestRunning('enabled')) || !!busyKey || !enabledModels.length" :title="isTestRunning('enabled') ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败` : `逐个真实调用这里列出的 ${enabledModels.length} 个已开启模型（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）；关闭的与已失效 / 已失活的本来就不在这张清单里`" @click="toggleModelTests('enabled')">
                 {{ isTestRunning('enabled') ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
               </AppButton>
+              <!-- 一键关闭清单里全部模型：清单本身就是范围，不需要过滤收窄 -->
+              <AppButton variant="secondary" :disabled="!!busyKey || !enabledModels.length" @click="closeAllEnabled">全部关闭</AppButton>
             </span>
           </div>
           <div v-if="enabledModels.length" class="ch-models">
@@ -343,7 +353,9 @@
             当前没有任何模型处于开启状态 —— 用下面各渠道的「全部打开」，或工具栏的「全部开启」。
           </div>
         </div>
+      </div>
 
+      <div class="card ch-models-card">
         <div class="ch-toolbar">
           <!-- 模型过滤：全量目录动辄几百条，只按名称 / id 的子串匹配（不区分大小写）。
                输入框留在工具栏里而不是每组头各放一个：过滤是页面级的视角，
@@ -394,9 +406,6 @@
               >，已失活 <span class="ch-bad">{{ group.offlineCount }}</span></template>
             </span>
             <span class="ch-group-actions">
-              <!-- 这几个按钮作用于当前过滤命中的模型；把范围写在按钮旁边，
-                   免得「筛出 3 条点全部关闭」时以为整家渠道都被关了（或反过来） -->
-              <span v-if="modelFilterActive" class="text-muted ch-filter-scope">作用于匹配的 {{ group.models.length }} 个</span>
               <AppButton variant="secondary" :disabled="(!!testRun && !isTestRunning(group.id)) || !!busyKey" :title="isTestRunning(group.id) ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败` : modelFilterActive ? `只测本渠道里匹配当前过滤、且已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）` : `逐个真实调用这个渠道里已启动的模型，通过的标绿点（串行 + 间隔，避免触发上游风控）`" @click="toggleModelTests(group.id)">
                 {{ isTestRunning(group.id) ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
               </AppButton>
@@ -452,7 +461,7 @@ import SegmentedTabs from '../components/SegmentedTabs.vue'
 import { slotsOf } from '../utils/channel-links.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, reviveModel, getAccountHealth, getAutoStrategy, updateAutoStrategy } from '../api.js'
+import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, auditModelHealth, reviveModel, getAccountHealth, getAutoStrategy, updateAutoStrategy } from '../api.js'
 import AppButton from '../components/AppButton.vue'
 import OauthAuthBlock from '../components/OauthAuthBlock.vue'
 // WorkBuddy 走独立的一组端点（/api/workbuddy/*），和渠道包 RPC 是两套账号体系。
@@ -477,11 +486,11 @@ import {
 // `option` 是「添加账号」菜单里的写法：只写产品与区域，域名不带进菜单。
 // 同一产品的两个区域光写「国际版 / 国内版」看不出是哪个产品，所以名称里带上产品名。
 // `logoBg` 是菜单项前字母标的底色：同一家用同一个色，两区靠名称区分。
-// `logo` 是官方品牌图（Qoder 有，其余暂缺）。
+// `logo` 是官方品牌图（public/brand-*.png/svg）。
 const PROVIDERS = [
-  { id: 'trae', name: 'Trae (字节)', option: 'Trae', region: '', logoBg: '#00BFA6' },
-  { id: 'qoder', name: 'Qoder', option: 'Qoder 国际版', region: '国际版', logo: '/brand-qoder.png', logoBg: '#615CED' },
-  { id: 'qodercn', name: 'Qoder (国内版)', option: 'Qoder 国内版', region: '国内版', logo: '/brand-qoder.png', logoBg: '#7A6CF0' }
+  { id: 'trae', name: 'Trae', option: 'Trae', region: '', logo: '/brand-trae.png', logoBg: '#00BFA6' },
+  { id: 'qoder', name: 'Qoder 国际版', option: 'Qoder 国际版', region: '国际版', logo: '/brand-qoder.svg', logoBg: '#615CED' },
+  { id: 'qodercn', name: 'Qoder 国内版', option: 'Qoder 国内版', region: '国内版', logo: '/brand-qoder.svg', logoBg: '#7A6CF0' }
 ]
 
 // 有「新手任务 / 登录奖励」端点的渠道。当前三家都没有这种端点
@@ -490,46 +499,20 @@ const ONBOARDING_PROVIDERS = []
 // 给它一个必然失败的按钮只会让用户对着报错猜是哪家不支持。
 const CLAIM_PROVIDERS = ['trae']
 
-// 同一产品的多个区域合成一张卡。Qoder 是两套独立凭据
-// （`qoder` → qoder.com、`qodercn` → qoder.cn），但它们是同一个产品：
-// 分成两张卡时用户要来回滚动才能对比两边的账号。
-//
-// 合并的是**整张卡的骨架**：一个卡头（徽标 + 开关）、一个账号盒，
-// 与 WorkBuddy 卡同构；区域之间的差别只留在账号行的标签上。
-// 卡 id 取第一个成员（`qoder`）：拖拽顺序是按卡 id 存在 localStorage 的，
-// 沿用旧 id 用户排好的位置就不会丢。
-const MERGED_CARDS = [
-  { id: 'qoder', name: 'Qoder', members: ['qoder', 'qodercn'] }
-]
-
-// 账号页的卡片清单：一个分组一张卡。名称照抄 displayName。
-const CARD_GROUPS = (() => {
-  const byId = new Map(PROVIDERS.map(provider => [provider.id, provider]))
-  const groups = []
-  for (const provider of PROVIDERS) {
-    const merged = MERGED_CARDS.find(card => card.members.includes(provider.id))
-    if (!merged) {
-      groups.push({ id: provider.id, name: provider.name, providers: [provider] })
-      continue
-    }
-    if (groups.some(group => group.id === merged.id)) continue
-    const providers = merged.members.map(id => byId.get(id)).filter(Boolean)
-    groups.push({
-      id: merged.id,
-      name: merged.name,
-      providers
-    })
-  }
-  return groups
-})()
+// 账号页每个 provider 独立成卡，Qoder 国际版 / 国内版分别展示。
+const CARD_GROUPS = PROVIDERS.map(provider => ({
+  id: provider.id,
+  name: provider.name,
+  providers: [provider]
+}))
 
 // WorkBuddy 的目录由主进程直通提供（server/channels/index.js 的运行时门面），
 // 而那份目录就是它的**启用清单** —— 已关掉的模型根本没进渠道目录，所以模型页不能
 // 靠 model.list 拿它（owned runtime 只管 Trae / Qoder），
 // 只能单独走 /api/workbuddy/*：上游全量算出「有哪些可选」，启用清单算出「现在开着哪些」。
 const WB_MODEL_PROVIDERS = [
-  { id: 'workbuddy', name: 'WorkBuddy（国内版）', region: 'cn' },
-  { id: 'workbuddy-global', name: 'WorkBuddy（国际版）', region: 'global' }
+  { id: 'workbuddy', name: 'WorkBuddy 国内版', region: 'cn' },
+  { id: 'workbuddy-global', name: 'WorkBuddy 国际版', region: 'global' }
 ]
 const WB_REGION_OF = Object.fromEntries(WB_MODEL_PROVIDERS.map(item => [item.id, item.region]))
 
@@ -557,8 +540,7 @@ const DEFAULT_ORDER = [...WB_CARDS.map(card => card.id), ...CARD_GROUPS.map(grou
 function loadSavedOrder() {
   try {
     const raw = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]')
-    // 过滤掉已经不存在的 id：渠道包升级删了某个 provider 时旧顺序里会留着它；
-    // Qoder 国内版并进 Qoder 卡之后，旧的 `qodercn` 也会在这里被丢掉
+    // 过滤掉已经不存在的 id：渠道包升级删了某个 provider 时旧顺序里会留着它。
     if (Array.isArray(raw)) return raw.filter(id => DEFAULT_ORDER.includes(id))
   } catch {
     /* 存坏了就当没存过，不值得为一条排序偏好报错 */
@@ -872,6 +854,10 @@ const accounts = ref([])
 
 const login = ref(null) // { provider, accountId, url, message }
 const busyKey = ref('') // 行内/卡内按钮的互斥键，形如 `${id}:${action}`
+// 账号 id → 余额查询结果 { total, error }。
+// 不放进 accounts 里：余额是**按需**查的（要打上游），与账号清单（本地读盘）不同源，
+// 混在一起会让 5 秒轮询把每次轮询都变成一轮余额请求。
+const balances = ref({})
 const modelsByProvider = ref({}) // provider → RpcModelListEntry[]
 // WorkBuddy 的模型行与「上游全量」分开存：行用于渲染（和渠道包同结构），
 // 上游全量用于保存启用清单时补齐 displayName / maxContext 等字段
@@ -1032,6 +1018,7 @@ async function loadStatus() {
 async function reload({ silent = false } = {}) {
   try {
     await loadStatus()
+    await auditModelHealth().catch(() => null)
     await loadModelHealth()
     await loadAccountHealth()
     const targets = PROVIDERS.filter(p => (statuses.value[p.id]?.accounts?.total || 0) > 0)
@@ -1054,6 +1041,8 @@ async function reload({ silent = false } = {}) {
     if (failed.length && !silent) showToast(`部分渠道账号读取失败：${failed.join('、')}`, 'error', 6000)
     // WorkBuddy 是另一套后端，失败自己兜（见 loadWorkbuddy），不能连带整页报错
     await loadWorkbuddy()
+    // 余额按 5 分钟节流自动拉（loadBalancesAll 内部判），不用等用户手点
+    await loadBalancesAll()
     // 目录是服务启动时在后台采集的，首屏可能还没采完（此时 channels 源里的模型数还是 0）。
     // 已有账号却报 0，说明采集没跟上 —— 补一次同步，让头部统计与 Provider 配置立刻对上。
     // 轮询不触发：否则目录真为空时会每 5 秒重新采集一次。
@@ -1203,11 +1192,11 @@ const addWrapEl = ref(null)
 
 // 目标清单：WorkBuddy 两个区域各算一项（域名与 OAuth 入口不同），
 // 其余渠道按 provider 列 —— Qoder 国际版 / 国内版是两家独立凭据，分开列清楚。
-// logo 是菜单项前的品牌标：Qoder 有官方图（public/brand-qoder.png），
-// 其余用品牌色字母标 —— 上游应用对这几家也是这么画的（源码里只声明 accent 色 + 名称）。
+// logo 是菜单项前的品牌标：三家都有官方图（public/brand-*.png/svg），
+// 没有官方图时才退回品牌色字母标。
 const ADD_ENTRIES = [
-  { key: 'workbuddy:cn', label: 'WorkBuddy 国内版', kind: 'workbuddy', realm: 'cn', logoText: 'W', logoBg: '#0e7a4a' },
-  { key: 'workbuddy:global', label: 'WorkBuddy 国际版', kind: 'workbuddy', realm: 'global', logoText: 'W', logoBg: '#0e7a4a' },
+  { key: 'workbuddy:cn', label: 'WorkBuddy 国内版', kind: 'workbuddy', realm: 'cn', logo: '/brand-workbuddy.svg', logoText: 'W', logoBg: '#0e7a4a' },
+  { key: 'workbuddy:global', label: 'WorkBuddy 国际版', kind: 'workbuddy', realm: 'global', logo: '/brand-workbuddy.svg', logoText: 'W', logoBg: '#0e7a4a' },
   ...PROVIDERS.map(p => ({
     key: p.id,
     label: p.option,
@@ -1218,6 +1207,19 @@ const ADD_ENTRIES = [
     logoBg: p.logoBg || '#3b82f6',
   }))
 ]
+
+// 卡头品牌标：按卡 id 找对应渠道的官方图；找不出图时退回品牌色字母标。
+// WorkBuddy 两张卡共用一张图，其余渠道按 provider 配置取
+function cardLogo(cardId) {
+  if (cardId === 'workbuddy' || cardId === 'workbuddy-global') return '/brand-workbuddy.svg'
+  return PROVIDERS.find(p => p.id === cardId)?.logo || null
+}
+function cardLogoBg(cardId) {
+  return PROVIDERS.find(p => p.id === cardId)?.logoBg || '#3b82f6'
+}
+function cardLogoText(cardId) {
+  return (PROVIDERS.find(p => p.id === cardId)?.name || '?')[0]
+}
 
 function toggleAddMenu() {
   addMenuOpen.value = !addMenuOpen.value
@@ -1330,10 +1332,7 @@ function cancelLogin() {
 
 // ==================== 账号 ====================
 //
-// 卡片是一个**分组**：单渠道卡只有一家，合并卡（Qoder）是同一产品的两个区域。
-// 下面这些 helper 都吃 group 而不是 provider —— 徽标、开关、账号列表、
-// 操作行都是整卡的，两个区域不再各画一套。登录入口已从卡片上移除，
-// 添加账号统一走页面右上角的「添加账号」菜单。
+// 账号卡按 provider 展示。登录入口统一走页面右上角的「添加账号」菜单。
 
 // 分组内某个区域的信息
 function providerOfId(id) {
@@ -1344,14 +1343,6 @@ function providerNameOf(id) {
   return providerOfId(id).name
 }
 
-// 账号行上的区域标签：与 WorkBuddy 账号行的「国内版 / 国际版」同一个位置、
-// 同一种写法（短标签，不重复产品名 —— 卡头已经写了 Qoder）
-function providerRegionOf(id) {
-  return providerOfId(id).region || providerOfId(id).name
-}
-
-// 账号属于哪个区域 -> 展示名。合并卡里账号行靠它标「国际版 / 国内版」，
-// 与 WorkBuddy 账号行上的「国内版 / 国际版」是同一个位置、同一套写法
 function accountsOf(group) {
   const ids = new Set(group.providers.map(p => p.id))
   return accounts.value.filter(a => ids.has(a.provider))
@@ -1421,6 +1412,55 @@ async function checkinAccount(acct) {
   }
 }
 
+// 行上显示的余额文案。查不到就说查不到，不能显示 0 ——
+// 「余额 0」会被理解成「额度被清空了」，而真实原因往往是上游没给这个端点。
+function balanceText(acct) {
+  const record = balances.value[acct.id]
+  if (!record) return ''
+  if (record.error) return '余额查询失败'
+  return `积分 ${formatCredit(record.total)}`
+}
+
+// 余额自动刷新：有 balance 端点的渠道，整渠道一次拉齐（credits.balances 内部
+// 已逐账号顺序查，比行上逐个 account.balance 少 N-1 次往返）。
+// 余额是分钟级的慢变量（失活审计也是 10 分钟一轮），按 5 分钟节流，
+// 不跟随 5 秒的页面轮询 —— 那只会替上游制造压力。
+let balancesRefreshedAt = 0
+let balancesLoading = false
+const BALANCE_REFRESH_MS = 5 * 60 * 1000
+
+async function loadBalancesAll({ force = false } = {}) {
+  if (balancesLoading) return
+  if (!force && Date.now() - balancesRefreshedAt < BALANCE_REFRESH_MS) return
+  const targets = PROVIDERS.filter(p => statuses.value[p.id]?.capabilities?.balance === true
+    && accounts.value.some(a => a.provider === p.id))
+  if (!targets.length) return
+  balancesLoading = true
+  const patch = {}
+  try {
+    const results = await Promise.all(targets.map(async p => {
+      try {
+        const value = await channelsRpc('credits.balances', { provider: p.id }, 120000)
+        return value?.accounts || []
+      } catch {
+        return []
+      }
+    }))
+    for (const rows of results) {
+      for (const row of rows) {
+        if (!row?.accountId) continue
+        const total = row?.balance?.total
+        patch[row.accountId] = Number.isFinite(total)
+          ? { total, error: '' }
+          : { total: null, error: row?.error || '查询失败' }
+      }
+    }
+    balances.value = { ...balances.value, ...patch }
+    balancesRefreshedAt = Date.now()
+  } finally {
+    balancesLoading = false
+  }
+}
 async function testAccount(acct) {
   busyKey.value = acct.id + ':test'
   try {
@@ -1748,6 +1788,24 @@ async function toggleModel(providerId, m) {
   }
 }
 
+// 关掉「已开启模型」清单里的全部模型：清单本身就是范围，逐个关掉即可
+async function closeAllEnabled() {
+  const count = enabledModels.value.length
+  busyKey.value = 'enabled:models'
+  try {
+    for (const row of enabledModels.value) {
+      await setModelsDisabled(row.provider, [row.model.id], true)
+    }
+    showToast(`已关闭 ${count} 个模型`)
+    await loadModels()
+    await loadStatus()
+  } catch (err) {
+    showToast('批量关闭失败：' + err.message, 'error', 6000)
+  } finally {
+    busyKey.value = ''
+  }
+}
+
 // 某个渠道自己的「全部打开 / 全部关闭」。过滤生效时只作用于命中的模型
 async function setAllModels(providerId, disabled) {
   const models = actionModelsOf(providerId)
@@ -1937,13 +1995,6 @@ async function runModelTests(scope) {
 }
 
 // ==================== 格式化 ====================
-
-function expiryText(acct) {
-  if (!acct.expiresAt) return '有效期未知'
-  const left = acct.expiresAt - Date.now()
-  if (left <= 0) return '凭据已过期'
-  return `到期 ${formatTime(acct.expiresAt)}`
-}
 
 function formatTime(ms) {
   const d = new Date(ms)
@@ -2272,12 +2323,16 @@ onUnmounted(() => {
 
 
 
-/* Auto 策略：标题 + 分段控件（SegmentedTabs，与页面顶部视图切换同款） */
+/* Auto 策略：独立一张卡，标题 + 分段控件（SegmentedTabs，与页面顶部视图切换同款）。
+   卡片间距走页面的统一节奏（与 .ch-grid 的 gap 一致） */
+.ch-strategy-card {
+  margin-bottom: 14px;
+}
+
 .ch-strategy-bar {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 14px;
 }
 
 .ch-strategy-title {
@@ -2285,6 +2340,13 @@ onUnmounted(() => {
   font-weight: 600;
   color: var(--text-1);
   white-space: nowrap;
+}
+
+/* 读不到策略档位时的说明行：说清「为什么空着」和「怎么办」，
+   免得只剩一张空卡片让人以为页面坏了 */
+.ch-strategy-empty {
+  font-size: var(--fs-small);
+  color: var(--text-3);
 }
 
 .ch-stats {
@@ -2516,9 +2578,31 @@ body.ch-drag-active * {
   color: var(--text-1);
 }
 
-.ch-id {
+/* 卡头渠道名前的品牌标：与「添加账号」菜单同一规格（20px 方块垫白底），
+   两种主题下都清楚 */
+.ch-card-logo {
+  flex: none;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+  padding: 2px;
+  background: #fff;
+  border-radius: var(--radius-xs);
+}
+
+.ch-card-logo-text {
+  flex: none;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: var(--fs-mini);
-  color: var(--text-3);
+  font-weight: 600;
+  color: #fff;
+  border-radius: var(--radius-xs);
 }
 
 .ch-head-right {
@@ -2667,6 +2751,10 @@ body.ch-drag-active * {
 }
 
 /* ===== 模型 ===== */
+.ch-enabled-card {
+  margin-bottom: 14px;
+}
+
 .ch-models-card {
   display: flex;
   flex-direction: column;
@@ -2728,23 +2816,15 @@ body.ch-drag-active * {
   white-space: nowrap;
 }
 
-/* 过滤时标注组内按钮的作用范围（作用于匹配的 N 个）：小字，不抢按钮的注意力 */
-.ch-filter-scope {
-  font-size: var(--fs-mini);
-}
-
 .ch-model-group {
   padding-top: 12px;
   border-top: 1px solid var(--border-2);
 }
 
-/* 「已开启模型」板块：排在卡片最上方，给一层底色 + 外框把它和下面的
-   工具栏、全量目录分开 —— 它是结论，后面那两段是产生结论的材料 */
+/* 「已开启模型」板块：独立成一张卡片（.ch-enabled-card），底色用全局卡片的；
+   .ch-enabled-block 只剩卡内的组头 + 清单布局 */
 .ch-enabled-block {
-  padding: 10px 12px 12px;
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  background: var(--bg-chip);
+  padding: 0;
 }
 
 .ch-enabled-empty {

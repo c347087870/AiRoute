@@ -341,9 +341,8 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
       case 'model.setEnabled': {
         // 引导页的「多选开启」：给出一份完整启用清单，其余全关。
         // 传完整清单而不是逐个开关，一次落盘一次广播。
-        // 拒绝空清单：全关等于渠道源里一个模型都不剩，/v1/models 会直接空掉
+        // 允许空清单：整组全关后渠道源里没有该渠道的模型，/v1/models 不再列它
         const modelIds = Array.isArray(payload.modelIds) ? payload.modelIds.filter(id => typeof id === 'string' && id) : []
-        if (!modelIds.length) return { ok: false, error: '缺少 modelIds（至少要开启一个模型）' }
         const ids = new Set(modelIds)
         const state = readState()
         const next = {}

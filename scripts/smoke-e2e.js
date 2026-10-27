@@ -157,10 +157,10 @@ function startMockUpstream() {
 
 // ---------- 网关进程 ----------
 
-function startGateway(dataDir, port, extraEnv = {}) {
+function startGateway(dataDir, port) {
   // 清除代理环境变量：真实部署（Electron 应用）不依赖它们，
   // 且代理会让「不可达上游」的判定不稳定，影响 fallback 等用例
-  const env = { ...process.env, AIROUTE_DATA_DIR: dataDir, PORT: String(port), ...extraEnv }
+  const env = { ...process.env, AIROUTE_DATA_DIR: dataDir, PORT: String(port) }
   for (const k of ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']) {
     delete env[k]
   }
@@ -891,62 +891,6 @@ async function main() {
     await check('GET /api/logs 状态筛选 failed 只返回失败', async () => {
       const r = await fetchJson(`${base}/api/logs?status=failed&limit=50`)
       assert.ok(r.json.every(e => e.status !== 200))
-    })
-
-    // ==================== 开发面板（只在开发模式回数据） ====================
-    //
-    // 面板本身是渲染层的事，这里守的是**服务端的开关**：开发模式下可用、
-    // 打包版（NODE_ENV=production）里这个端点必须 404。开关写反了，
-    // 用户的正式版就会多一个回显绝对路径与环境变量的接口。
-    group('9.5 开发面板接口（仅开发模式）')
-
-    await check('GET /api/dev/info 开发模式返回进程与运行时快照', async () => {
-      const r = await fetchJson(`${base}/api/dev/info`)
-      assert.strictEqual(r.status, 200)
-      assert.strictEqual(r.json.ok, true)
-      assert.strictEqual(r.json.devMode, true)
-      // 面板靠这几项说明「现在跑的是什么」，字段名变了界面就会静默空着
-      assert.strictEqual(typeof r.json.server.version, 'string')
-      assert.strictEqual(typeof r.json.process.pid, 'number')
-      assert.strictEqual(typeof r.json.process.node, 'string')
-      assert.ok(r.json.process.memory && r.json.process.memory.rss > 0)
-      assert.strictEqual(typeof r.json.dataDir, 'string')
-      assert.ok(r.json.dataDir.includes('airoute-e2e-'), '回的是本次临时数据目录')
-      assert.ok(Array.isArray(r.json.files))
-      assert.ok(r.json.files.some(f => f.name === 'models.json'), '数据目录里的运行时文件要列出来')
-      assert.ok(Array.isArray(r.json.inFlight))
-      assert.strictEqual(typeof r.json.channels.state, 'string')
-      assert.ok(Array.isArray(r.json.channels.providers))
-      assert.ok(r.json.modelHealth && r.json.modelHealth.offlineAfterFailures === 3)
-      assert.strictEqual(typeof r.json.logs.totalSize, 'number')
-      assert.strictEqual(typeof r.json.tokens.todayRequests, 'number')
-    })
-
-    await check('GET /api/dev/info 只回显本项目环境变量（不回 PATH 等）', async () => {
-      const r = await fetchJson(`${base}/api/dev/info`)
-      const env = r.json.process.env || {}
-      assert.ok(!('PATH' in env), '整份环境变量里可能有与本项目无关的密钥')
-      assert.ok(!('HOME' in env))
-      assert.strictEqual(env.AIROUTE_DATA_DIR, tmpDir)
-    })
-
-    await check('NODE_ENV=production 时 /api/dev/info → 404（正式版拿不到）', async () => {
-      // 另起一个进程而不是改现有网关的 NODE_ENV：开关是在 require 时读的，
-      // 只能靠新进程验证「打包版到底注册没注册」
-      const prodPort = gwPort + 1000
-      const prod = startGateway(tmpDir, prodPort, { NODE_ENV: 'production' })
-      try {
-        assert.ok(await waitHealth(prodPort), `正式模式网关未启动。输出：\n${prod.getOutput().slice(-1500)}`)
-        const r = await fetchJson(`http://127.0.0.1:${prodPort}/api/dev/info`)
-        assert.strictEqual(r.status, 404)
-        assert.match(r.json.error, /开发模式/)
-        // 别的端点不受影响：只关了开发面板这一个
-        const health = await fetchJson(`http://127.0.0.1:${prodPort}/api/health`)
-        assert.strictEqual(health.status, 200)
-      } finally {
-        prod.child.kill('SIGKILL')
-        await sleep(300)
-      }
     })
 
     // ==================== WorkBuddy 端点（无账号时不应 500） ====================

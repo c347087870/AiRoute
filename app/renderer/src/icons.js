@@ -9,7 +9,7 @@
 // 「路由规则 / 模型来源 / 日志查看 / 用量统计 / 模型测分」现在收在「高级功能」分组里，
 // 二级项不带图标（220px 宽的侧边栏缩进后放不下）；freeAccounts 则随着「免费账号」
 // 并入渠道账号页而空了出来。它们的图标仍留在这张表里 —— 以后谁被移回一级菜单，
-// 直接拿来用，不必再去翻图标站。dev 是「开发面板」（仅开发模式出现的一级项）。
+// 直接拿来用，不必再去翻图标站。
 //
 // 换图标：把对应 key 的值换成新的 body 即可（在 icones.js.org 点开图标复制 SVG，
 // 或取 https://api.iconify.design/tabler/<图标名>.json 里的 icons.<名>.body）。
@@ -41,8 +41,6 @@ export const ICONS = {
   arrowLeft: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12l6 6M5 12l6-6"/>',
   // tabler:chevron-down（分组展开箭头，靠 CSS 旋转表示状态）
   chevronDown: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m6 9l6 6l6-6"/>',
-  // tabler:terminal-2（一级「开发面板」，仅开发模式出现）
-  dev: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3l-3 3m5 0h3M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   // tabler:grip-vertical（渠道卡片拖拽排序的手柄）
   gripVertical: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0m6-14a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0m0 7a1 1 0 1 0 2 0a1 1 0 1 0-2 0"/>',
   // tabler:external-link（渠道账号「明细」：用系统浏览器打开个人中心）

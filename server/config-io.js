@@ -226,9 +226,26 @@ function importAll(payload) {
   return { ok: true, backupFile, replaced }
 }
 
+// 清空配置：抹掉模型来源、路由规则、兜底、激活模型与全部账号凭据，
+// 服务端设置（端口等）保留。清空前先打一份快照，可再导入回来。
+function clearAll() {
+  const dataDir = paths.getDataDir()
+  const backupFile = writeBackup(exportAll(), dataDir)
+
+  for (const entry of CONFIG_FILES) {
+    if (entry.key === 'server') continue
+    fs.writeJsonSync(path.join(dataDir, entry.file), entry.fallback, { spaces: 2 })
+  }
+  for (const entry of ACCOUNT_DIRS) {
+    fs.removeSync(path.join(dataDir, entry.dir))
+  }
+  return { ok: true, backupFile }
+}
+
 module.exports = {
   FORMAT,
   VERSION,
   exportAll,
-  importAll
+  importAll,
+  clearAll
 }

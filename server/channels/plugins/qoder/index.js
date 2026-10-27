@@ -24,7 +24,9 @@ module.exports = {
   id: 'qoder',
   name: 'Qoder',
   providers: PROVIDERS,
-  // Qoder 没有每日签到端点：不申报，面板就不会给它画「领取积分」
+  // Qoder 没有每日签到端点：不申报，面板就不会给它画「领取积分」。
+  // 但余额端点（/sash/api/v2/me/usage，纯 Bearer）是有的：provider.balance 已实现，
+  // 面板据此在账号行显示积分余额。
   checkinProviders: [],
   create(ctx) {
     const { createQoder } = require('./provider')
@@ -48,6 +50,7 @@ module.exports = {
       startLogin: provider => qoder.startLogin(provider),
       pollLogin: (provider, state) => qoder.pollLogin(provider, state),
       checkin: provider => qoder.checkin(provider),
+      balance: (provider, uid) => qoder.balance(provider, uid),
       refresh: () => qoder.refresh(),
       setEvents: handlers => qoder.setEvents(handlers),
       shutdown: () => qoder.shutdown(),

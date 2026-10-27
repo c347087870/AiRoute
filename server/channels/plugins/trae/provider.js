@@ -62,6 +62,24 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
   const rateLimits = new Map()
   // 待完成的登录流程：state → { machineId, deviceId, createdAt }
   const logins = new Map()
+  // 账号级今日 token：uid → { day, total }。内存账本（进程重启清零）——
+  // 界面显示的是「今天到目前为止用了多少」，与 WorkBuddy 池的 tokenUsageToday 同口径；
+  // 跨零点自然归零，不落盘（重启丢一段当日读数可接受，不值得为此多一份状态文件）
+  const tokenToday = new Map()
+
+  function noteTokenUsage(uid, tokens) {
+    const total = Math.trunc(Number(tokens) || 0)
+    if (!uid || total <= 0) return
+    const day = localDay(Date.now())
+    const entry = tokenToday.get(uid)
+    if (!entry || entry.day !== day) tokenToday.set(uid, { day, total })
+    else entry.total += total
+  }
+
+  function tokenUsageTodayOf(uid) {
+    const entry = tokenToday.get(uid)
+    return entry && entry.day === localDay(Date.now()) ? entry.total : 0
+  }
 
   const notify = () => {
     try {
@@ -132,6 +150,8 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
         // 跨零点自然失效 —— 存的是日期而不是「上次签到时刻」
         checkinDone: entry.lastCheckinDay === today,
         lastCheckinAt: Number(entry.lastCheckinAt) || 0,
+        // 今日已用 token（账号级，见 tokenToday 的说明）
+        tokenUsageToday: tokenUsageTodayOf(entry.uid),
       }
     })
   }
@@ -363,7 +383,7 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
 
   // 把上游流逐事件转成内部 chunk。`onChunk` 由调用方提供。
   // 返回本轮是否吐过内容（决定能不能换号重发）。
-  async function consumeSolo(response, { model, signal, onChunk }) {
+  async function consumeSolo(response, { model, signal, onChunk, servedUid }) {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -478,6 +498,8 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
           cacheWriteTokens: 0,
           totalTokens: usage.total_tokens,
           reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+          // 记账归因：面板的「今日 token」按账号累计（同 WorkBuddy 的 tokenUsageToday）
+          ...(servedUid ? { uid: servedUid } : {}),
         },
       })
     }
@@ -542,7 +564,16 @@ function createTrae({ dataDir, logger = console, credentials, login }) {
           }
           throw lastError
         }
-        return await consumeSolo(response, { model: bare, signal, onChunk })
+        return await consumeSolo(response, {
+          model: bare,
+          signal,
+          // 记账包一层：usage 帧经过时顺手累计到该账号的今日 token（servedUid 已带入）
+          onChunk: chunk => {
+            if (chunk?.type === 'usage') noteTokenUsage(chunk.usage?.uid, chunk.usage?.totalTokens)
+            onChunk(chunk)
+          },
+          servedUid: candidate.uid,
+        })
       } catch (error) {
         if (signal?.aborted) throw error
         // 流内可换号错误：只有**还没吐内容**时才换号（吐了一半重放会重复计费）

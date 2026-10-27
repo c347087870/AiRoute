@@ -98,7 +98,6 @@ import { getHealth } from '../api.js'
 import { useUpdate } from '../composables/useUpdate.js'
 import { useTheme } from '../composables/useTheme.js'
 import { useOnboarding } from '../composables/useOnboarding.js'
-import { isDevMode } from '../utils/dev-mode.js'
 
 const isOnline = ref(false)
 
@@ -120,11 +119,7 @@ const navItems = [
   // 免费账号已经并进渠道账号页当第三个 Tab；/workbuddy 作为它的子页面保留，
   // 但侧边栏不再单独占一项，所以这里用 alsoActive 让子页面期间「渠道账号」保持高亮
   { path: '/channels', label: '渠道账号', icon: 'channels', alsoActive: ['/workbuddy'] },
-  { path: '/tutorial', label: '使用教程', icon: 'tutorial' },
-  // 开发面板是一级页面而不是收进「高级功能」：它每天都要点开好几次（看端口、
-  // 数据目录、失活原因），埋在两级菜单里要展开再找一次。正式版没有这条路由，
-  // 所以只进开发模式的菜单 —— 否则点进去是空白页
-  ...(isDevMode ? [{ path: '/dev', label: '开发面板', icon: 'dev' }] : [])
+  { path: '/tutorial', label: '使用教程', icon: 'tutorial' }
 ]
 
 // 「高级功能」分组单独放在菜单末尾：低频但需要保留入口的页面收进这里，

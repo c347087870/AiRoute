@@ -333,7 +333,6 @@ pnpm test       # WorkBuddy 模块 + 一键升级（校验 / 替换 / 回滚 / W
 pnpm test:e2e   # 端到端冒烟测试（本地 mock 上游，覆盖三条协议链路）
 ```
 
-> **开发面板**（只在开发模式出现）：`pnpm dev` / `pnpm dev:web` 下侧边栏一级菜单「开发面板」（在「使用教程」之后），或直接访问 `http://localhost:5173/#/dev`。一屏看到版本 / 端口 / PID、数据目录与工作目录、内存与运行时长、渠道运行时与 provider 索引、WorkBuddy 池计数、在途请求、失活明细、数据目录里落盘的文件与本项目环境变量，每 5 秒自动刷新。数据来自 `GET /api/dev/info`，正式版请求它回 404（服务端按 `NODE_ENV !== 'production'` 判定）；打包产物里连路由与页面代码都没有——`import.meta.env.DEV` 是编译期常量，`vite build` 时被替换成 false，`DevPanel.vue` 随之被摇掉。
 > 产物在 `app/dist-electron/`。exe 只能在 Windows 上构建、dmg 只能在 macOS 上构建（交叉架构可以，跨系统不行）。
 > 架构列表与产物命名以 `electron-builder.json` 的 `target` / `artifactName`（安装版见 `nsis.artifactName`）为准，`scripts/targets.js` 读取它，构建与发布自检不在脚本里另写一份。
 > 打包脚本会自动排除 API Key、WorkBuddy 凭证、个人配置（`state.json` / `server-config.json` 等）与运行数据，产物可放心分发。

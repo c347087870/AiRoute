@@ -69,21 +69,20 @@ function textOf(content) {
 // （实测 30 秒），按 500ms→8s 的指数退避永远等不到，表现就是「偶尔能用」。
 // 也不能把它当认证失败去续期 —— 那会白换一次令牌再撞同一堵墙。
 function queueOrError(data) {
-  const inner = (() => {
-    try {
-      return typeof data.message === 'string' ? JSON.parse(data.message) : data.message
-    } catch {
-      return undefined
-    }
-  })()
-  if (String(data.code) === '10605' || inner?.isQueued === true) {
-    const seconds = Number(inner?.retryAfterSeconds ?? inner?.waitTime ?? 30)
+  // HTTP 层传入的是整个响应体对象，SSE 层传入的是顶层帧的 message；
+  // 两者共用同一套解析（vendor 的 model-queue 明确要求两种形态都支持），
+  // 否则就是「只修了一条路径」的老缺陷。
+  const info = protocol.parseQueueInfo(data) ?? protocol.parseQueueInfo(data?.message)
+  if (info || String(data.code) === '10605') {
+    const seconds = Number(info?.retryAfterSeconds ?? info?.waitTime ?? 30)
     const error = new Error(`Qoder 排队中，${seconds} 秒后重试`)
     error.code = 'QUEUED'
     error.retryAfterMs = Number.isFinite(seconds) ? Math.min(Math.max(seconds, 1), 120) * 1000 : 30000
     return error
   }
-  const message = inner && typeof inner === 'object' && typeof inner.message === 'string' ? inner.message : data.message
+  const message = typeof data.message === 'string' && data.message.length < 200
+    ? data.message
+    : JSON.stringify(data.message)
   return new Error(`Qoder：${message}`)
 }
 
@@ -97,6 +96,23 @@ function createQoder({ dataDir, logger = console, credentials }) {
   const refreshing = new Map()
   const rateLimits = new Map()
   const logins = new Map()
+  // 账号级今日 token：uid → { day, total }。内存账本（进程重启清零），与
+  // WorkBuddy 池的 tokenUsageToday 同口径；跨零点自然归零，不落盘
+  const tokenToday = new Map()
+
+  function noteTokenUsage(uid, tokens) {
+    const total = Math.trunc(Number(tokens) || 0)
+    if (!uid || total <= 0) return
+    const day = new Date().toISOString().slice(0, 10)
+    const entry = tokenToday.get(uid)
+    if (!entry || entry.day !== day) tokenToday.set(uid, { day, total })
+    else entry.total += total
+  }
+
+  function tokenUsageTodayOf(uid) {
+    const entry = tokenToday.get(uid)
+    return entry && entry.day === new Date().toISOString().slice(0, 10) ? entry.total : 0
+  }
   const events = {}
 
   const notify = () => {
@@ -170,6 +186,8 @@ function createQoder({ dataDir, logger = console, credentials }) {
         expiresAt: credential ? protocol.credentialExpiresAtMs(credential) ?? 0 : 0,
         expired: credential ? protocol.isExpired(credential) : true,
         hasCredential: credential !== undefined,
+        // 今日已用 token（账号级，见 tokenToday 的说明）
+        tokenUsageToday: tokenUsageTodayOf(entry.uid),
       }
     })
   }
@@ -342,13 +360,30 @@ function createQoder({ dataDir, logger = console, credentials }) {
           business: { type: 'agent' },
         })
         // ⚠️ 头必须原样透传：Authorization 是 WASM 签的 COSY 令牌
-        const response = await request(prepared.url, {
+        let response = await request(prepared.url, {
           method: 'POST',
           headers: prepared.headers,
           body: prepared.body,
           signal,
           timeout: 0,
         })
+        // HTTP 403 的排队体必须在认证分支之前识别；读取 clone 保留原响应体，
+        // 以便下面的认证/普通错误处理仍能给出原始错误信息。
+        let queueAttempts = 0
+        while (response.status === 403 && !signal?.aborted) {
+          const text = await response.clone().text().catch(() => '')
+          let parsed
+          try { parsed = JSON.parse(text) } catch { /* 普通错误 */ }
+          const queueError = parsed && typeof parsed === 'object' ? queueOrError(parsed) : null
+          if (queueError?.code !== 'QUEUED') break
+          if (queueAttempts >= 2) throw queueError
+          queueAttempts++
+          logger.info?.(`[qoder] ${queueError.message}`)
+          await new Promise(resolve => setTimeout(resolve, queueError.retryAfterMs))
+          response = await request(prepared.url, {
+            method: 'POST', headers: prepared.headers, body: prepared.body, signal, timeout: 0,
+          })
+        }
         if (response.status === 401 || response.status === 403) {
           // 认证失败才续期；排队（10605）与重复请求（409）都不是认证问题
           const text = await response.text().catch(() => '')
@@ -363,6 +398,9 @@ function createQoder({ dataDir, logger = console, credentials }) {
           throw Object.assign(new Error(`${product.displayName}：重复请求`), { code: 'DUPLICATE' })
         }
         if (!response.ok) {
+          // ⚠️ 排队的**第一种**形态是 HTTP 403 + 排队 JSON 体（subCode 常见为
+          // RESOURCE_LIMIT）：必须先解析再当普通错误抛，否则就是快退避撞
+          // 30 秒的服务端要求，永远等不到。SSE 层（第二种形态）已单独处理。
           const text = await response.text().catch(() => '')
           const status = response.status
           if (status === 429) {
@@ -374,13 +412,22 @@ function createQoder({ dataDir, logger = console, credentials }) {
         }
         // 排队可以在同一账号上等一等再重发：排队期间没有任何产出，
         // 重放不会重复计费
-        let queueAttempts = 0
+        let sseQueueAttempts = 0
         for (;;) {
           try {
-            return await consumeEnvelope(response, { model: bare, signal, onChunk })
+            return await consumeEnvelope(response, {
+              model: bare,
+              signal,
+              // 记账包一层：usage 帧经过时顺手累计到该账号的今日 token（servedUid 已带入）
+              onChunk: chunk => {
+                if (chunk?.type === 'usage') noteTokenUsage(chunk.usage?.uid, chunk.usage?.totalTokens)
+                onChunk(chunk)
+              },
+              servedUid: candidate.uid,
+            })
           } catch (error) {
-            if (error?.code !== 'QUEUED' || queueAttempts >= 2 || signal?.aborted) throw error
-            queueAttempts++
+            if (error?.code !== 'QUEUED' || sseQueueAttempts >= 2 || signal?.aborted) throw error
+            sseQueueAttempts++
             logger.info?.(`[qoder] ${error.message}`)
             await new Promise(resolve => setTimeout(resolve, error.retryAfterMs))
             const retried = await request(prepared.url, {
@@ -402,7 +449,7 @@ function createQoder({ dataDir, logger = console, credentials }) {
 
   // 信封 SSE → 内部 chunk。内层是标准 OpenAI 帧，所以解析与 Trae 同形，
   // 差别只在每一行先剥一层信封。
-  async function consumeEnvelope(response, { model, signal, onChunk }) {
+  async function consumeEnvelope(response, { model, signal, onChunk, servedUid }) {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -505,6 +552,8 @@ function createQoder({ dataDir, logger = console, credentials }) {
           cacheWriteTokens: 0,
           totalTokens: usage.total_tokens,
           reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+          // 记账归因：面板的「今日 token」按账号累计（同 WorkBuddy 的 tokenUsageToday）
+          ...(servedUid ? { uid: servedUid } : {}),
         },
       })
     }
@@ -581,6 +630,30 @@ function createQoder({ dataDir, logger = console, credentials }) {
     return { outcome: 'ineligible', message: 'Qoder 没有每日签到端点' }
   }
 
+  // 积分余额 = 套餐额度 + 资源包 + 专用资源包（见 protocol.parseUsageBalance）。
+  // 这个端点不需要 WASM 签名，只要 Bearer。null 会原样抛出「查询失败」：
+  // 上游查不到 ≠ 余额 0，报 0 会让用户以为额度被清空。
+  async function balance(provider, uid) {
+    const product = protocol.PRODUCTS[provider]
+    if (!product) throw new Error(`未知的 Qoder 渠道：${provider}`)
+    const credential = await resolveCredential(provider, uid)
+    if (!credential) throw new Error('账号凭据不存在')
+    const response = await request(`${product.openApiBase}${protocol.USAGE_PATH}`, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${protocol.bearerToken(credential)}`,
+        // 桌面 app 身份（与 vendor 渠道包的 sashClientType 一致）；用量端点对此不敏感，
+        // 带上与抓包请求一致，避免服务端按 CLI 身份限流
+        'Cosy-ClientType': '10',
+        'User-Agent': 'Qoder',
+      },
+    })
+    if (!response.ok) throw new Error(`积分余额查询失败（HTTP ${response.status}）`)
+    const parsed = protocol.parseUsageBalance(await response.json().catch(() => ({})))
+    if (!parsed) throw new Error('积分余额查询失败：响应形状不符合预期')
+    return parsed
+  }
+
   // 渠道包迁移：凭据已在 channel-credentials.json 里，这里只补注册表条目
   function importLegacy(provider, entry) {
     const suffix = entry.suffix || accounts.accountSuffix(provider, entry.uid)
@@ -617,6 +690,7 @@ function createQoder({ dataDir, logger = console, credentials }) {
     removeAccount,
     importLegacy,
     checkin,
+    balance,
     refresh: async () => [...PROVIDERS],
     refreshAccount: (provider, uid) => refreshCredential(provider, uid),
     shutdown,

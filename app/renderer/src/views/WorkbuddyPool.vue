@@ -2036,10 +2036,6 @@ function toggleModel(id) {
 async function saveEnabledModels() {
   const region = modelRegion.value
   const picked = upstreamModels.value.filter(m => enabledModelIds.value.includes(m.id))
-  if (!picked.length) {
-    showToast('请至少勾选一个模型', 'error')
-    return
-  }
   modelsSaving.value = true
   try {
     const payload = picked.map(m => ({

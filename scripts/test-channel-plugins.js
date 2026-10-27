@@ -167,9 +167,9 @@ async function main() {
     const Trae = host.instanceOf('trae')
     assert.ok(Array.isArray(Trae.backend.listAccounts('trae')))
     // 「有没有这个能力」靠方法在不在判断，而不是靠 provider 名写死分支：
-    // Trae 有余额端点，Qoder 没有（宿主据此回「未开通」，不留必然失败的按钮）
+    // Trae 与 Qoder 都实现了余额端点（宿主据此回「未开通」，不留必然失败的按钮）
     assert.equal(typeof Trae.backend.balance, 'function', 'Trae 有余额端点')
-    assert.equal(qoder.backend.balance, undefined, 'Qoder 没有余额端点')
+    assert.equal(typeof qoder.backend.balance, 'function', 'Qoder 有余额端点')
     assert.equal(typeof Trae.backend.checkin, 'function')
     assert.equal(typeof qoder.backend.checkin, 'function', 'Qoder 的 checkin 返回 ineligible，不是缺方法')
     await host.shutdown()

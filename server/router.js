@@ -27,8 +27,6 @@ const configIO = require('./config-io')
 const modelHealth = require('./model-health')
 const modelHealthAudit = require('./model-health-audit')
 const accountHealth = require('./account-health')
-// 开发面板的数据源（只在开发模式注册对应端点，见下面的 /api/dev/info）
-const devInfo = require('./dev-info')
 // 「这次失败算谁的」判定（客户端取消 vs 上游卡死），见 server/failure-class.js
 const { isAbortFailure, classifyChannelFailure, stallMessage, CHANNEL_FIRST_CHUNK_TIMEOUT_MS } = require('./failure-class')
 const {
@@ -652,7 +650,13 @@ async function channelTestCompletion(model, signal) {
   } catch (err) {
     if (signal?.aborted) throw err // 用户按了停止：不重试
     if (!isTransientTestError(err)) throw err
-    await new Promise(resolve => setTimeout(resolve, TEST_TRANSIENT_RETRY_MS))
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, TEST_TRANSIENT_RETRY_MS)
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer)
+        reject(Object.assign(new Error('测试已取消'), { code: 'ABORT_ERR' }))
+      }, { once: true })
+    })
     return channelTestAttempt(model, signal)
   }
 }
@@ -1512,15 +1516,25 @@ app.post('/api/providers/:name/test', async (req, res) => {
   // Channel 类型：交给渠道包的适配器发一次真实短对话（换号与限流在包内闭环）
   if (models.isChannelProvider(provider)) {
     const start = Date.now()
-    // 与 /api/channels/test 同口径：未点名模型时依次试前几个，单个模型此刻
-    // 调不通（上游目录与调用权限不同步）不足以判定整个源不通
-    const candidates = requestedId ? [model.id] : provider.models.slice(0, 3).map(m => m.id)
+    // 与 /api/channels/test 同口径：已失活模型不再作为测试候选，避免
+    // 用户以为测试会重新路由到它；手动恢复后才可再次测试。
+    const eligible = provider.models.filter(item => !modelHealth.isOffline(`${name}/${item.id}`))
+    const candidates = requestedId
+      ? (eligible.some(item => item.id === model.id) ? [model.id] : [])
+      : eligible.slice(0, 3).map(m => m.id)
+    if (!candidates.length) {
+      const why = requestedId && modelHealth.isOffline(`${name}/${model.id}`)
+        ? '该模型已失活，请先恢复再测'
+        : '没有可测模型：模型均已失活，请先恢复'
+      return res.json({ ok: false, error: why, latency: 0 })
+    }
     const tried = []
     for (const id of candidates) {
       if (controller.signal.aborted) return
       try {
         const completion = await channelTestCompletion(id, controller.signal)
         const message = completion.choices?.[0]?.message || {}
+        modelHealth.noteSuccess(`${name}/${id}`)
         return res.json({
           ok: true,
           latency: Date.now() - start,
@@ -1556,6 +1570,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
       })
       const latency = Date.now() - start
       if (!aggregated) return res.json({ ok: false, error: '账号池未返回有效响应', latency, model: model.id })
+      modelHealth.noteSuccess(`${name}/${model.id}`)
       const usage = upstream.extractUsage(aggregated, false) || upstream.emptyUsage()
       return res.json({
         ok: true,
@@ -1591,6 +1606,7 @@ app.post('/api/providers/:name/test', async (req, res) => {
     }
     const headers = upstream.resolveHeaders(provider, testAnthropic)
     const response = await axios.post(url, testBody, { headers, timeout: 30000, signal: controller.signal })
+    modelHealth.noteSuccess(`${name}/${model.id}`)
     const latency = Date.now() - start
     const usage = upstream.extractUsage(response.data, testAnthropic) || upstream.emptyUsage()
 
@@ -2502,6 +2518,35 @@ app.post('/api/config/import', async (req, res) => {
   res.json(result)
 })
 
+// 清空配置：抹掉模型来源、规则与账号凭据；服务端设置保留
+app.post('/api/config/clear', async (req, res) => {
+  let result
+  try {
+    result = configIO.clearAll()
+  } catch (err) {
+    return res.status(500).json({ error: err.message || '清空配置失败' })
+  }
+  await reloadRuntimes()
+  res.json(result)
+})
+
+// Auto 策略：客户端模型名填 `auto` 时按哪一档口径挑模型（见 auto-strategy.js）。
+// 非法档位回 400，不静默回退 —— 前端要根据这个状态码提示「切换失败」。
+app.get('/api/auto-strategy', (req, res) => {
+  res.json({ strategy: autoStrategy.getStrategy(), strategies: autoStrategy.listStrategies() })
+})
+
+app.put('/api/auto-strategy', (req, res) => {
+  // 用原值校验：normalizeStrategy 会把不认识的档位静默回退成默认档，
+  // 那样非法请求会得到 200，前端永远不知道切换没生效
+  const raw = req.body?.strategy
+  if (!autoStrategy.STRATEGIES.some(item => item.id === raw)) {
+    return res.status(400).json({ error: `未知的 Auto 策略：${raw}` })
+  }
+  const strategy = autoStrategy.saveStrategy(raw)
+  res.json({ strategy })
+})
+
 let server = null
 let restarting = false
 
@@ -2552,17 +2597,6 @@ app.get('/api/health', (req, res) => {
     uptime: process.uptime(),
     port: (server && server.address()) ? server.address().port : (engine.getServerConfig().port || 3000)
   })
-})
-
-// ==================== 开发面板 ====================
-//
-// 只在开发模式下回数据：回的是绝对路径、环境变量与运行时文件清单，对用户手里的
-// 正式版没有用途，只是多一层泄漏面。打包后主进程会把 NODE_ENV 设成 production
-// 再 require 本文件（见 app/main/main.js），所以正式版这个路由直接 404 ——
-// 光靠界面藏入口不够，接口本身就不该给。
-app.get('/api/dev/info', (req, res) => {
-  if (!devInfo.isDevMode()) return res.status(404).json({ error: '开发面板只在开发模式可用' })
-  res.json(devInfo.collect())
 })
 
 // 初始化 WorkBuddy 运行时（无账号时也可启动，转发时才报无可用账号）
@@ -2979,6 +3013,7 @@ app.post('/api/channels/test', async (req, res) => {
     ? [wantModel]
     : rows
       .filter(row => (!provider || rowProvider(row) === provider || row.id.startsWith(`${provider}/`))
+        && !modelHealth.isOffline(channelModelRef(row.id))
         // WorkBuddy 不在渠道包的 provider.status 里（它不是包内 provider），
         // 只要运行时在就当作可用，让真实调用给出答案
         && (live === null || live.has(rowProvider(row)) || (!!workbuddy.getRuntime() && !!channelWorkbuddyRealm(row.id))))

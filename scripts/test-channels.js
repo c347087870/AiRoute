@@ -11,6 +11,7 @@ const fs = require('node:fs')
 const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
+const qoderProtocol = require('../server/channels/plugins/qoder/protocol')
 
 const root = path.join(__dirname, '..')
 const dataDir = path.join(os.tmpdir(), 'airoute-channels-test')
@@ -130,6 +131,19 @@ const checks = []
 function check(name, fn) {
   checks.push({ name, fn })
 }
+
+check('Qoder HTTP 排队错误可解析，并保留服务端等待时间', () => {
+  const info = qoderProtocol.parseQueueInfo({
+    code: '10605',
+    message: JSON.stringify({ isQueued: true, modelKey: 'gfmodel', queueCount: 0, queueType: 'p3', retryAfterSeconds: 30, serviceAvailable: false, subCode: 'RESOURCE_LIMIT', waitTime: 30 })
+  })
+  assert.equal(info.isQueued, true)
+  assert.equal(info.retryAfterSeconds, 30)
+  assert.equal(info.subCode, 'RESOURCE_LIMIT')
+  const transient = qoderProtocol.parseQueueInfo({ isQueued: false, serviceAvailable: true, waitTime: 0, retryAfterSeconds: 2 })
+  assert.equal(transient.retryAfterSeconds, 2)
+  assert.equal(qoderProtocol.parseQueueInfo({ code: '110', message: 'Billing daily count exceeded' }), undefined)
+})
 
 check('渠道运行时状态可读', async () => {
   const res = await request('GET', '/api/channels/status')

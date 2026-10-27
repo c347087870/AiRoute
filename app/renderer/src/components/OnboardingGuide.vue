@@ -22,10 +22,9 @@
         ></li>
       </ol>
 
-      <div ref="bodyEl" class="ob-body" :class="{ 'ob-anim': animReady }" :style="{ height: bodyHeight }">
-        <!-- 测量层：内容自然高度在这里量出来，body 的显式高度跟着它走，
-             翻页时高度变化才有过渡（CSS 过渡不了 height: auto） -->
-        <div ref="measureEl" class="ob-measure">
+      <div class="ob-body">
+        <!-- 内容层：面板高度随内容走，超出视口时由 body 内部滚动 -->
+        <div class="ob-measure">
           <h2 v-if="step.title" class="ob-title">{{ step.title }}</h2>
           <p v-if="step.desc" class="ob-desc">{{ step.desc }}</p>
 
@@ -63,31 +62,23 @@
               />
             </div>
 
-            <div v-else class="ob-channel-actions">
-              <!-- 已登录的不再摆「登录」：重复登录会在账号池里堆出重复条目 -->
-              <template v-if="!ch.logged">
-                <!-- WorkBuddy 有国内 / 国际两个区域（域名与 OAuth 入口都不同），
-                     登录前必须先选 —— 与「渠道账号」页的操作行同一套交互 -->
-                <template v-if="ch.id === 'workbuddy'">
-                  <AppButton variant="primary" :disabled="busyChannel === ch.id" @click="startChannelLogin(ch)">
-                    {{ busyChannel === ch.id ? '发起中…' : '登录' }}
-                  </AppButton>
-                  <select v-model="wbRealm" class="ob-select" :disabled="busyChannel === ch.id">
-                    <option value="cn">国内版（copilot.tencent.com）</option>
-                    <option value="global">国际版（workbuddy.ai）</option>
-                  </select>
-                </template>
-                <AppButton v-else variant="primary" :disabled="busyChannel === ch.id" @click="startChannelLogin(ch)">
-                  {{ busyChannel === ch.id ? '发起中…' : '登录' }}
-                </AppButton>
-              </template>
+            <div class="ob-channel-actions">
+              <!-- 未登录显示「登录」；已登录显示「添加账号」，点了继续走同一条登录链路
+                   追加账号（这些渠道都支持多账号，账号池按条目累加） -->
+              <AppButton variant="primary" :disabled="busyChannel === ch.id" @click="startChannelLogin(ch)">
+                {{ busyChannel === ch.id ? '发起中…' : ch.logged ? '添加账号' : '登录' }}
+              </AppButton>
+              <span v-if="ch.logged" class="ob-channel-account-count">已登录 {{ ch.accountCount }} 个账号</span>
             </div>
           </div>
         </div>
 
         <!-- ==================== 选择模型 ==================== -->
         <div v-else-if="step.key === 'model'" class="ob-content">
-          <div v-if="!modelGroups.length" class="ob-warn">
+          <!-- 目录是异步拉的：加载中不能落到「还没有可用模型」的警告上，
+               否则每次进这一步都会先闪一下黄条再变成列表 -->
+          <div v-if="modelLoading && !modelGroups.length" class="ob-loading">正在读取模型列表…</div>
+          <div v-else-if="!modelGroups.length" class="ob-warn">
             还没有可用模型。先回上一步登录渠道，再来选。
           </div>
           <template v-else>
@@ -113,9 +104,6 @@
               </div>
             </div>
             <div v-if="switchError" class="ob-warn">{{ switchError }}</div>
-            <div v-else class="ob-ready">
-              已开启 {{ enabledCount }} 个模型，未勾选的会被关闭。
-            </div>
           </template>
         </div>
 
@@ -129,9 +117,6 @@
             端口对不上：设置里是 {{ configuredPort }}，实际在 {{ health.port }}。
             <button class="ob-mini" @click="recheck">重新检测</button>
           </div>
-          <div v-else-if="hasChannelAccount" class="ob-ready">
-            渠道已就绪，<b>{{ modelCount }}</b> 个模型可用。
-          </div>
 
           <!-- 接入信息压成一行 + 一个复制按钮：地址与 Key 用户只需要抄一次，
                摆成三行表格再配两段代码，用户会以为每条都要单独处理 -->
@@ -140,14 +125,12 @@
               <span class="ob-k">地址</span>
               <span class="ob-v">
                 <code class="ob-code">{{ localUrl }}</code>
-                <span class="ob-note">OpenAI 兼容用 {{ localUrl }}/v1</span>
               </span>
             </div>
             <div class="ob-row">
               <span class="ob-k">Key</span>
               <span class="ob-v">
                 <code class="ob-code">{{ API_KEY }}</code>
-                <span class="ob-note">任意非空字符串</span>
               </span>
             </div>
           </div>
@@ -173,7 +156,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import {
   getHealth,
   getServerConfig,
@@ -198,92 +181,41 @@ const emit = defineEmits(['close', 'finish'])
 const { stepIndex } = useOnboarding()
 // 复用共享的 provider 状态：与「Provider 管理」页看到的保持一致，
 // 自己再存一份必然会和别处对不上（渠道源里带的是启用清单口径的模型）
-const { providers, loadModelData } = useModel()
+const { loadModelData } = useModel()
 
 // 与教程页同一个约定：网关不鉴权，任意非空字符串均可（写真实 Key 反而会被客户端要求保密）
 const API_KEY = 'sk-airroute'
 
 // 步骤表：标题 / 说明都写在这里，模板只按 key 分支渲染。
-// 三步：配渠道 → 选模型 → 接 Agent。以前的欢迎页只说一句「欢迎使用」，
-// 没有任何要用户做的事；从六步合并成三步时一并去掉，打开引导就直接进入正题。
+// 三步：登录账号 → 选择模型 → 接入 Agent。标题即全部文案，不再配描述。
 const STEPS = [
   {
     key: 'channel',
     tag: '登录账号',
-    title: '',
+    title: '登录账号',
     desc: ''
   },
   {
     key: 'model',
     tag: '选择模型',
-    title: '决定哪些模型可用',
-    desc: '勾选要开放的模型，没勾的会被关闭。'
+    title: '选择模型',
+    desc: ''
   },
   {
     key: 'agent',
     tag: '接入 Agent',
-    title: '把 Agent 指过来',
-    desc: '填同一个地址和 Key，Claude Code、Cursor、Codex 都能用。'
+    title: '接入 Agent',
+    desc: ''
   }
 ]
 
 const step = computed(() => STEPS[stepIndex.value] || STEPS[0])
 const isLast = computed(() => stepIndex.value >= STEPS.length - 1)
 
-// ==================== body 高度过渡 ====================
+// ==================== body 布局 ====================
 
-// CSS 过渡不了 height: auto。让 body 的显式高度跟随测量层的自然高度，
-// 内容变化时高度插值滚动，而不是瞬间跳变。
-const bodyEl = ref(null)
-const measureEl = ref(null)
-const bodyHeight = ref('auto')
-// 首次挂载不播动画：面板刚弹出时直接定高，避免一开就是一段从 0 长出来的动画
-const animReady = ref(false)
-
-let ro = null
-
-// 面板各固定部分（头部 + 进度条 + 底栏）占掉多少高度：
-// body 能用的高度 = 视口高 - 上下留白 - 固定部分。
-// 不能用「当前面板高度 - body 高度」来算上限 —— 面板高度本身正由 body 决定，
-// 过渡中拿旧面板高度当上限会算出偏小的值，body 卡在上一档高度不再更新
-const CHROME_H = 150
-
-function measureBody() {
-  if (!measureEl.value || !bodyEl.value) return
-  // 测量层脱离 body 的高度约束，按内容自然撑开；这里取它的自然高度
-  const h = measureEl.value.scrollHeight
-  // body 的高度是 border-box（全局 * 设了 box-sizing: border-box），
-  // 内容高度之外还要算上 body 自己的下内边距，否则底部会被裁掉一截
-  const cs = getComputedStyle(bodyEl.value)
-  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
-  // 上限只跟视口有关：body 最高到视口（减去浮层留白与固定部分），超出就内部滚动
-  const max = Math.max(window.innerHeight - 48 - CHROME_H, 120)
-  bodyHeight.value = Math.max(Math.min(h + pad, max), 0) + 'px'
-}
-
-onUnmounted(() => {
-  if (ro) ro.disconnect()
-})
-
-// 高度测量：内容任意变化（翻步、Tab 切换、登录卡片展开）都重算。
-// 同步调用 measureBody：去抖会把翻页后的第一次高度计算推迟，翻页瞬间看到的
-// 还是旧高度；ResizeObserver 里同步写高度不会再触发它自己（高度由内向外算）
-watch(
-  measureEl,
-  el => {
-    if (ro) ro.disconnect()
-    if (!el) return
-    ro = new ResizeObserver(() => measureBody())
-    ro.observe(el)
-    measureBody()
-  },
-  { immediate: true }
-)
-
-// 首次渲染定高后，之后的变化才播动画
-watch(bodyHeight, () => {
-  if (!animReady.value) nextTick(() => (animReady.value = true))
-})
+// 面板高度跟着内容走，不做高度过渡：翻步时整块面板直接变高，
+// 免得内容被一段高度动画挤着上下抖。
 
 // 下一步按钮的文案跟随「这一步还没做完」的状态：渠道没配好时说清楚，
 // 不然用户会以为「下一步」=「已经配好了」
@@ -352,22 +284,28 @@ async function loadEnv() {
 
 // ==================== 渠道 ====================
 
-// 引导只列这三家：都是登录即用、免 Key 的免费渠道。
+// 引导只列这些登录即用、免 Key 的免费渠道，按产品 × 区域拆开：
+// WorkBuddy 国内版 / 国际版、Trae、Qoder 国内版 / 国际版。
 // provider 字段是服务端 RPC 用的渠道 id，与界面上显示的名字不是一回事。
-// desc 之类的中文说明已去掉，Tab 标签只保留渠道名
+// desc 之类的中文说明已去掉，Tab 标签只保留渠道名。
+// logo 是 Tab 标签前的品牌图，与「渠道账号」页添加菜单用的是同一组文件
+const BRAND_LOGOS = {
+  workbuddy: '/brand-workbuddy.svg',
+  trae: '/brand-trae.png',
+  qoder: '/brand-qoder.svg',
+  qodercn: '/brand-qoder.svg'
+}
 const CHANNELS = [
-  { id: 'workbuddy', name: 'WorkBuddy' },
-  { id: 'trae', name: 'Trae' },
-  { id: 'qoder', name: 'Qoder' }
-]
+  { id: 'wb-cn', name: 'WorkBuddy 国内版', type: 'workbuddy', realm: 'cn' },
+  { id: 'wb-global', name: 'WorkBuddy 国际版', type: 'workbuddy', realm: 'global' },
+  { id: 'trae', name: 'Trae', type: 'plugin', provider: 'trae' },
+  { id: 'qoder-cn', name: 'Qoder 国内版', type: 'plugin', provider: 'qodercn' },
+  { id: 'qoder-global', name: 'Qoder 国际版', type: 'plugin', provider: 'qoder' }
+].map(ch => ({ ...ch, logo: ch.type === 'workbuddy' ? BRAND_LOGOS.workbuddy : BRAND_LOGOS[ch.provider] }))
 
 // Tab 选项与当前选中的渠道；默认落在第一家
-const channelTabs = CHANNELS.map(ch => ({ value: ch.id, label: ch.name }))
+const channelTabs = CHANNELS.map(ch => ({ value: ch.id, label: ch.name, icon: ch.logo }))
 const activeChannel = ref(CHANNELS[0].id)
-
-// WorkBuddy 的登录区域：国内版与国际版的域名与 OAuth 入口不同，登录前先选。
-// 国际版没有签到与成长任务（模型照常能用），这一点在「账号池」页有完整说明
-const wbRealm = ref('cn')
 
 // 每家的登录态：账号列表里拿到有凭据的账号就算已登录
 const channelAccounts = ref({})
@@ -382,6 +320,7 @@ const loginTimers = {}
 const channelList = computed(() =>
   CHANNELS.map(ch => ({
     ...ch,
+    accountCount: (channelAccounts.value[ch.id] || []).length,
     logged: (channelAccounts.value[ch.id] || []).length > 0
   }))
 )
@@ -389,6 +328,8 @@ const channelList = computed(() =>
 const hasChannelAccount = computed(() =>
   channelList.value.some(ch => ch.logged)
 )
+
+// 已登录后按钮变成「添加账号」，走同一条登录链路追加账号，不再有「重复登录」拦截
 
 function isLogging(id) {
   return !!logins.value[id]
@@ -399,10 +340,6 @@ function loginUrl(id) {
 // 授权区块的标题：与「渠道账号」页 WorkBuddy 卡 / 渠道包卡的写法一致
 // （WorkBuddy 带区域限定，渠道包只写渠道名）
 function loginTitle(id) {
-  if (id === 'workbuddy') {
-    const realm = wbRealm.value === 'global' ? '国际版' : '国内版'
-    return `在浏览器中完成 WorkBuddy（${realm}）授权`
-  }
   const name = channelList.value.find(ch => ch.id === id)?.name || id
   return `在浏览器中完成 ${name} 授权`
 }
@@ -412,11 +349,12 @@ function rawLoginMessage(id) {
   return logins.value[id]?.message || ''
 }
 
-// 读三家的账号状态。任一家失败只影响它自己那一格
+// 读各家的账号状态。任一家失败只影响它自己那一格
 async function loadChannelAccounts() {
   const results = await Promise.allSettled([
     channelsRpc('account.list', { provider: 'trae' }),
     channelsRpc('account.list', { provider: 'qoder' }),
+    channelsRpc('account.list', { provider: 'qodercn' }),
     wbAccounts()
   ])
   const next = {}
@@ -424,35 +362,39 @@ async function loadChannelAccounts() {
     next.trae = (results[0].value || []).filter(a => a.hasCredential !== false)
   }
   if (results[1].status === 'fulfilled') {
-    next.qoder = (results[1].value || []).filter(a => a.hasCredential !== false)
+    next['qoder-global'] = (results[1].value || []).filter(a => a.hasCredential !== false)
   }
   if (results[2].status === 'fulfilled') {
-    const list = results[2].value?.accounts || []
-    // WorkBuddy 国内版与国际版共用一个池子，展示时合成一家
-    next.workbuddy = list
+    next['qoder-cn'] = (results[2].value || []).filter(a => a.hasCredential !== false)
+  }
+  if (results[3].status === 'fulfilled') {
+    // WorkBuddy 国内版与国际版共用一个账号池，按 realm 拆成两格
+    const list = results[3].value?.accounts || []
+    next['wb-cn'] = list.filter(a => a.realm !== 'global')
+    next['wb-global'] = list.filter(a => a.realm === 'global')
   }
   channelAccounts.value = next
 }
 
 // 发起登录：渠道包走 account.create 拿授权链接，WorkBuddy 走设备码
-// （区域用操作行下拉选的 wbRealm：国内版与国际版的域名 / OAuth 入口不同）
+// （WorkBuddy 两区的域名 / OAuth 入口不同，由渠道项的 realm 决定）
 async function startChannelLogin(ch) {
   if (busyChannel.value) return
   busyChannel.value = ch.id
   try {
-    if (ch.id === 'workbuddy') {
-      const data = await wbOauthStart(wbRealm.value === 'global' ? 'global' : 'cn')
+    if (ch.type === 'workbuddy') {
+      const data = await wbOauthStart(ch.realm === 'global' ? 'global' : 'cn')
       logins.value = { ...logins.value, [ch.id]: { state: data.state, url: data.url, message: '在浏览器里完成授权' } }
       openInBrowser(data.url)
       pollWorkbuddyLogin(ch.id, data.state)
     } else {
-      const started = await channelsRpc('account.create', { provider: ch.id })
+      const started = await channelsRpc('account.create', { provider: ch.provider })
       logins.value = {
         ...logins.value,
         [ch.id]: { accountId: started.accountId, url: started.loginUrl, message: '在浏览器里完成授权' }
       }
       openInBrowser(started.loginUrl)
-      pollChannelLogin(ch.id, started.accountId)
+      pollChannelLogin(ch.id, ch.provider, started.accountId)
     }
   } catch (err) {
     logins.value = { ...logins.value, [ch.id]: { message: '发起登录失败：' + (err?.message || err) } }
@@ -471,10 +413,11 @@ async function startChannelLogin(ch) {
 }
 
 // 轮询渠道包登录结果。成功后刷新账号状态，浮层里直接变成「已登录」
-function pollChannelLogin(id, accountId) {
+// provider 与 id 分开：id 是界面上的渠道项（Tab），provider 是服务端认的渠道 id
+function pollChannelLogin(id, provider, accountId) {
   const timer = setInterval(async () => {
     try {
-      const state = await channelsRpc('login.poll', { accountId, provider: id })
+      const state = await channelsRpc('login.poll', { accountId, provider })
       if (!state?.done) return
       clearInterval(timer)
       delete loginTimers[id]
@@ -539,38 +482,23 @@ function openInBrowser(url) {
   else window.open(url, '_blank')
 }
 
-// ==================== 模型来源 ====================
-
-// 引导里没有「添加 Provider」这一步：自己带 Key 的 Provider 属于进阶用法，
-// 放在「Provider 管理」页自己加。providers 来自 useModel 的共享状态，
-// 不在这里另存一份 —— 另存必然和别处对不上
-const modelCount = computed(() => {
-  let n = 0
-  for (const provider of Object.values(providers.value || {})) {
-    n += Array.isArray(provider?.models) ? provider.models.length : 0
-  }
-  return n
-})
-
 // ==================== 选择模型（多选 = 决定哪些模型开启） ====================
 
 const switchError = ref('')
 const busyRef = ref('')
-
-// 当前开启的模型数：直接数目录里 disabled 的反面，与后端口径一致
-const enabledCount = computed(() =>
-  modelGroups.value.reduce((n, g) => n + g.models.filter(m => !m.disabled).length, 0)
-)
+// 目录加载中：期间不判「没有可用模型」，避免警告条闪现
+const modelLoading = ref(false)
+const modelDefaultsApplied = ref(false)
 
 // 具体模型的来源分组。与「渠道账号 → 模型」页同一套口径：全量目录 =
 // 渠道包 model.list + WorkBuddy 上游清单，disabled 由启用清单相减得到 ——
 // 渠道源配置里只装已开启的模型，靠它列不出被关掉的那些
 const CHANNEL_GROUP_NAMES = {
-  workbuddy: 'WorkBuddy（国内版）',
-  'workbuddy-global': 'WorkBuddy（国际版）',
-  trae: 'Trae（字节）',
-  qoder: 'Qoder（国际版）',
-  qodercn: 'Qoder（国内版）'
+  workbuddy: 'WorkBuddy 国内版',
+  'workbuddy-global': 'WorkBuddy 国际版',
+  trae: 'Trae',
+  qoder: 'Qoder 国际版',
+  qodercn: 'Qoder 国内版'
 }
 
 // 组顺序与渠道模型页一致：WorkBuddy 两区在前，其余按渠道 id
@@ -581,6 +509,8 @@ const CHANNEL_GROUP_ORDER = ['workbuddy', 'workbuddy-global', 'trae', 'qoder', '
 const modelGroups = ref([])
 
 async function loadModelCatalog() {
+  modelLoading.value = true
+  try {
   const byChannel = new Map()
   const push = (channel, row) => {
     if (!byChannel.has(channel)) byChannel.set(channel, [])
@@ -636,11 +566,25 @@ async function loadModelCatalog() {
       name: CHANNEL_GROUP_NAMES[id] || id,
       models: byChannel.get(id).sort((a, b) => Number(a.disabled) - Number(b.disabled) || a.name.localeCompare(b.name))
     }))
+
+  if (!modelDefaultsApplied.value) {
+    modelDefaultsApplied.value = true
+    const results = await Promise.allSettled(modelGroups.value.map(async group => {
+      group.models.forEach(model => { model.disabled = true })
+      await saveGroupOf(`channels/${group.id}/`, [])
+    }))
+    if (results.some(result => result.status === 'rejected')) {
+      switchError.value = '关闭部分模型失败，请重新打开对应模型后再关闭。'
+    }
+  }
+  } finally {
+    modelLoading.value = false
+  }
 }
 
 // 渠道组 → 渠道包 provider id。WorkBuddy 两个区域走独立的启用清单接口，
 // 其余走渠道包的 model.setEnabled
-const CHANNEL_PROVIDERS = ['Trae', 'qoder', 'qodercn']
+const CHANNEL_PROVIDERS = ['trae', 'qoder', 'qodercn']
 const WB_REGION_OF_GROUP = { workbuddy: 'cn', 'workbuddy-global': 'global' }
 
 // 某个组当前的启用清单：直接取自目录行的 disabled 标记（单一事实来源，
@@ -677,15 +621,13 @@ async function saveGroupOf(refKey, ids) {
   const providerName = refKey.split('/')[1] || '' // channels/workbuddy/xxx → workbuddy
   if (WB_REGION_OF_GROUP[providerName]) return saveWbGroup(providerName, ids)
   if (!CHANNEL_PROVIDERS.includes(providerName)) return
-  if (!ids.length) throw new Error('至少要开启一个模型')
   await channelsRpc('model.setEnabled', { provider: providerName, modelIds: ids })
 }
 
 // WorkBuddy 的启用清单要带上游定义（displayName / 上下文 / 输出上限）。
-// 定义从本组件拉的全量目录里取（loadWorkbuddyModels 同口径），目录没拉到时
-// 至少保留 displayName；该区域一个都没选时拒绝（清单不能空到让 /v1/models 缺一整个区）
+// 定义从本组件拉的全量目录里取（loadWorkbuddyModels 同口径）；允许清空一整组，
+// 该区域没有开启的模型时渠道源里就没有这个区
 async function saveWbGroup(group, ids) {
-  if (!ids.length) throw new Error('至少要开启一个模型')
   const byId = new Map(
     (modelGroups.value.find(g => g.id === group)?.models || []).map(m => [m.id, m])
   )
@@ -742,10 +684,7 @@ function prev() {
 }
 
 function next() {
-  // 往后翻一步就顺手把该步的数据取回来：懒加载让首屏不背四个接口，
-  // 也不会出现「翻到渠道页停两秒才跳出列表」
   if (stepIndex.value < STEPS.length - 1) stepIndex.value += 1
-  loadStepData()
 }
 
 // 跳过要记完成：交给 App.vue 统一落盘，否则下次启动又会拦一次
@@ -774,8 +713,7 @@ function loadStepData() {
   }
 }
 
-// 每一步进入时同步一次：next/prev 已经调过 loadStepData，
-// 这里负责「直接打开到第 N 步」的入口（侧边栏 / 设置页）
+// 每一步进入时加载数据；也处理「直接打开到第 N 步」的入口。
 watch(stepIndex, () => loadStepData(), { immediate: true })
 </script>
 
@@ -861,21 +799,14 @@ watch(stepIndex, () => loadStepData(), { immediate: true })
 }
 
 .ob-body {
-  flex: none;
+  flex: 1 1 auto;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding: 0 24px 8px;
 }
 
-/* 高度过渡：只对显式高度生效。首次定高（animReady=false）不播，
-   之后的翻页 / 内容增减都以 0.25s 缓动滚动到位 */
-.ob-body.ob-anim {
-  transition: height 0.25s ease;
-}
-
-/* 测量层：脱离 body 的高度约束，按内容自然撑开。
-   高度用 scrollHeight 量（不受 body 裁剪影响），body 显式高度跟着它走 */
+/* 内容层：按内容自然撑开，面板高度随之变化 */
 .ob-measure {
   display: flex;
   flex-direction: column;
@@ -949,11 +880,6 @@ watch(stepIndex, () => loadStepData(), { immediate: true })
   user-select: all;
 }
 
-.ob-note {
-  font-size: var(--fs-mini);
-  color: var(--text-2);
-}
-
 .ob-mini {
   padding: 2px 10px;
   font-size: var(--fs-mini);
@@ -979,17 +905,27 @@ watch(stepIndex, () => loadStepData(), { immediate: true })
   border-radius: var(--radius-md);
 }
 
-.ob-ready {
+/* 目录加载中：中性一行字，不用警告样式（不是出了问题，只是还没回来） */
+.ob-loading {
+  min-height: 108px;
+  display: flex;
+  align-items: flex-start;
   padding: 10px 14px;
   font-size: var(--fs-small);
-  color: var(--ok-text);
-  background: var(--ok-bg);
+  color: var(--text-3);
+  background: var(--bg-subtle);
   border-radius: var(--radius-md);
 }
 
 /* 分段控件的包裹层：只负责让控件按内容宽度收缩，不改变控件本身的观感 */
 .ob-tabs {
   align-self: flex-start;
+  max-width: 100%;
+}
+
+/* 五个渠道一排放不下时换行，而不是把面板撑宽或让标签被裁掉 */
+.ob-tabs :deep(.seg) {
+  flex-wrap: wrap;
   max-width: 100%;
 }
 
@@ -1018,6 +954,9 @@ watch(stepIndex, () => loadStepData(), { immediate: true })
   font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
+  /* 固定行高：中英混排时行盒高度随字体回退而变（中文 20px / 拉丁 16.5px），
+     切换 Tab 会让面板高度差几像素，垂直居中下看着就是抖动 */
+  line-height: 20px;
 }
 
 .ob-channel-actions {
@@ -1026,19 +965,6 @@ watch(stepIndex, () => loadStepData(), { immediate: true })
   gap: 8px;
   /* 「已登录」徽标与登录按钮占同一高度，登录态切换时行高不跳 */
   min-height: var(--btn-h);
-}
-
-/* 区域下拉：与「渠道账号」页操作行的 .ch-select 同一套（它解决的是同一个问题：
-   全局表单规则的 min-height 会把 select 顶到和主按钮不齐） */
-.ob-select {
-  height: var(--btn-h);
-  min-height: var(--btn-h);
-  padding: 0 26px 0 10px;
-  background-position: right 8px center;
-  font-size: var(--btn-fs);
-  width: auto;
-  max-width: 100%;
-  flex: 0 0 auto;
 }
 
 /* 授权区块自己带边框与底色（OauthAuthBlock），这里只负责摆放：
@@ -1055,7 +981,7 @@ watch(stepIndex, () => loadStepData(), { immediate: true })
   padding: 10px 16px;
   font-size: var(--fs-small);
   font-weight: 600;
-  color: #fff;
+  color: var(--bg-card);
   background: var(--primary);
   border-radius: var(--radius-sm);
 }

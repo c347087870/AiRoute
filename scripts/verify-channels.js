@@ -34,13 +34,14 @@ const RUNTIME_PROVIDERS = [
   ...Object.entries(BUILTIN_PROVIDERS).flatMap(([id, meta]) => meta.providers || [id]),
 ]
 
-// 面板展示名：与各渠道自己的 displayName 一致
+// 面板展示名：与各渠道自己的 displayName 一致；两区产品（WorkBuddy / Qoder）
+// 名字必须带区域文案区分，Trae 只有一家、不带后缀
 const DISPLAY_NAMES = {
-  workbuddy: 'WorkBuddy（国内版）',
-  'workbuddy-global': 'WorkBuddy（国际版）',
-  trae: 'Trae (字节)',
-  qoder: 'Qoder',
-  qodercn: 'Qoder (国内版)',
+  workbuddy: 'WorkBuddy 国内版',
+  'workbuddy-global': 'WorkBuddy 国际版',
+  trae: 'Trae',
+  qoder: 'Qoder 国际版',
+  qodercn: 'Qoder 国内版',
 }
 
 const failures = []

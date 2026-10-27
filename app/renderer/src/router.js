@@ -9,7 +9,6 @@ import TokenStats from './views/TokenStats.vue'
 import Benchmark from './views/Benchmark.vue'
 import Settings from './views/Settings.vue'
 import Tutorial from './views/Tutorial.vue'
-import { isDevMode } from './utils/dev-mode.js'
 
 // 页面标题与返回按钮由布局（App.vue）统一渲染，页面内不再写 <h1>；
 // back 表示二级页面，顶部栏左侧显示返回按钮
@@ -26,20 +25,6 @@ const routes = [
   { path: '/settings', name: 'Settings', component: Settings, meta: { title: '系统设置' } },
   { path: '/tutorial', name: 'Tutorial', component: Tutorial, meta: { title: '使用教程' } }
 ]
-
-// 开发面板只在 `vite dev` 下存在：import.meta.env.DEV 是编译期常量，
-// `vite build` 会把它替换成 false，于是这个分支连同 DevPanel.vue 一起被摇掉 ——
-// 打包产物里既没有入口也没有页面代码，不需要再靠界面判断要不要藏。
-if (isDevMode) {
-  routes.push({
-    path: '/dev',
-    name: 'DevPanel',
-    // 动态 import：开发时首屏少加载一个页面，构建时这段也不会进产物
-    component: () => import('./views/DevPanel.vue'),
-    // 一级页面：不从别处「返回」过来，顶部栏不画返回按钮
-    meta: { title: '开发面板' }
-  })
-}
 
 const router = createRouter({
   history: createWebHashHistory(),

@@ -67,10 +67,10 @@
     </div>
 
     <div class="section">
-      <h2 class="section-title">配置备份</h2>
+      <h2 class="section-title">配置同步</h2>
       <div class="card">
         <div class="config-row">
-          <label class="config-label">备份文件</label>
+          <label class="config-label">配置文件</label>
           <div class="config-control">
             <input
               ref="importInput"
@@ -79,11 +79,14 @@
               class="file-input"
               @change="onImportFile"
             />
+            <AppButton variant="secondary" :disabled="importing" @click="importInput?.click()">
+              {{ importing ? '导入中…' : '导入' }}
+            </AppButton>
             <AppButton variant="secondary" :disabled="exporting" @click="exportConfigFile">
               {{ exporting ? '导出中…' : '导出' }}
             </AppButton>
-            <AppButton variant="secondary" :disabled="importing" @click="importInput?.click()">
-              {{ importing ? '导入中…' : '导入' }}
+            <AppButton variant="danger" :disabled="clearingConfig" @click="clearConfigFile">
+              {{ clearingConfig ? '清空中…' : '清空配置' }}
             </AppButton>
           </div>
         </div>
@@ -103,8 +106,6 @@
             </span>
             <!-- 更新自动检测（useUpdate 每分钟轮询），这里只展示结果，不设手动检查按钮 -->
             <span v-if="checking" class="config-hint inline">检查更新中…</span>
-            <span v-else-if="info && info.hasUpdate" class="badge info">可升级到 v{{ info.latest }}</span>
-            <span v-else-if="info" class="badge ok">已是最新</span>
           </div>
         </div>
         <div v-if="supported && backup" class="config-row">
@@ -146,7 +147,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort, getSystemStatus, getLogsSize, clearLogs, exportConfig, importConfig, getServerPort } from '../api.js'
+import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort, getSystemStatus, getLogsSize, clearLogs, exportConfig, importConfig, clearConfig, getServerPort } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { formatBytes, formatTime } from '../utils/format.js'
 import { useUpdate } from '../composables/useUpdate.js'
@@ -164,6 +165,7 @@ const cacheSize = ref(null) // 日志缓存占用：{ totalSize, fileCount }
 const clearing = ref(false) // 清空缓存进行中
 const exporting = ref(false) // 导出配置进行中
 const importing = ref(false) // 导入配置进行中
+const clearingConfig = ref(false) // 清空配置进行中
 const importInput = ref(null) // 隐藏的文件选择框（菜单里点不到原生按钮样式）
 
 // 导入后同步侧边栏与托盘的模型列表，避免还显示旧配置里的激活模型
@@ -439,6 +441,22 @@ async function onImportFile(event) {
   }
 }
 
+async function clearConfigFile() {
+  if (!window.confirm('将清空模型来源、路由规则与全部账号凭据。\n\n清空前会自动快照，可再导入回来。继续吗？')) return
+  clearingConfig.value = true
+  try {
+    await clearConfig()
+    await loadData()
+    await loadModelData()
+    notifyTray()
+    showToast('配置已清空', 'info', 4000)
+  } catch (err) {
+    showToast('清空失败: ' + errorText(err), 'error', 8000)
+  } finally {
+    clearingConfig.value = false
+  }
+}
+
 onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导「待重启」提示），不再重复调用
   loadData()
   // 升级状态：可回滚备份 / 上次升级结果（主进程已在启动时初始化）
@@ -456,6 +474,9 @@ onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导�
 
 .settings .config-row {
   padding: 6px 0;
+  /* 每行高度统一：有按钮的行本来就高，纯文字行会被拉低，
+     同一张卡片里几行错开看着不齐 */
+  min-height: 40px;
 }
 
 .settings .config-hint {

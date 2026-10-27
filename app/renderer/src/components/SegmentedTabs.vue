@@ -21,6 +21,7 @@
       @click="select(item.value)"
       @keydown="onKeydown($event, index)"
     >
+      <img v-if="item.icon" class="seg-icon" :src="item.icon" alt="" />
       <span class="seg-label">{{ item.label }}</span>
       <!-- 计数之类的附加信息：有值才渲染，0 也要显示（「0 条」本身是信息） -->
       <span v-if="item.badge !== undefined && item.badge !== null && item.badge !== ''" class="seg-badge">
@@ -47,7 +48,8 @@ import { computed, ref } from 'vue'
 
 const props = defineProps({
   modelValue: { type: String, required: true },
-  // [{ value, label, badge?, title?, disabled? }] 或 ['a', 'b']
+  // [{ value, label, badge?, icon?, title?, disabled? }] 或 ['a', 'b']
+  // icon 是标签前的品牌图（如渠道 logo），不传就只渲染文字
   options: { type: Array, required: true },
   // 给读屏用的名字（如「渠道账号视图切换」）；不传就不加 aria-label
   label: { type: String, default: '' },
@@ -142,6 +144,18 @@ function onKeydown(event, index) {
 .seg-item:disabled {
   color: var(--text-4);
   cursor: default;
+}
+
+/* 标签前的品牌图：与渠道页「添加账号」菜单的 logo 同一规格（20px 方块垫白底，
+   原图有黑标透明底 / 深色主题下会看不见的），放小一号（16px）才不压过文字 */
+.seg-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  padding: 1px;
+  background: #fff;
+  border-radius: var(--radius-xs);
 }
 
 .seg-badge {

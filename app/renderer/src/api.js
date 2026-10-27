@@ -76,11 +76,6 @@ export function getSystemStatus() {
   return api.get('/api/system/status').then(r => r.data)
 }
 
-// 开发面板：进程 / 数据目录 / 运行时快照。正式版里服务端不注册这个端点（404）
-export function getDevInfo() {
-  return api.get('/api/dev/info').then(r => r.data)
-}
-
 // 请求统计（今日/累计，含失败数），与 Token 统计同源
 export function getStats() {
   return api.get('/api/stats').then(r => r.data)
@@ -181,6 +176,11 @@ export function exportConfig() {
 
 export function importConfig(payload) {
   return api.post('/api/config/import', payload, { timeout: 120000 }).then(r => r.data)
+}
+
+// 清空配置：抹掉模型来源、规则与账号凭据（服务端设置保留），需重建运行时
+export function clearConfig() {
+  return api.post('/api/config/clear', null, { timeout: 120000 }).then(r => r.data)
 }
 
 export function getFallback() {
