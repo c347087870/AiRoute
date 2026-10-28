@@ -1,0 +1,31 @@
+# 临时工作流：把指定 Release 改回草稿，随后自删本文件。
+# 用途：发布者无 GitHub API 凭据时，借 CI 自带的 GITHUB_TOKEN 完成一次状态变更。
+name: Set Release Draft
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/set-release-draft.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 改为草稿并自删
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v2.0.0-beta.4
+        run: |
+          gh release edit "$TAG" --draft=true
+          # 状态改完就撤掉本工作流，不留临时文件在仓库里
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q .github/workflows/set-release-draft.yml
+          git commit -m "chore: 移除临时工作流 set-release-draft"
+          git push
