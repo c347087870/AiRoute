@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { getProviders, getRules, updateRules, getFallback, updateFallback } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { buildModelGroups, listModels, resolveRefLabel } from '../utils/models.js'
@@ -198,6 +198,18 @@ async function loadData() {
 }
 
 onMounted(loadData)
+
+// keep-alive 缓存后切走不卸载，onMounted 只跑一次。
+// 路由规则/兜底配置依赖「当前有哪些 Provider 与模型」，而这些可能刚在别的页面改过 ——
+// 切回来必须重新拉一次，否则下拉里列的还是旧模型。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  loadData()
+})
 </script>
 
 <style scoped>

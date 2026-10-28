@@ -177,6 +177,7 @@ import { showToast } from '../composables/useToast.js'
 import AppButton from '../components/AppButton.vue'
 import OauthAuthBlock from '../components/OauthAuthBlock.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
+import { assetUrl } from '../utils/assets.js'
 const emit = defineEmits(['close', 'finish'])
 
 const { stepIndex, modelDefaultsApplied, markModelDefaultsApplied } = useOnboarding()
@@ -303,10 +304,10 @@ async function loadEnv() {
 // desc 之类的中文说明已去掉，Tab 标签只保留渠道名。
 // logo 是 Tab 标签前的品牌图，与「渠道账号」页添加菜单用的是同一组文件
 const BRAND_LOGOS = {
-  workbuddy: '/brand-workbuddy.svg',
-  trae: '/brand-trae.png',
-  qoder: '/brand-qoder.svg',
-  qodercn: '/brand-qoder.svg'
+  workbuddy: assetUrl('brand-workbuddy.svg'),
+  trae: assetUrl('brand-trae.png'),
+  qoder: assetUrl('brand-qoder.svg'),
+  qodercn: assetUrl('brand-qoder.svg')
 }
 const CHANNELS = [
   { id: 'wb-cn', name: 'WorkBuddy 国内版', type: 'workbuddy', realm: 'cn' },

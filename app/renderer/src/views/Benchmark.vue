@@ -380,7 +380,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
 import {
   getQuestions, saveQuestions, importQuestions, resetQuestions,
   startBenchmark, getBenchmarkStatus,
@@ -1041,6 +1041,20 @@ onMounted(async () => {
 })
 
 onUnmounted(stopPolling)
+// keep-alive 缓存后切走不卸载：进度轮询要停掉，否则会一直在后台打服务端。
+// 切回来时若服务端还在跑，重新接管（onMounted 只在第一次进入时执行）
+onDeactivated(stopPolling)
+onActivated(async () => {
+  if (running.value) return
+  try {
+    const status = await getBenchmarkStatus()
+    if (!status.running) return
+    running.value = true
+    progressTotal.value = status.total || 0
+    progressCompleted.value = status.completed || 0
+    startPolling()
+  } catch {}
+})
 </script>
 
 <style scoped>

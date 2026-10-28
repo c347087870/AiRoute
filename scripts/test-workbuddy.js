@@ -136,10 +136,12 @@ async function main() {
   })
 
   test('裸 11128 改写为 11-128（相邻错误码不动）', () => {
+    // 语义方向：输入侧是裸 '11128'（上游错误码形态），输出侧才是 '11-128'。
+    // 特征表与 find 串都必须是输入侧形态，否则 code=11128 根本不触发预处理。
     const out = sanitize.sanitizeText('upstream returned code=11128 for this request, not 11148 or 11101')
-    assert.ok(out.includes('code=11-128'))
-    assert.ok(!out.includes('11128'))
-    assert.ok(out.includes('11148') && out.includes('11101'))
+    assert.ok(out.includes('code=11-128'), '改写成带连字符的形态')
+    assert.ok(!out.includes('11128'), '裸 11128 不得残留')
+    assert.ok(out.includes('11148') && out.includes('11101'), '相邻错误码不得被误伤')
   })
 
   test('billing header 键值段整段删除（大小写不敏感）', () => {
@@ -152,6 +154,43 @@ async function main() {
     const out = sanitize.sanitizeText('字段 x-anthropic-billing-header 出现在正文中')
     assert.ok(out.includes('x-anthropic-billing-hdr'))
     assert.ok(!out.includes('billing-header'))
+  })
+
+  test('DSH @ 路径段：命中指纹并整段换措辞（11-128 回归）', () => {
+    // 这段文本逐字取自 DSH 的 FILE_REFERENCE_PROMPT（app.asar 里能搜到），
+    // 上游按「连续原文」判渠道，段首两句连排即 400 11-128。
+    //
+    // 本用例同时是「预检必须用原文真实子串」的回归：早先 SANITIZE_FEATURES 里
+    // 写的是 'prefixed with @'，而原文是 'References starting with @' —— 预检
+    // 永不命中，整条净化被跳过。旧断言只查原文里根本不存在的串，所以一直是绿的。
+    const dsh = [
+      'References starting with @ are paths the user explicitly referenced.',
+      'Relative paths are resolved against the working directory,',
+      'absolute ones point at files or directories on this machine.',
+      'A trailing slash marks a directory: list it when its contents matter.',
+      'Anything else is a file: use the read tool when its contents are needed,',
+      'and do not claim to have inspected it before reading.',
+      '@"..." quotes a path containing spaces.'
+    ].join(' ')
+    assert.strictEqual(sanitize.hasFingerprint(dsh), true, '预检必须命中，否则整段会原样发出')
+    const out = sanitize.sanitizeText(dsh)
+    // 逐条核对：原文的每句特征都不得残留
+    assert.ok(!out.includes('References starting with @'), '段首特征不得残留')
+    assert.ok(!out.includes('Relative paths are resolved against the working directory'), '相对路径句不得残留')
+    assert.ok(!out.includes('absolute ones point at files or directories on this machine'), '绝对路径句不得残留')
+    assert.ok(!out.includes('A trailing slash marks a directory'), '尾斜杠句不得残留')
+    assert.ok(!out.includes('Anything else is a file'), '其余皆文件句不得残留')
+    assert.ok(!out.includes('@"..." quotes a path containing spaces'), '引号句不得残留')
+    // 净化不是「清空」：@ 语义要留得住
+    assert.ok(out.includes('@'), '@ 语义要保留')
+    assert.ok(out.length > 40, '不能整段删空')
+    assert.notStrictEqual(out, dsh, '必须真的改写了，不能原样返回')
+  })
+
+  test('DSH 段外 @ 不误伤（邮箱 / 包名 / Windows 路径）', () => {
+    for (const t of ['mail me at a@b.com', 'npm i @scope/pkg', 'open D:\\c\\a b']) {
+      assert.strictEqual(sanitize.sanitizeText(t), t)
+    }
   })
 
   test('无指纹文本逐字原样返回（不 trim）', () => {
@@ -191,8 +230,8 @@ async function main() {
     ]
     const changed = sanitize.sanitizeMessages(messages)
     assert.strictEqual(changed, true)
-    assert.ok(messages[1].tool_calls[0].function.arguments.includes('11-128'))
-    assert.ok(!messages[1].tool_calls[0].function.arguments.includes('11128'))
+    assert.ok(messages[1].tool_calls[0].function.arguments.includes('11-128'), '盲区里的裸码也要被改写')
+    assert.ok(!messages[1].tool_calls[0].function.arguments.includes('11128'), '裸 11128 不得残留')
   })
 
   // ==================== 2. 提示词体系与降级 ====================

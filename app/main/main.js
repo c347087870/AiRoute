@@ -2,6 +2,20 @@ const { app, BrowserWindow, ipcMain, Menu, dialog, shell, nativeTheme } = requir
 const path = require('path')
 const net = require('net')
 const http = require('http')
+
+// ELECTRON_RUN_AS_NODE 存在时（值是什么都算），Electron 会以纯 Node 模式启动：
+// require('electron') 退化成 exe 路径字符串，上面解构出的 app 全是 undefined，
+// 报错会是一句难懂的 "Cannot read properties of undefined (reading 'getPath')"。
+// 这个变量常从父进程继承（编辑器 / 集成终端），不是机器上的永久设置，
+// 正常入口 npm run dev 已在 scripts/start-electron.js 里清掉它；这里兜底给出人话。
+if (!app) {
+  console.error(
+    '[aiRoute] Electron 正在以纯 Node 模式运行（检测到 ELECTRON_RUN_AS_NODE）。\n' +
+    '界面无法启动，请改用 npm run dev（会先清掉该变量），或手动清除这个环境变量后重试。'
+  )
+  process.exit(1)
+}
+
 const { createTray, refreshTrayMenu } = require('./tray')
 const updater = require('./updater')
 const installKind = require('./install-kind')

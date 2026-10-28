@@ -54,7 +54,26 @@ check('伪模型清单形状', () => {
     assert.equal(item.object, 'model')
     assert.equal(item.owned_by, 'airoute')
     assert.ok(item.name && item.name.length > 0, '要带中文说明，能读到 name 的客户端才看得懂')
+    // 没有档位数据时不声明：给了客户端就会照单全收，等于凭空造能力
+    assert.ok(!('reasoning_supported_efforts' in item))
   }
+})
+
+check('思考档位：合并去重、按强度排序，未知档位排在标准档之后', () => {
+  assert.deepEqual(auto.unionEfforts([]), [])
+  assert.deepEqual(auto.unionEfforts([[], null, undefined]), [])
+  assert.deepEqual(auto.unionEfforts([['high', 'low'], ['low', 'max']]), ['low', 'high', 'max'])
+  assert.deepEqual(auto.unionEfforts([['xhigh', 'minimal', 'off']]), ['off', 'minimal', 'xhigh'])
+  assert.deepEqual(auto.unionEfforts([['ultra', 'low']]), ['low', 'ultra'], '不认识的档位保留并排在末尾')
+  assert.deepEqual(auto.unionEfforts([[' low ', '', 1]]), ['low'], '空串与非字符串要丢掉')
+})
+
+check('/v1/models 声明档位：有则声明、无则不声明', () => {
+  const withEfforts = auto.listAutoModels(['low', 'high'])
+  assert.deepEqual(withEfforts[0].reasoning_supported_efforts, ['low', 'high'])
+  // 复制一份，别让客户端拿到的数组和内部状态共享引用
+  assert.notStrictEqual(withEfforts[0].reasoning_supported_efforts, auto.listAutoModels(['low', 'high'])[0].reasoning_supported_efforts)
+  assert.ok(!('reasoning_supported_efforts' in auto.listAutoModels([])[0]))
 })
 
 check('策略档位：四档齐全，非法值退回默认', () => {

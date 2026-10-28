@@ -16,7 +16,8 @@ const routes = [
   { path: '/', redirect: '/dashboard' },
   { path: '/dashboard', name: 'Dashboard', component: Dashboard, meta: { title: '状态面板' } },
   { path: '/routing', name: 'RoutingRules', component: RoutingRules, meta: { title: '路由规则', back: true } },
-  { path: '/providers', name: 'Providers', component: Providers, meta: { title: 'Provider 管理', back: true } },
+  // 模型来源已是一级菜单：放进侧边栏常驻入口后不再需要返回按钮
+  { path: '/providers', name: 'Providers', component: Providers, meta: { title: '模型来源' } },
   { path: '/workbuddy', name: 'WorkbuddyPool', component: WorkbuddyPool, meta: { title: 'WorkBuddy 账号池', back: true } },
   { path: '/channels', name: 'Channels', component: Channels, meta: { title: '渠道账号' } },
   { path: '/logs', name: 'Logs', component: Logs, meta: { title: '日志查看', back: true } },

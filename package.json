@@ -1,13 +1,13 @@
 {
   "name": "aiRoute",
-  "version": "2.0.0-beta.4",
+  "version": "2.0.0",
   "description": "本地 LLM 多模型调度网关",
   "private": true,
   "main": "app/main/main.js",
   "scripts": {
-    "dev": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development npx electron .\"",
+    "dev": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development node scripts/start-electron.js\"",
     "dev:web": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\"",
-    "dev:isolated": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development npx electron . --user-data-dir=.dev-userdata\"",
+    "dev:isolated": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development node scripts/start-electron.js --user-data-dir=.dev-userdata\"",
     "build": "node scripts/build.js",
     "test": "node scripts/test-workbuddy.js && node scripts/test-update.js && node scripts/test-channels.js && node scripts/test-channel-plugins.js && node scripts/test-trae-credits.js && node scripts/test-auto-strategy.js && node scripts/test-model-health.js && node scripts/test-failure-class.js && node scripts/test-account-health.js && node scripts/test-config-io.js && node scripts/verify-channels.js",
     "test:update": "node scripts/test-update.js",

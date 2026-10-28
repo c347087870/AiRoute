@@ -113,16 +113,41 @@ function isAutoId(value) {
   return AUTO_MODELS.some(item => item.id === id)
 }
 
+// 思考档位的先后次序：与上游一致，从「关」到「最强」。
+// 声明给客户端时按这个顺序排，客户端把它当强度列表展示才不会乱。
+const EFFORT_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+// 把若干「档位数组」并成一个有序去重列表；一个有效项都没有时返回空数组
+// （空数组 = 不声明，交给调用方决定要不要给兜底四档）
+function unionEfforts(lists) {
+  const seen = new Set()
+  for (const list of Array.isArray(lists) ? lists : []) {
+    if (!Array.isArray(list)) continue
+    for (const item of list) {
+      const effort = typeof item === 'string' ? item.trim() : ''
+      if (effort) seen.add(effort)
+    }
+  }
+  if (seen.size === 0) return []
+  const known = EFFORT_ORDER.filter(item => seen.has(item))
+  const extra = [...seen].filter(item => !EFFORT_ORDER.includes(item)).sort()
+  return [...known, ...extra]
+}
+
 // OpenAI 形态的模型条目：多带 name/description 两个字段，
-// 能读到它们的客户端（面板式客户端不少）就能看到中文说明，读不到的只显示 id 也不出错
-function listAutoModels() {
+// 能读到它们的客户端（面板式客户端不少）就能看到中文说明，读不到的只显示 id 也不出错。
+// reasoning_supported_efforts 是本网关额外声明的思考档位（客户端据此渲染档位选择器）。
+function listAutoModels(reasoningEfforts) {
+  const efforts = Array.isArray(reasoningEfforts) && reasoningEfforts.length ? reasoningEfforts : []
   return AUTO_MODELS.map(item => ({
     id: item.id,
     object: 'model',
     created: 0,
     owned_by: 'airoute',
     name: item.name,
-    description: item.name
+    description: item.name,
+    // 没有档位数据时宁可少声明，也不给一个客户端会照单全收的假能力
+    ...efforts.length ? { reasoning_supported_efforts: efforts.slice() } : {}
   }))
 }
 
@@ -358,6 +383,8 @@ module.exports = {
   AUTO_MODELS,
   STRATEGIES,
   DEFAULT_STRATEGY,
+  EFFORT_ORDER,
+  unionEfforts,
   isAutoId,
   listAutoModels,
   listStrategies,

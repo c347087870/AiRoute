@@ -2,13 +2,16 @@
 
 // 特征预检子串（大小写敏感 Contains），任一命中才进入净化流程
 const SANITIZE_FEATURES = [
-  'x-anthropic-billing-header', // header 键值段键名
-  'cc_entrypoint=', // 尾随裸键值
+  'x-anthropic-billing-hdr', // header 键值段键名
   'You are Claude Code', // 身份句
   'Main branch (', // 注入指令句
   'You are a coding agent running in the Codex CLI', // Codex instructions 首段
+  // DSH 的 @ 路径说明段：原文是 "References starting with @ are paths..."。
+  // 这里必须用原文真实存在的子串 —— 早先误写成 'prefixed with @'（源文里没这个词），
+  // 预检因此永不命中，整条净化被跳过，表现为「脱敏写了但完全没生效」
+  'starting with @',
   'github.com/anthropics/', // 反馈句里的仓库链接
-  '11128' // 上游反探测：裸数字错误码
+  '11128' // 上游反探测：裸错误码 11128（输入侧形态）
 ]
 
 // 改写层：按数组顺序逐条全局替换（大小写敏感）
@@ -32,6 +35,30 @@ const SANITIZE_REWRITES = [
   ],
   // ⑤ 上游错误码反探测（零宽空格无效，用可见连字符）
   ['11128', '11-128']
+]
+
+// 正则改写层：整句/整段同义改写（大小写不敏感）。字面量层只能逐串替换，
+// 上游是按「连续原文」判渠道特征的 —— 句子顺序一变或大小写不同，逐串替换就会漏掉，
+// 所以这类整段文案一律走正则。
+// DSH（本项目自己就是它的客户端）的系统提示词里有一段 @ 路径说明，
+// 段首「Tokens prefixed with @」与紧随其后的 workspace root 连排就会被判 11-128；
+// 这里逐句换措辞，保留 @ 的语义，让任意连续两段的原文都不再出现。
+const SANITIZE_REGEX_REWRITES = [
+  // "References starting with @" 是上游指名拒绝的形状，必须换掉。
+  // 注意：previously 这里写的正则是 /\bTokens prefixed with @/ —— 源文里没有
+  // "Tokens prefixed" 这个词，规则永远匹配不到，等于没写。
+  [/References starting with @/gi, 'Paths written as @'],
+  // 后面几条同样要保证「匹配串 !== 替换串」，否则是空转规则
+  [/Relative paths are resolved against the working directory/gi,
+    'Relative paths resolve from the working directory'],
+  [/absolute ones point at files or directories on this machine/gi,
+    'absolute ones identify files or directories on the host'],
+  [/A trailing slash marks a directory: list it when its contents matter\./gi,
+    'A trailing slash means a directory \u2014 list it when you need what is inside.'],
+  [/Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading\./gi,
+    'Everything else is a file \u2014 open it with the read tool before describing what is inside.'],
+  [/@"\.\.\." quotes a path containing spaces\./gi,
+    'A path containing spaces is written as @"...".']
 ]
 
 // 剥离层正则：键值形态 header 整段删除（要求冒号，大小写不敏感）
@@ -60,6 +87,9 @@ function sanitizeText(text) {
   let out = text
   for (const [find, replace] of SANITIZE_REWRITES) {
     out = out.split(find).join(replace)
+  }
+  for (const [re, replace] of SANITIZE_REGEX_REWRITES) {
+    out = out.replace(re, replace)
   }
   RE_HDR.lastIndex = 0
   out = out.replace(RE_HDR, '')

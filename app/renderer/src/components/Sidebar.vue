@@ -2,7 +2,7 @@
   <nav class="sidebar">
     <div class="sidebar-header">
       <div class="logo">
-        <img class="logo-mark" src="/favicon.svg" alt="" />
+        <img class="logo-mark" :src="logoUrl" alt="" />
         <span>AiRoute</span>
       </div>
       <StatusBadge :online="isOnline" />
@@ -98,6 +98,10 @@ import { getHealth } from '../api.js'
 import { useUpdate } from '../composables/useUpdate.js'
 import { useTheme } from '../composables/useTheme.js'
 import { useOnboarding } from '../composables/useOnboarding.js'
+import { assetUrl } from '../utils/assets.js'
+
+// 品牌图在 public/ 下：打包后走 file://，必须按 BASE_URL 解析（见 utils/assets.js）
+const logoUrl = assetUrl('favicon.svg')
 
 const isOnline = ref(false)
 
@@ -119,6 +123,9 @@ const navItems = [
   // 免费账号已经并进渠道账号页当第三个 Tab；/workbuddy 作为它的子页面保留，
   // 但侧边栏不再单独占一项，所以这里用 alsoActive 让子页面期间「渠道账号」保持高亮
   { path: '/channels', label: '渠道账号', icon: 'channels', alsoActive: ['/workbuddy'] },
+  // 模型来源（Provider 管理）从「高级功能」提到一级：登录渠道之后要看的就是
+  // 「现在有哪些模型、每个模型用什么档位」，属日常动作，不该再点开一层分组
+  { path: '/providers', label: '模型来源', icon: 'source' },
   { path: '/tutorial', label: '使用教程', icon: 'tutorial' }
 ]
 
@@ -130,7 +137,6 @@ const advancedGroup = {
   icon: 'advanced',
   children: [
     { path: '/routing', label: '路由规则' },
-    { path: '/providers', label: '模型来源' },
     { path: '/logs', label: '日志查看' },
     { path: '/token-stats', label: '用量统计' },
     { path: '/benchmark', label: '模型测分' }

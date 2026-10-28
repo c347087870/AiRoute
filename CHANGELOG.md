@@ -2,6 +2,44 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0] - 2026-10-28
+
+首个正式版。相对 `2.0.0-beta.4` 的改动如下。
+
+### 修复
+
+- **出站脱敏此前实际上完全没生效（P0）**：`SANITIZE_FEATURES` 里写的预检特征是 `prefixed with @`，而 DSH 原文是 `References starting with @` —— 预检永不命中，整条净化被直接跳过，文本逐字原样发出，上游照旧按「连续原文」判成非授权渠道报 `400 11-128`。同时修正了几处让这个缺陷藏住的测试：断言查的是原文里根本不存在的串（`prefixed with @` / `workspace root`）、以及自相矛盾的「既要求含 `code=11-128` 又要求不含 `11-128`」。现在用例逐条核对「原文特征是否真的被消除」，并要求输出必须真的被改写
+- **脱敏的反探测方向写反了**：特征与改写串都成了 `11-128`，导致输入侧裸错误码 `11128` 不再触发预处理。特征与 `find` 恢复为输入侧形态 `11128`，替换侧才是 `11-128`
+- **脱敏后 `11128` 类的相邻错误码会被误伤**：改写按整词边界处理，`11148` / `11101` 不受影响
+- **打包后品牌图全部裂图**：模板里写死的 `/brand-workbuddy.svg` 在 `file://` 下会被解析成磁盘根目录（`C:\brand-workbuddy.svg`）。新增 `utils/assets.js` 按 `import.meta.env.BASE_URL` 解析，覆盖新手引导的渠道 Tab、渠道账号页的卡片与添加菜单、侧边栏 logo、站点图标
+- **`npm run dev` 在继承 `ELECTRON_RUN_AS_NODE` 的环境里根本无法启动**：该变量只要存在（哪怕值为空），Electron 就以纯 Node 模式启动，`require('electron')` 退化成 exe 路径字符串，主进程在 `updater.js` 第一行解构 `app` 时抛 `Cannot read properties of undefined`。`cross-env ELECTRON_RUN_AS_NODE=` 清不掉它（实测仍是 Node 模式）。新增 `scripts/start-electron.js` 在 spawn 前真正 `delete` 该变量；`main.js` 另加人话兜底，从别的入口误启动时直接说明原因而不是抛 TypeError
+- **渠道模型的思考档位选了不生效**：`handleChannelRequest` 从未把模型级 `reasoningEffort` 注入请求。现按 WorkBuddy 同口径注入 `openAi.reasoning_effort`（配置即覆盖、`off` 删字段、未配置不干预）
+- **`/api/providers/:name/test` 的失败分支缺 `totalMs`**：界面拿到 `undefined` 就显示成 `-`。抽出 `failedTestResult()` 统一产出，所有失败分支都带全 `ttfbMs / totalMs / genMs / tps`
+- **响应时间读不到字段就显示 `-`**：旧实现只读 `ttfbMs`，而服务端一直都有 `latency`。新增 `responseMsOf()` 依次尝试 `latency → ttfbMs → totalMs`，并跳过 `null`（`Number(null)` 是 `0`，会被当成「0 毫秒」这个合法值收下，反而盖住后面真正有数的字段）
+- **「测试全部」整组失败、单个测却成功**：服务端一口气循环 N 个模型、中间零间隔，同一账号必然被上游限流。改为前端逐个发请求，模型之间留 `400ms + 随机抖动`，命中限流退避 8 秒、连续 3 次自动停下
+
+### 变更
+
+- **页面切换不再重载**：`router-view` 套 `keep-alive`，表单、筛选、已拉到的数据、滚动位置都保留。配套处理了保活带来的副作用 —— 轮询页在 `deactivated` 停表、切回立刻补一次；页面级定时器与 `document` 监听从 `onUnmounted` 迁到 `activated/deactivated`；`useEscClose` 只对当前页生效；不轮询的配置页（模型来源、路由规则、设置、使用教程）在切回时主动重读一次
+- **「模型来源」提升为一级菜单**：位置在「渠道账号」之后、「使用教程」之前；它已是一级常驻入口，去掉返回按钮，路由标题由「Provider 管理」改为「模型来源」
+- **托盘菜单每个模型标注来源**：`GLM-5.3-Flash — WorkBuddy 国内版`。渠道源一个 Provider 装好几家，来源从模型 id 前缀取；其余源整组同一家，直接用 Provider 显示名。`displayName` 与 Provider ID 相同（没改过名）时用固定的中文来源名，避免托盘里显示 `workbuddy` 这种内部 ID
+- **测试结果改成「跟在每个模型后面」显示**：模型芯片上直接给状态点 + 耗时（`● 1.80s` / `红点 失败`），不再另起一块结果列表；只有一个模型时不再显示「2/2 个连接成功」这类汇总
+- **测试结果文案统一**：`workbuddy/glm-5.3-flash 连接成功 · 1.80s · 本次用量 136 tokens`，耗时一律按秒（两位小数）。渠道页的 `formatMs` 同步改成秒口径
+- **模型来源每个模型新增「测」按钮**：只测那一个，结果合并进该源的逐模型结果表，不动同源其它模型结论；行操作区的「测试全部 N 个模型」保留
+
+### 新增
+
+- **思考档位可达性打通**：渠道目录把上游 `reasoning.efforts` 带进 `publicModelRows` / `model.list`；新增 `GET /api/model-efforts` 供弹窗渲染档位下拉；`/v1/models` 的 `auto` 条目声明 `reasoning_supported_efforts`（已开启模型档位的并集，探测不到则不声明）。「模型来源」的档位下拉改为按该模型**真实支持**的档位渲染，探测不到回落 `low / high / max / xhigh`
+- **连通性测试记录完整计时**：返回 `ttfbMs`（首字节，即用户感知的响应时间）、`totalMs`（整次调用）、`genMs`（纯生成）、`tps`（生成速度）。`genMs < 50ms` 或拿不到 token 数时 `tps` 给 `null`，不硬除出假的 tok/s
+- **`scripts/start-electron.js`**：dev 启动垫片，见上方修复说明
+- **`app/renderer/src/utils/assets.js`**：按 `BASE_URL` 解析静态资源路径
+- 回归用例：`test-workbuddy.js` 补 DSH `@` 段与段外 `@` 不误伤；`test-auto-strategy.js` 补 `unionEfforts` 与 `/v1/models` 档位声明（有则声明、无则不声明、不与内部状态共享引用）
+
+### 已知限制
+
+- **Trae 渠道的思考档位不会发给上游**：Trae 插件的 `buildBody` 会删除 `reasoning_effort`，其 SOLO 协议里没有可核对的档位字段。面板上可选，但不生效。Qoder（wasm 读 `reasoning_effort`）与 WorkBuddy 链路是真实生效的
+- **WorkBuddy 与通用 Provider 的 `tps` 为 `null`**：它们走非流式聚合，拿不到逐帧时刻，`ttfbMs` 等于整次耗时。真实速度数字目前只有渠道模型（Trae / Qoder）能给
+
 ## [2.0.0-beta.4] - 2026-10-28
 
 ### 变更

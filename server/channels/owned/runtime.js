@@ -334,6 +334,10 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
               name: model.name,
               disabled: state.disabledModels[`${provider}/${model.id}`] === true,
               dead: state.deadModels[`${provider}/${model.id}`] > Date.now(),
+              // 上游声明的思考档位：Provider 弹窗的档位下拉与 /v1/models 的声明都用它
+              ...model.reasoning?.efforts?.length
+                ? { efforts: model.reasoning.efforts, defaultEffort: model.reasoning.defaultEffort || '' }
+                : {},
             })),
         }
       }

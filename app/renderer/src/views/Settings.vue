@@ -146,7 +146,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { getServerConfig, updateServerConfig, restartServer, probeServer, setServerPort as setApiPort, getSystemStatus, getLogsSize, clearLogs, exportConfig, importConfig, clearConfig, getServerPort } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { formatBytes, formatTime } from '../utils/format.js'
@@ -460,6 +460,19 @@ async function clearConfigFile() {
 onMounted(() => {  // loadData 内部已包含 loadSystemStatus（用于推导「待重启」提示），不再重复调用
   loadData()
   // 升级状态：可回滚备份 / 上次升级结果（主进程已在启动时初始化）
+  refreshInstallStatus()
+})
+
+// keep-alive 缓存后切走不卸载，onMounted 只跑一次。
+// 这一页读的是随时会变的东西（日志占用、版本与更新状态、端口），切回来要重读 ——
+// 否则在别处清完日志、或改完端口再切回来，显示的还是旧数字。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  loadData()
   refreshInstallStatus()
 })
 </script>

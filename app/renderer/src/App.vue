@@ -16,8 +16,15 @@
           </span>
         </div>
       </header>
-      <div class="main-scroll">
-        <router-view />
+      <div ref="scrollEl" class="main-scroll">
+        <!-- 页面保活：切页只换显示，不销毁组件 —— 回来时表单、筛选、滚动位置和
+             已经拉到的数据都还在，不必重新请求一遍。数据的新鲜度交给各页自己的
+             轮询（usePolling 在被切走时暂停、切回来立即补一次） -->
+        <router-view v-slot="{ Component }">
+          <keep-alive>
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </div>
     </main>
   </div>
@@ -30,6 +37,7 @@
 </template>
 
 <script setup>
+import { nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import BackButton from './components/BackButton.vue'
@@ -42,6 +50,23 @@ import { useOnboarding } from './composables/useOnboarding.js'
 const route = useRoute()
 const router = useRouter()
 const actions = getPageActions()
+
+// 滚动容器：页面走 keep-alive 后内容不重建，但滚动位置不会自己回位。
+// 每个页面记住自己离开时的位置，切回来还原 —— 否则「缓存住了」只是数据还在，
+// 视口却停在上一次顶部，用户还得重新滚到刚才看的地方
+const scrollEl = ref(null)
+const scrollMemory = new Map()
+
+watch(
+  () => route.path,
+  (next, prev) => {
+    if (prev && scrollEl.value) scrollMemory.set(prev, scrollEl.value.scrollTop)
+    // 等新页面挂上去再还原：早一帧设 scrollTop 会被旧内容的高度截断
+    nextTick(() => {
+      if (scrollEl.value) scrollEl.value.scrollTop = scrollMemory.get(next) || 0
+    })
+  }
+)
 
 // 尽早应用主题：index.html 的首屏脚本已先铺一次，这里接管后续的切换与系统变化监听
 useTheme().initTheme()

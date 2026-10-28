@@ -1199,7 +1199,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
 import { showToast } from '../composables/useToast.js'
 import { useEscClose } from '../composables/useEscClose.js'
 import { usePageActions } from '../composables/usePageActions.js'
@@ -1628,6 +1628,25 @@ onUnmounted(() => {
   stopQueuePolling()
   stopLogAuto()
   stopCompTick()
+})
+
+// 页面被 keep-alive 缓存后切走不会卸载：页面自己起的几路定时器（授权轮询、任务进度、
+// 队列、日志自动刷新、补偿倒计时）要在失活时停掉，否则会一直在后台打服务端
+onDeactivated(() => {
+  stopOauthPolling()
+  stopTaskPolling()
+  stopQueuePolling()
+  stopLogAuto()
+  stopCompTick()
+})
+
+// 切回来时把「切走前本来在跑」的那几路接上：用户没点过停止，回来发现进度不走了更奇怪
+onActivated(() => {
+  if (tab.value === 'scheduler') startCompTick()
+  // logAuto 是用户自己打开的开关，接回来等同再点一次「自动刷新」
+  if (logAuto.value) toggleLogAuto()
+  if (queueRunning.value) startQueuePolling()
+  if (taskRunning.value) startTaskPolling()
 })
 
 // Tab 切换时按需加载该分区数据

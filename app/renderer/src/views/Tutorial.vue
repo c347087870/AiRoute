@@ -95,7 +95,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { getServerConfig } from '../api.js'
 import donateImg from '../assets/donate.jpg' // 打赏二维码图片，构建时由 Vite 处理为相对路径
 import AppButton from '../components/AppButton.vue'
@@ -165,6 +165,17 @@ async function loadConfig() {
 }
 
 onMounted(loadConfig)
+
+// keep-alive 缓存后切走不卸载：教程里的地址跟着端口走，改完端口切回来看的必须还是新的。
+// 这个接口是一次本地 GET，重读成本可以忽略。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  loadConfig()
+})
 </script>
 
 <style scoped>

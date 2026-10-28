@@ -27,14 +27,57 @@ function refLabel(providers, ref) {
   if (!provider) return ref
 
   // 国际版源补区域后缀（与分组标题口径一致），避免同名时看不出切的是哪个源
-  const base = provider.displayName || providerName
-  const providerLabel =
-    provider.type === 'workbuddy' && provider.region === 'global' && !base.includes('国际版') && !/global/i.test(base)
-      ? `${base}（国际版）`
-      : base
+  const providerLabel = sourceOfProvider(providerName, provider)
   const models = provider.models || []
   const model = modelId ? models.find(m => m.id === modelId) : models[0]
-  return model ? `${providerLabel} / ${model.displayName || model.id}` : providerLabel
+  if (!model) return providerLabel
+  return `${providerLabel} / ${modelMenuLabel(providerName, provider, model)}`
+}
+
+// 渠道模型 id 自带渠道前缀（workbuddy/glm-5.3、trae/xxx），但托盘里只显示模型名
+// 时看不出「这是哪家的」。这张表把前缀翻成人话；没登记的渠道按前缀原样显示，
+// 至少还能分辨是不同来源。
+const CHANNEL_SOURCE_NAMES = {
+  workbuddy: 'WorkBuddy 国内版',
+  'workbuddy-global': 'WorkBuddy 国际版',
+  trae: 'Trae',
+  qoder: 'Qoder 国际版',
+  qodercn: 'Qoder 国内版'
+}
+
+// WorkBuddy 两区的固定中文来源名：displayName 没改过时用它，
+// 否则托盘里会显示成「workbuddy」「workbuddy-global」这种内部 ID
+const WORKBUDDY_SOURCE_NAMES = { cn: 'WorkBuddy 国内版', global: 'WorkBuddy 国际版' }
+
+// Provider 的来源名：托盘里每个模型后面都要带上它，光看模型名分不出是哪家提供的
+function sourceOfProvider(name, provider) {
+  const base = provider.displayName || ''
+  if (provider.type === 'workbuddy') {
+    const region = provider.region === 'global' ? 'global' : 'cn'
+    // displayName 与 Provider ID 相同 = 用户没改过名（建源时直接把 ID 抄了过来），
+    // 这时用固定中文名；用户自己写过的名字一律保留
+    if (!base || base === name) return WORKBUDDY_SOURCE_NAMES[region]
+    // 国际版补区域后缀（与分组标题口径一致），避免同名时看不出切的是哪个源
+    return region === 'global' && !base.includes('国际版') && !/global/i.test(base)
+      ? `${base}（国际版）`
+      : base
+  }
+  return base || name
+}
+
+// 模型在托盘菜单里的显示名：统一带上来源。
+// 渠道源一个 Provider 里装着好几家的模型，来源要从模型 id 前缀取；
+// 其余源整组就属于同一家，直接用 Provider 显示名。
+function modelMenuLabel(name, provider, model) {
+  const label = model.displayName || model.id
+  const modelId = String(model.id)
+  if (provider.type === 'channel') {
+    const idx = modelId.indexOf('/')
+    if (idx === -1) return label
+    const prefix = modelId.slice(0, idx)
+    return `${label} — ${CHANNEL_SOURCE_NAMES[prefix] || prefix}`
+  }
+  return `${label} — ${sourceOfProvider(name, provider)}`
 }
 
 // 托盘与窗口引用，供配置变化时从外部触发菜单重建
@@ -125,21 +168,15 @@ async function updateMenu(tray, mainWindow) {
     } catch {}
   }
 
-  // 每个 Provider 一组，组内是该 Provider 的全部模型
-  // 国际版源补区域后缀：WorkBuddy 国内/国际是两个独立源，显示名可能相同
-  const providerLabel = (name, provider) => {
-    const base = provider.displayName || name
-    if (provider.type !== 'workbuddy') return base
-    if (provider.region !== 'global') return base
-    if (base.includes('国际版') || /global/i.test(base)) return base
-    return `${base}（国际版）`
-  }
+  // 每个 Provider 一组，组内是该 Provider 的全部模型。
+  // 组标题与组内每一项都带来源：渠道源一个 Provider 装着好几家的模型，
+  // 光看模型名分不出这一路请求打到了哪一家
   const providerItems = Object.entries(providers).map(([name, provider]) => ({
-    label: providerLabel(name, provider),
+    label: sourceOfProvider(name, provider),
     submenu: (provider.models || []).map(model => {
       const ref = `${name}/${model.id}`
       return {
-        label: model.displayName || model.id,
+        label: modelMenuLabel(name, provider, model),
         type: 'checkbox',
         checked: currentModel === ref,
         click: switchTo(ref)

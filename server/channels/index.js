@@ -73,6 +73,10 @@ function createRuntimeFacade(ownedRuntime) {
           context_window: model.maxContext || undefined,
           max_tokens: model.maxOutput || undefined,
           vision: true,
+          // 上游支持的思考档位：Provider 弹窗据此渲染下拉，/v1/models 据此声明能力
+          ...Array.isArray(model.efforts) && model.efforts.length > 0
+            ? { reasoning: { efforts: model.efforts, defaultEffort: model.defaultEffort || '' } }
+            : {},
         })
       }
     }

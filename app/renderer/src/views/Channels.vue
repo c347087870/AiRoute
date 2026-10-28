@@ -87,7 +87,7 @@
               >
                 <AppIcon name="gripVertical" />
               </span>
-              <img class="ch-card-logo" src="/brand-workbuddy.svg" alt="" />
+              <img class="ch-card-logo" :src="wbLogoUrl" alt="" />
               <span class="ch-name">{{ card.name }}</span>
             </div>
             <div class="ch-head-right">
@@ -346,6 +346,12 @@
                 class="ch-dot"
                 :class="modelTestResults[row.provider + '/' + row.model.id].ok ? 'ok' : 'bad'"
               ></span>
+              <!-- 测试耗时直接写在方块里：速度在前（最想看的），响应时间与总耗时随后。
+                   拿不到速度（非流式聚合链路）时只写成时间，不编一个假数字 -->
+              <span
+                v-if="modelTestResults[row.provider + '/' + row.model.id]?.ok"
+                class="ch-speed"
+              >{{ testTimingInline(modelTestResults[row.provider + '/' + row.model.id]) }}</span>
               <span v-if="row.model.isFree" class="ch-tag free">免费</span>
             </button>
           </div>
@@ -423,12 +429,19 @@
               @click="toggleModel(group.id, m)"
             >
               <span class="ch-model-name">{{ m.name || m.id }}</span>
-              <!-- 测试结论：绿点=通过、红点=失败；细节（延迟/错误）在按钮的 title 里 -->
+              <!-- 测试结论：绿点=通过、红点=失败；细节（延迟/速度/错误）在按钮的 title 里。
+                   速度在小屏也直接显示数字：这是用户点「测试」最想看的东西，
+                   藏在 tooltip 里等于没给 -->
               <span
                 v-if="modelTestResults[group.id + '/' + m.id]"
                 class="ch-dot"
                 :class="modelTestResults[group.id + '/' + m.id].ok ? 'ok' : 'bad'"
               ></span>
+              <!-- 同上：速度 + 完整耗时直接写在方块里 -->
+              <span
+                v-if="modelTestResults[group.id + '/' + m.id]?.ok"
+                class="ch-speed"
+              >{{ testTimingInline(modelTestResults[group.id + '/' + m.id]) }}</span>
               <span v-if="m.isFree" class="ch-tag free">免费</span>
               <span v-if="m.dead" class="ch-tag bad">已失效</span>
               <!-- 失活：点标签恢复（外层按钮的点击是开关模型，必须 stop） -->
@@ -453,12 +466,13 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast } from '../composables/useToast.js'
 import AppIcon from '../components/AppIcon.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
 import { slotsOf } from '../utils/channel-links.js'
+import { assetUrl } from '../utils/assets.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
 import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, auditModelHealth, reviveModel, getAccountHealth, getAutoStrategy, updateAutoStrategy } from '../api.js'
@@ -486,11 +500,13 @@ import {
 // `option` 是「添加账号」菜单里的写法：只写产品与区域，域名不带进菜单。
 // 同一产品的两个区域光写「国际版 / 国内版」看不出是哪个产品，所以名称里带上产品名。
 // `logoBg` 是菜单项前字母标的底色：同一家用同一个色，两区靠名称区分。
-// `logo` 是官方品牌图（public/brand-*.png/svg）。
+// `logo` 是官方品牌图（public/brand-*.png/svg），经 assetUrl 解析 ——
+// 打包后页面走 file://，绝对路径 /brand-x 会指向磁盘根目录
+const wbLogoUrl = assetUrl('brand-workbuddy.svg')
 const PROVIDERS = [
-  { id: 'trae', name: 'Trae', option: 'Trae', region: '', logo: '/brand-trae.png', logoBg: '#00BFA6' },
-  { id: 'qoder', name: 'Qoder 国际版', option: 'Qoder 国际版', region: '国际版', logo: '/brand-qoder.svg', logoBg: '#615CED' },
-  { id: 'qodercn', name: 'Qoder 国内版', option: 'Qoder 国内版', region: '国内版', logo: '/brand-qoder.svg', logoBg: '#7A6CF0' }
+  { id: 'trae', name: 'Trae', option: 'Trae', region: '', logo: assetUrl('brand-trae.png'), logoBg: '#00BFA6' },
+  { id: 'qoder', name: 'Qoder 国际版', option: 'Qoder 国际版', region: '国际版', logo: assetUrl('brand-qoder.svg'), logoBg: '#615CED' },
+  { id: 'qodercn', name: 'Qoder 国内版', option: 'Qoder 国内版', region: '国内版', logo: assetUrl('brand-qoder.svg'), logoBg: '#7A6CF0' }
 ]
 
 // 有「新手任务 / 登录奖励」端点的渠道。当前三家都没有这种端点
@@ -1195,8 +1211,8 @@ const addWrapEl = ref(null)
 // logo 是菜单项前的品牌标：三家都有官方图（public/brand-*.png/svg），
 // 没有官方图时才退回品牌色字母标。
 const ADD_ENTRIES = [
-  { key: 'workbuddy:cn', label: 'WorkBuddy 国内版', kind: 'workbuddy', realm: 'cn', logo: '/brand-workbuddy.svg', logoText: 'W', logoBg: '#0e7a4a' },
-  { key: 'workbuddy:global', label: 'WorkBuddy 国际版', kind: 'workbuddy', realm: 'global', logo: '/brand-workbuddy.svg', logoText: 'W', logoBg: '#0e7a4a' },
+  { key: 'workbuddy:cn', label: 'WorkBuddy 国内版', kind: 'workbuddy', realm: 'cn', logo: wbLogoUrl, logoText: 'W', logoBg: '#0e7a4a' },
+  { key: 'workbuddy:global', label: 'WorkBuddy 国际版', kind: 'workbuddy', realm: 'global', logo: wbLogoUrl, logoText: 'W', logoBg: '#0e7a4a' },
   ...PROVIDERS.map(p => ({
     key: p.id,
     label: p.option,
@@ -1211,7 +1227,7 @@ const ADD_ENTRIES = [
 // 卡头品牌标：按卡 id 找对应渠道的官方图；找不出图时退回品牌色字母标。
 // WorkBuddy 两张卡共用一张图，其余渠道按 provider 配置取
 function cardLogo(cardId) {
-  if (cardId === 'workbuddy' || cardId === 'workbuddy-global') return '/brand-workbuddy.svg'
+  if (cardId === 'workbuddy' || cardId === 'workbuddy-global') return wbLogoUrl
   return PROVIDERS.find(p => p.id === cardId)?.logo || null
 }
 function cardLogoBg(cardId) {
@@ -1711,15 +1727,53 @@ function testedAtText(at) {
   return `${Math.round(hours / 24)} 天前`
 }
 
+// 方块内的一行式耗时：速度 → 响应时间 → 总耗时。
+// 速度拿不到（WorkBuddy / 通用源是非流式聚合）时只写两个时间，不编假数字；
+// 两个时间几乎相同时（同样来自聚合链路）只写一个，避免重复。
+function testTimingInline(result) {
+  if (!result) return ''
+  const parts = []
+  if (Number.isFinite(result.tps)) parts.push(`${result.tps} tok/s`)
+  const ttfb = Number.isFinite(result.latency) ? result.latency : null
+  const total = Number.isFinite(result.totalMs) ? result.totalMs : null
+  if (ttfb !== null) parts.push(`响应 ${formatMs(ttfb)}`)
+  if (total !== null && ttfb !== null && total - ttfb >= 10) parts.push(`总 ${formatMs(total)}`)
+  else if (total !== null && ttfb === null) parts.push(`总 ${formatMs(total)}`)
+  return parts.join(' · ')
+}
+
+// 测试结论的耗时文案：首字节（用户感知的响应时间）与总耗时分开写，
+// 有 token 数时再给出生成速度。整段只在 title 里出现，不占模型方块的宽度。
+function testTimingText(result) {
+  if (!result) return ''
+  const ttfb = Number.isFinite(result.latency) ? result.latency : null
+  const total = Number.isFinite(result.totalMs) ? result.totalMs : null
+  const parts = []
+  if (ttfb !== null) parts.push(`响应 ${formatMs(ttfb)}`)
+  // 两个数几乎一样时（非流式/聚合链路）不重复写一遍
+  if (total !== null && ttfb !== null && total - ttfb >= 10) parts.push(`总耗时 ${formatMs(total)}`)
+  else if (total !== null && ttfb === null) parts.push(`总耗时 ${formatMs(total)}`)
+  if (Number.isFinite(result.tps)) parts.push(`${result.tps} tok/s`)
+  return parts.join('，')
+}
+
+// 毫秒 → 人话：一律给秒（两位小数），与「模型来源」测试结果那句同口径
+function formatMs(ms) {
+  const n = Number(ms)
+  if (!Number.isFinite(n)) return '-'
+  return `${(n / 1000).toFixed(2)}s`
+}
+
 function modelTitle(providerId, m) {
   const result = modelTestResults.value[providerId + '/' + m.id]
   // 延迟/错误只放在 title 里：模型方块就那么点宽，塞进去会把名字挤成省略号
   let tested = ''
   if (result) {
     const age = testedAtText(result.at)
+    const timing = testTimingText(result)
     tested = result.ok
-      ? `｜测试通过（${result.latency ?? '-'}ms${age ? `，${age}` : ''}）`
-      : `｜测试失败（${result.error || '未知原因'}${age ? `，${age}` : ''}）`
+      ? `｜测试通过（${timing || '-'}${age ? `，${age}` : ''}）`
+      : `｜测试失败（${result.error || '未知原因'}${timing ? `，${timing}` : ''}${age ? `，${age}` : ''}）`
   }
   // 失活优先说明：它此刻不参与路由，比「开关/上游失效」更影响用户判断
   const health = healthOf(providerId, m)
@@ -1948,10 +2002,16 @@ async function runModelTests(scope) {
           if (controller.signal.aborted) { userAborted = true; return }
           res = { ok: false, error: err.message }
         }
-        // 只覆盖这个模型自己的旧结论，不动别的渠道/别的模型的绿点
+        // 只覆盖这个模型自己的旧结论，不动别的渠道/别的模型的绿点。
+        // 耗时字段（ttfbMs / totalMs / genMs / tps）一并存下：绿点要长期挂着，
+        // 用户事后点开要看的不只是「通没通」，还有「当时多快」
         recordTestResult(target.key, {
           ok: res.ok === true,
           latency: res.latency,
+          ttfbMs: res.ttfbMs,
+          totalMs: res.totalMs,
+          genMs: res.genMs,
+          tps: res.tps,
           error: res.ok === true ? '' : (res.error || '未知原因')
         })
         tested.push(target.key)
@@ -2305,16 +2365,29 @@ function runOnboardingRequest() {
 onMounted(() => {
   reload()
   runOnboardingRequest()
+})
+
+// document 级监听与登录轮询、模型测试只在「这一页正在显示」时需要：
+// 页面被 keep-alive 缓存后切走不会卸载，所以挂在 activated/deactivated 上，
+// 切回来再挂回去（否则别的页面上的点击也会被这里的收起菜单逻辑吃掉）
+onActivated(() => {
   document.addEventListener('pointerdown', onDocPointerDown)
 })
-onUnmounted(() => {
+onDeactivated(() => {
+  document.removeEventListener('pointerdown', onDocPointerDown)
   stopPolling()
   wbStopPolling()
-  document.removeEventListener('pointerdown', onDocPointerDown)
   // 拖拽中切走页面时把拖拽状态一并收掉，否则落点监听会留在 document 上
   finishDrag({ cancel: true })
   // 离开页面时把正在跑的模型测试也停掉：否则它会继续对着上游一个个打，
   // 用户已经在别的页面了，连「停止」按钮都看不见
+  stopModelTests()
+})
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', onDocPointerDown)
+  stopPolling()
+  wbStopPolling()
+  finishDrag({ cancel: true })
   stopModelTests()
 })
 </script>
@@ -2920,6 +2993,16 @@ body.ch-drag-active * {
 
 .ch-dot.ok {
   background: var(--ok-text);
+}
+
+/* 测试耗时（速度 + 响应时间 + 总耗时）：贴着绿点显示。
+   用等宽数字与弱化色 —— 它是参考信息，不该跟模型名抢注意力 */
+.ch-speed {
+  flex: none;
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 </style>

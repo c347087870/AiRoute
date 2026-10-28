@@ -72,6 +72,35 @@
                 <span class="chip-meta">
                   {{ formatLimit(model.maxContext) }} / {{ formatLimit(model.maxOutput) }}
                 </span>
+                <!-- 测试结果直接跟在模型后面，与「渠道账号 → 已开启模型」同一个样子：
+                     状态点 + 响应时间（失败的显示红点 + 「失败」）。悬停给完整那一句。
+                     耗时走 responseMsOf，与服务端实际返回的字段解耦 -->
+                <span
+                  v-if="modelTestOf(name, model.id)"
+                  class="ch-dot"
+                  :class="modelTestOf(name, model.id).ok ? 'ok' : 'bad'"
+                ></span>
+                <span
+                  v-if="modelTestOf(name, model.id)?.ok"
+                  class="chip-latency"
+                  :title="testResultText(name, modelTestOf(name, model.id))"
+                >{{ formatMs(responseMsOf(modelTestOf(name, model.id))) }}</span>
+                <span
+                  v-else-if="modelTestOf(name, model.id)"
+                  class="chip-latency chip-latency-fail"
+                  :title="testResultText(name, modelTestOf(name, model.id))"
+                >失败</span>
+                <!-- 单模型测试：只打这一个模型，不跑整个源。
+                     整源的「测试全部」在行操作区，两者不抢同一个入口 -->
+                <button
+                  class="chip-test"
+                  :class="{ testing: isModelTesting(name, model.id) }"
+                  :disabled="!!testingName && !isModelTesting(name, model.id)"
+                  :title="isModelTesting(name, model.id) ? '停止这个模型的测试' : `只测 ${model.id} 这一个模型`"
+                  @click.stop="isModelTesting(name, model.id) ? stopTest() : runSingleTest(name, model.id)"
+                >
+                  {{ isModelTesting(name, model.id) ? '停止' : '测' }}
+                </button>
                 <!-- 失活：网关不再把请求派给它；点标签恢复（不动配置） -->
                 <span
                   v-if="healthOf(name, model)?.offline"
@@ -98,18 +127,21 @@
             <span v-else class="model-empty">未配置模型</span>
           </div>
 
-          <div v-if="testResults[name]" class="row-test" :class="testResults[name].ok ? 'test-ok' : 'test-fail'">
-            <span v-if="testResults[name].ok">
-              ✓ {{ testResults[name].model }} 连接成功 · {{ testResults[name].latency }}ms · 本次用量 {{ formatNumber(testResults[name].totalTokens) }} tokens
-            </span>
-            <span v-else>✗ {{ testResults[name].error }} · {{ testResults[name].latency }}ms</span>
-          </div>
+          <!-- 只有整组都没测成（请求本身失败，一个模型都没拿到结果）时才在这里说一句：
+               单个模型的结论已经跟在各自后面了，不再另起一块列表 -->
+          <div
+            v-if="testResults[name] && !(testResults[name].results || []).length"
+            class="row-test test-fail"
+          >✗ {{ testResults[name].error || '测试失败' }}</div>
         </div>
 
         <div class="row-actions">
-          <AppButton variant="secondary" v-if="testingName === name" @click="stopTest">停止</AppButton>
+          <!-- 这一行有测试在跑（整源或单模型）就显示「停止」，别让用户以为按钮失灵 -->
+          <AppButton variant="secondary" v-if="testingName === name" @click="stopTest">
+            {{ testProgress?.name === name ? `停止（${testProgress.total} 个模型）` : '停止' }}
+          </AppButton>
           <AppButton variant="secondary" v-else @click="runTest(name)" :disabled="!!testingName">
-            测试
+            测试全部 {{ provider.models?.length || 0 }} 个模型
           </AppButton>
           <AppButton variant="secondary" @click="editProvider(name, provider)">编辑</AppButton>
           <AppButton variant="primary" @click="setAsCurrent(name)">设为当前</AppButton>
@@ -177,7 +209,7 @@
               </template>
               <template v-else>
                 第一个模型为默认模型。最大上下文与最大输出不填即为空，填写后会在请求未指定 max_tokens 时自动注入。
-                推理档位逐模型配置（下拉可选 low / high / max / xhigh，或输入自定义值），选「默认」表示不干预客户端请求。
+                推理档位逐模型配置（渠道模型按上游探测到的档位列出，探测不到时给 low / high / max / xhigh，也可输入自定义值），选「默认」表示不干预客户端请求。
                 填好 URL 与 Key 后点「从接口拉取模型」，可一次带出上游全部模型。
               </template>
             </div>
@@ -202,11 +234,11 @@
                 <span class="limit-label">推理档位</span>
                 <select
                   class="effort-select-sm"
-                  :value="effortSelectValue(model, EFFORT_PRESETS)"
+                  :value="effortSelectValue(model, effortsOf(model))"
                   @change="onEffortSelect(model, $event.target.value)"
                 >
                   <option value="">默认（不干预）</option>
-                  <option v-for="e in EFFORT_PRESETS" :key="e" :value="e">{{ e }}</option>
+                  <option v-for="e in effortsOf(model)" :key="e" :value="e">{{ e }}</option>
                   <option value="__custom">自定义…</option>
                 </select>
                 <input v-model="model.reasoningEffort" class="effort-input" placeholder="或输入自定义值" />
@@ -276,7 +308,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useModel } from '../composables/useModel.js'
 import { useOnboarding } from '../composables/useOnboarding.js'
@@ -290,6 +322,7 @@ import {
   testProvider,
   fetchProviderModels,
   getModelHealth,
+  getModelEfforts,
   reviveModel
 } from '../api.js'
 import { formatNumber } from '../utils/format.js'
@@ -306,7 +339,10 @@ const MODEL_COLLAPSE_LIMIT = 3
 const { currentModel, providers, loadModelData, switchModel, notifyTray } = useModel()
 const showAdd = ref(false) // 是否显示新增弹窗
 const testingName = ref('') // 正在测试中的 provider 名
-const testResults = ref({}) // 连通性测试结果
+const testingModelId = ref('') // 正在单测的模型 id（空 = 整源测试中）
+const testResults = ref({}) // 连通性测试结果（按源的逐模型结果表）
+// 全量测试的进度（逐个模型串行跑，要让用户看到「测到第几个」）
+const testProgress = ref(null)
 // 「停止」用的中止句柄：只置标志的话，卡在上游的测试还要拖到超时才结束
 const testController = ref(null)
 // 失活台账：键是引用（provider/model）→ { ref, offline, reason, detail }
@@ -358,15 +394,27 @@ function emptyForm() {
   }
 }
 
-// 通用 Provider 的档位候选
+// 通用 Provider 的档位候选（探测不到该模型支持哪些档位时用它兜底）
 const EFFORT_PRESETS = ['low', 'high', 'max', 'xhigh']
 
+// 渠道模型探测到的档位：键是「渠道/模型」（与 channels 源的模型 id 同形）。
+// 由服务端从已采集的渠道目录里给出，面板只读不推断 —— 档位是模型能力，写死一份必然过期
+const detectedEfforts = ref({})
+
+// 某个模型可选的档位：优先用探测结果，探测不到（通用 Provider / 目录还没采到）回落固定四档。
+// 渠道源里模型 id 自带渠道前缀（workbuddy/glm-5.3），直接按 id 查即可
+function effortsOf(model) {
+  const detected = detectedEfforts.value[model.id]
+  if (Array.isArray(detected) && detected.length) return detected
+  return EFFORT_PRESETS
+}
+
 // 档位下拉的当前显示值：空 = 默认（不干预）；命中候选档位原样返回；其余归入自定义
-function effortSelectValue(model, fallback) {
+function effortSelectValue(model, efforts) {
   const v = (model.reasoningEffort || '').trim()
   if (!v) return ''
-  const efforts = Array.isArray(model.efforts) && model.efforts.length ? model.efforts : fallback || []
-  return efforts.includes(v) ? v : '__custom'
+  const list = Array.isArray(model.efforts) && model.efforts.length ? model.efforts : efforts || []
+  return list.includes(v) ? v : '__custom'
 }
 
 // 档位下拉变更：选候选档位即写入；选「默认」清空；选「自定义」进入手填
@@ -725,6 +773,16 @@ function healthOf(name, model) {
   return modelHealth.value[`${name}/${model.id}`] || null
 }
 
+// 拉一次渠道模型的档位表。失败保持空表：下拉退回固定四档，不影响保存
+async function loadModelEfforts() {
+  try {
+    const data = await getModelEfforts()
+    detectedEfforts.value = data?.efforts && typeof data.efforts === 'object' ? data.efforts : {}
+  } catch {
+    /* 保留上一份 */
+  }
+}
+
 async function reviveHealth(name, model) {
   const record = healthOf(name, model)
   if (!record) return
@@ -737,31 +795,208 @@ async function reviveHealth(name, model) {
   }
 }
 
-// 测试连通性：优先使用当前选中的模型（未选中该 Provider 的模型时回落第一个模型）
+// 测试节奏：与「渠道账号 → 已开启模型」的测试完全同一套参数。
+// 同一账号连打几个模型必然被上游限流（表现为「测试全部全失败、单测却成功」），
+// 所以模型之间必须留间隔；被限流时退避更久，连续命中就停下这一组。
+const TEST_GAP_MS = 400
+const TEST_JITTER_MS = 300
+const TEST_BACKOFF_MS = 8000
+const TEST_MAX_THROTTLE_STREAK = 3
+const TEST_THROTTLE_RE = /(429|rate.?limit|too.?many|限流|请求过[于快]|频繁|风控|流控|no healthy account|账号池中|冷却)/i
+
+// 测试全部：**逐个模型发一次请求**，而不是让服务端一口气循环。
+// 这是渠道页验证过的做法 —— 一次只打一个模型、中间留间隔，才不会因为
+// 连续打同一账号被限流而整组失败；而且每测完一个就能立刻把它的耗时显示出来。
 async function runTest(name) {
+  if (testingName.value) return
+  const list = providers.value[name]?.models || []
+  if (!list.length) return
+  const controller = new AbortController()
+  testController.value = controller
+  testingName.value = name
+  testingModelId.value = ''
+  testResults.value[name] = null
+  testProgress.value = { name, done: 0, total: list.length }
+
+  let throttleStreak = 0
+  let aborted = false
+  try {
+    for (const model of list) {
+      if (controller.signal.aborted) { aborted = true; break }
+      const result = await testOneModel(name, model.id, controller.signal)
+      // 每测完一个就写进表里：界面立刻显示这一个的耗时，不必等整组跑完
+      mergeModelTest(name, model.id, { model: model.id, ...result })
+      testProgress.value = { name, done: testProgress.value.done + 1, total: list.length }
+
+      if (!result.ok && TEST_THROTTLE_RE.test(result.error || '')) {
+        throttleStreak += 1
+        if (throttleStreak >= TEST_MAX_THROTTLE_STREAK) {
+          showToast(`${name} 连续 ${TEST_MAX_THROTTLE_STREAK} 次被限流，已停下；等一会儿再测`, 'error', 8000)
+          break
+        }
+        await testSleep(TEST_BACKOFF_MS, controller.signal)
+        continue
+      }
+      throttleStreak = 0
+      // 模型之间的间隔：不退避也别贴着打
+      await testSleep(TEST_GAP_MS + Math.random() * TEST_JITTER_MS, controller.signal)
+    }
+    const anyOk = (testResults.value[name]?.results || []).some(each => each.ok)
+    if (anyOk) await loadModelHealth()
+  } catch (err) {
+    if (!controller.signal.aborted) showToast('测试失败：' + err.message, 'error', 6000)
+  } finally {
+    if (aborted || controller.signal.aborted) showToast('已停止测试')
+    testingName.value = ''
+    testingModelId.value = ''
+    testController.value = null
+    testProgress.value = null
+  }
+}
+
+// 测一个模型：一次请求，任何异常都折成 { ok:false, error }，不让循环中断
+async function testOneModel(name, modelId, signal) {
+  try {
+    return await testProvider(name, modelId, signal)
+  } catch (err) {
+    if (signal.aborted) throw err // 用户点了停止：交给上层跳出
+    return { ok: false, error: err.message || '请求失败' }
+  }
+}
+
+// 可被「停止」打断的等待：切成 100ms 一跳，否则点了停止还要干等满退避
+function testSleep(ms, signal) {
+  return new Promise(resolve => {
+    const startedAt = Date.now()
+    const tick = () => {
+      if (signal.aborted || Date.now() - startedAt >= ms) resolve()
+      else setTimeout(tick, 100)
+    }
+    setTimeout(tick, 100)
+  })
+}
+
+// 单个模型的测试：只打这一个，不跑整个源。
+// 结果合并进该源已有的逐模型结果表里（不动同源的其它模型结论）
+async function runSingleTest(name, modelId) {
   if (testingName.value) return
   const controller = new AbortController()
   testController.value = controller
   testingName.value = name
-  testResults.value[name] = null
-  const ref = currentModel.value || ''
-  const modelId = ref.startsWith(`${name}/`) ? ref.slice(name.length + 1) : ''
+  testingModelId.value = modelId
   try {
-    const result = await testProvider(name, modelId, controller.signal)
-    testResults.value[name] = result
-    // 测试通过会让服务端清掉「连续失败」的失活标记，tag 跟着更新
+    const result = await testOneModel(name, modelId, controller.signal)
+    mergeModelTest(name, modelId, { model: modelId, ...result })
     if (result?.ok) await loadModelHealth()
   } catch (err) {
     if (controller.signal.aborted) {
-      testResults.value[name] = null
+      // 单测被停止：只清这一个模型的结论，不动同源其它模型
+      removeModelTest(name, modelId)
       showToast('已停止测试')
     } else {
-      testResults.value[name] = { ok: false, error: '请求失败', latency: 0 }
+      mergeModelTest(name, modelId, { model: modelId, ok: false, error: err.message || '请求失败' })
     }
   } finally {
     testingName.value = ''
+    testingModelId.value = ''
     testController.value = null
   }
+}
+
+// 把一条模型结果并进该源的逐模型结果表。
+// 界面按这张表在**每个模型自己后面**显示结论，所以单测只需要更新那一条，
+// 同源其它模型的结论原样保留（它们各自跟在自己后面，不会串）
+function mergeModelTest(name, modelId, item) {
+  const prev = testResults.value[name]
+  const list = Array.isArray(prev?.results) ? prev.results.slice() : []
+  const index = list.findIndex(each => each.model === modelId)
+  if (index >= 0) list[index] = item
+  else list.push(item)
+  const passed = list.filter(each => each.ok).length
+  testResults.value[name] = {
+    ok: passed > 0,
+    model: modelId,
+    ...item,
+    total: list.length,
+    passed,
+    failed: list.length - passed,
+    results: list
+  }
+}
+
+// 删掉某个模型的结论（单测被中止时）
+function removeModelTest(name, modelId) {
+  const prev = testResults.value[name]
+  const list = Array.isArray(prev?.results) ? prev.results.filter(each => each.model !== modelId) : []
+  if (!list.length) {
+    testResults.value[name] = null
+    return
+  }
+  const passed = list.filter(each => each.ok).length
+  testResults.value[name] = {
+    ok: passed > 0,
+    model: modelId,
+    total: list.length,
+    passed,
+    failed: list.length - passed,
+    results: list
+  }
+}
+
+// 某个模型是不是正在测（按钮文案要变「停止」）
+function isModelTesting(name, modelId) {
+  return testingModelId.value === modelId && testingName.value === name
+}
+
+// 单个模型的测试结果（按模型 id 查）：行内芯片上要显示它自己的耗时
+function modelTestOf(name, modelId) {
+  const results = testResults.value[name]?.results
+  if (!Array.isArray(results)) return null
+  return results.find(item => item.model === modelId) || null
+}
+
+// 一条测试结果里「响应时间」取哪个字段。
+// 与「渠道账号 → 已开启模型」同一口径：优先 latency（服务端一直都有这个字段），
+// 再退 ttfbMs / totalMs。以前只读 ttfbMs，遇到不返回该字段的链路就退化成 "-"，
+// 而渠道页读 latency 从来没这个毛病。
+function responseMsOf(item) {
+  if (!item) return NaN
+  for (const key of ['latency', 'ttfbMs', 'totalMs']) {
+    // null / undefined / 空串必须跳过：Number(null) 是 0，会被当成「0 毫秒」这个
+    // 合法值收下，结果反而盖住了后面真正有数的字段
+    const raw = item[key]
+    if (raw === null || raw === undefined || raw === '') continue
+    const value = Number(raw)
+    if (Number.isFinite(value) && value >= 0) return value
+  }
+  return NaN
+}
+
+// 毫秒 → 秒（两位小数），与渠道页同口径
+function formatMs(ms) {
+  const n = Number(ms)
+  if (!Number.isFinite(n)) return '-'
+  return `${(n / 1000).toFixed(2)}s`
+}
+
+// 一条测试结果的完整文案：`<模型引用> 连接成功 · 1.80s · 本次用量 N tokens`
+function testResultText(name, item) {
+  if (!item) return ''
+  const ref = testModelRef(name, item.model)
+  const seconds = formatMs(responseMsOf(item))
+  if (!item.ok) return `${ref} 连接失败 · ${seconds} · ${item.error || '未知原因'}`
+  const tokens = formatNumber(item.totalTokens ?? item.outputTokens ?? 0)
+  return `${ref} 连接成功 · ${seconds} · 本次用量 ${tokens} tokens`
+}
+
+// 结果里那串「模型引用」怎么写：
+//   · 渠道源（channels）的模型 id 自带渠道前缀（workbuddy/glm-5.3），本身就是完整引用，
+//     再拼一层 Provider 名会变成 channels/workbuddy/glm-5.3 —— 用户要的是 workbuddy/glm-5.3
+//   · 其余源（WorkBuddy 账号池、通用 Provider）的模型 id 是裸的，必须补上 Provider 名
+function testModelRef(name, modelId) {
+  const id = String(modelId || '')
+  if (!id) return name
+  return id.includes('/') ? id : `${name}/${id}`
 }
 
 // 「停止」：断开在途请求，而不是等它自己超时
@@ -772,7 +1007,23 @@ function stopTest() {
 onMounted(() => {
   loadModelData()
   loadModelHealth()
+  loadModelEfforts()
   openForOnboarding()
+})
+
+// 页面被 keep-alive 缓存后切走不卸载，onMounted 只跑一次。
+// 这一页没有轮询（配置类数据不该周期性打服务端），所以必须在切回来时主动补一次 ——
+// 否则在「渠道账号」里登录了新账号、启用/关闭了模型，回到这里看到的还是旧列表。
+// 首次挂载时 onActivated 紧跟 onMounted 触发，用标志位跳过，避免开页发两遍同样的请求。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  loadModelData()
+  loadModelHealth()
+  loadModelEfforts()
 })
 
 // 启动引导的「添加模型来源」直接落到新增弹窗上（?onboarding=add）。
@@ -1059,7 +1310,7 @@ function openForOnboarding() {
   color: var(--text-faint);
 }
 
-/* 测试结果内联展示 */
+/* 测试结果内联展示：只有「整组都没测成」这一句会用到这里 */
 .row-test {
   font-size: var(--fs-xs);
   padding: 6px 10px;
@@ -1067,6 +1318,64 @@ function openForOnboarding() {
   align-self: flex-start;
   max-width: 100%;
   word-break: break-all;
+}
+
+/* 模型芯片上的测试结论：状态点 + 耗时。
+   与「渠道账号 → 已开启模型」同一套观感，两处看到的是同一种东西 */
+.ch-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--bad-text);
+}
+
+.ch-dot.ok {
+  background: var(--ok-text);
+}
+
+.chip-latency {
+  font-size: var(--fs-mini);
+  font-variant-numeric: tabular-nums;
+  color: var(--ok-text);
+  white-space: nowrap;
+}
+
+.chip-latency-fail {
+  color: var(--bad-text);
+}
+
+/* 芯片上的单模型测试按钮：与「切换」同一套小按钮观感，
+   默认低调（它比切换低频），悬停才提亮 —— 免得一排「测」抢走注意力 */
+.chip-test {
+  flex: none;
+  padding: 0 5px;
+  height: 18px;
+  font-size: var(--fs-mini);
+  line-height: 1;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip-test:hover:not(:disabled) {
+  color: var(--text-1);
+  border-color: var(--primary);
+}
+
+.chip-test:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 正在测这个模型：主色描边，与旁边「停止」文案一起表明「点了会中止」 */
+.chip-test.testing {
+  color: var(--primary-text);
+  border-color: var(--primary);
+  background: var(--primary-bg);
 }
 
 .test-ok {

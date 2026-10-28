@@ -140,8 +140,16 @@ export function updateRules(rules) {
 }
 
 // model 为空时测试该 Provider 的默认模型（WorkBuddy 类型走真实对话，超时放宽）
-export function testProvider(name, model = '', signal) {
-  return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000, signal }).then(r => r.data)
+// 连通性测试。all=true 时服务端逐个测这个源的全部模型，返回 { all, results[] }，
+// 每条带上自己的响应时间与生成速度；只传 model 时仍是单模型口径。
+// 全量要串行跑完整个源的模型，超时放宽到 10 分钟（逐个 30s 上限 × 多模型）
+export function testProvider(name, model = '', signal, all = false) {
+  return api
+    .post(`/api/providers/${encodeURIComponent(name)}/test`, all ? { all: true } : { model }, {
+      timeout: all ? 600000 : 120000,
+      signal
+    })
+    .then(r => r.data)
 }
 
 // 用 URL + Key 直接探测上游模型清单（无状态：表单未保存也能用）
@@ -508,6 +516,12 @@ export async function channelsTest(payload = {}, signal) {
 // 失活台账（含原因与连续失败次数）；界面据此在模型上打「失活」标
 export function getModelHealth() {
   return api.get('/api/model-health').then(r => r.data)
+}
+
+// 各渠道模型探测到的思考档位：{ efforts: { '渠道/模型': [档位] }, fallback: [...] }。
+// 档位是模型能力而不是配置 —— 面板只读它决定下拉里给哪些选项
+export function getModelEfforts() {
+  return api.get('/api/model-efforts').then(r => r.data)
 }
 
 // 手动跑一轮余额/账号审计（刚充完值 / 刚启用账号时不用等下一轮定时器）

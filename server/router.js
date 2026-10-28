@@ -640,13 +640,31 @@ function isTransientTestError(error) {
   return TEST_TRANSIENT_RE.test(message) || TEST_TRANSIENT_RE.test(String(error?.code || ''))
 }
 
+// 测试结果的计时口径：一次测试有三个有意义的时间点，界面上都要能看到。
+//   ttfbMs    首字节到达（含选号 / 排队 / 上游思考）—— 用户感知的「响应时间」
+//   totalMs   整次调用耗时（含把 64 个 token 收完）
+//   genMs     纯生成耗时 = total - ttfb，从第一帧到收尾
+//   tps       生成速度 = 输出 token / genMs，单位 token/s
+// genMs 太短（< 50ms）时不报速度：除出来会是几百 tok/s 的假数字，
+// 那是「测试题太短」而不是模型真的那么快。
+function testTiming(completion, firstChunkMs, totalMs) {
+  const usage = upstream.extractUsage(completion, false) || upstream.emptyUsage()
+  const outputTokens = Number(usage.output) || 0
+  const ttfbMs = Number.isFinite(firstChunkMs) ? firstChunkMs : totalMs
+  const genMs = Math.max(0, totalMs - ttfbMs)
+  const tps = genMs >= 50 && outputTokens > 0 ? Math.round((outputTokens / (genMs / 1000)) * 10) / 10 : null
+  // latency 与 ttfbMs 同值：这是历史字段名，界面（含更早的客户端）一直读它，
+  // 少给一个就会显示成 "-"。两个名字都给，谁读哪个都拿得到数
+  return { latency: ttfbMs, ttfbMs, totalMs, genMs, outputTokens, tps }
+}
+
 // 渠道连通性测试（带一次抖动重试）：第二次仍失败就原样抛出，让界面看到真实原因。
 // 调用方不用关心重试，重试与否只看错误是传输层抖动还是业务结论。
 // signal：界面点「停止」时由调用方中止。测试请求要能真的断开在途上游调用 ——
 // 只置一个「别再试下一个」的标志，卡住的请求仍会占着连接直到超时。
-async function channelTestCompletion(model, signal) {
+async function channelTestCompletion(model, signal, onFirstChunk) {
   try {
-    return await channelTestAttempt(model, signal)
+    return await channelTestAttempt(model, signal, onFirstChunk)
   } catch (err) {
     if (signal?.aborted) throw err // 用户按了停止：不重试
     if (!isTransientTestError(err)) throw err
@@ -657,16 +675,29 @@ async function channelTestCompletion(model, signal) {
         reject(Object.assign(new Error('测试已取消'), { code: 'ABORT_ERR' }))
       }, { once: true })
     })
-    return channelTestAttempt(model, signal)
+    return channelTestAttempt(model, signal, onFirstChunk)
   }
 }
 
 // 一次尝试。WorkBuddy 的补全不走 worker（它的适配器只提供目录，
 // 见 worker.mjs），所以这里必须分流 —— 否则测试面板对 WorkBuddy 永远报
 // 「适配器未实现」，而真实请求其实是通的。
-async function channelTestAttempt(model, signal) {
+//
+// 计时口径：返回 { completion, firstChunkMs }。firstChunkMs 是「首字节到达」的时刻，
+// 界面上「响应时间」用它、「总耗时」用整次调用的耗时 —— 两个数分开才不会把
+// 排队 + 思考的时间混进生成速度里。
+async function channelTestAttempt(model, signal, onFirstChunk) {
   const bare = String(model || '').replace(/^[^/]+\//, '')
   const realm = channelWorkbuddyRealm(model)
+  const startedAt = Date.now()
+  // 只在第一次真正拿到内容时记一次，后续帧不覆盖
+  let firstAt = 0
+  const markFirst = () => {
+    if (firstAt) return
+    firstAt = Date.now()
+    onFirstChunk?.(firstAt - startedAt)
+  }
+
   if (realm) {
     if (!workbuddy.getRuntime()) throw new Error('WorkBuddy 运行时未初始化')
     let aggregated = null
@@ -682,7 +713,9 @@ async function channelTestAttempt(model, signal) {
       onDone: payload => { aggregated = payload }
     })
     if (!aggregated) throw new Error('WorkBuddy 未返回有效响应')
-    return aggregated
+    // 非流式聚合没有逐帧回调，首字节时间无从测量，按整次耗时回报
+    markFirst()
+    return { completion: aggregated, firstChunkMs: firstAt - startedAt }
   }
 
   const rt = channels.getRuntime()
@@ -691,8 +724,11 @@ async function channelTestAttempt(model, signal) {
   await rt.complete({
     model,
     openAi: { messages: [{ role: 'user', content: 'ping' }], max_tokens: 64, stream: false }
-  }, chunk => collector.push(chunk), signal)
-  return collector.completion()
+  }, chunk => {
+    markFirst()
+    collector.push(chunk)
+  }, signal)
+  return { completion: collector.completion(), firstChunkMs: firstAt ? firstAt - startedAt : Date.now() - startedAt }
 }
 
 // Channel 类型 Provider 的请求转发：十个免费账号渠道（LobsterAI / Qoder / TRAE /
@@ -716,6 +752,19 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
     : clientIsResponses
       ? wbResponses.toChat(req.body || {})
       : { ...(req.body || {}) }
+
+  // 模型级推理档位：与 WorkBuddy 链路口径一致 —— 配置了就覆盖客户端原值，
+  // 'off' 表示显式关掉思考（删字段），未配置则不干预客户端请求。
+  // 渠道适配器读的就是 openAi.reasoning_effort（Qoder 的 wasm 会把它转给上游）。
+  // 上面三个分支都返回新对象，改这里不会动到 req.body
+  const modelEffort = entry.model.reasoningEffort || ''
+  if (modelEffort === 'off') {
+    delete openAi.reasoning_effort
+    delete openAi.reasoningEffort
+  } else if (modelEffort) {
+    openAi.reasoning_effort = modelEffort
+    delete openAi.reasoningEffort // 上游只认 snake_case，避免重复字段
+  }
 
   // 客户端断开即取消上游：渠道包内部会释放该次请求占用的并发额度，
   // 不取消会让用户在界面里点了停止、上游却继续跑完。
@@ -1126,12 +1175,38 @@ app.post('/v1/messages', handleRequest)
 app.post('/v1/chat/completions', handleRequest)
 app.post('/v1/responses', handleRequest)
 
+// 思考档位兜底：渠道目录一个档位都没探测到时，给一组通用值
+// （与「模型来源」弹窗里给的那四档保持一致，客户端与面板看到的是同一套）
+const FALLBACK_EFFORTS = ['low', 'high', 'max', 'xhigh']
+
+// 当前目录里各模型探测到的思考档位并集。
+// /v1/models 只播报 auto 一个伪模型，档位只能声明在它身上 —— 客户端据此渲染
+// 档位选择器；具体档位在派发时仍按目标模型降级（payload 的 S11）。
+function declaredEfforts() {
+  const rows = channels.getRuntime()?.publicModelRows() || []
+  const union = autoStrategy.unionEfforts(rows.map(row => row.reasoning?.efforts))
+  return union.length ? union : FALLBACK_EFFORTS.slice()
+}
+
 // 只播报 auto 伪模型：真实模型与别名都不再暴露给客户端。
 // 客户端只需填 `auto`，具体挑哪个模型由服务端按当前策略（见 auto-strategy.js）决定——
 // 这样一来客户端配置里不会写死具体模型，切换策略/模型无需改客户端。
 // 同时避免某些客户端把列表第一项当默认值而选中某个真实模型。
 app.get('/v1/models', (req, res) => {
-  res.json({ object: 'list', data: autoStrategy.listAutoModels() })
+  res.json({ object: 'list', data: autoStrategy.listAutoModels(declaredEfforts()) })
+})
+
+// 各模型探测到的思考档位（供「模型来源」弹窗渲染档位下拉）。
+// 键与渠道目录的模型 id 一致（`<渠道>/<模型>`），channels 源里的模型 id 正是这个形状。
+// 读的是已采集的目录，不在这里触发上游拉取：弹窗打开不该等一次网络往返。
+app.get('/api/model-efforts', (req, res) => {
+  const rows = channels.getRuntime()?.publicModelRows() || []
+  const efforts = {}
+  for (const row of rows) {
+    if (!row?.id || !Array.isArray(row.reasoning?.efforts) || row.reasoning.efforts.length === 0) continue
+    efforts[row.id] = row.reasoning.efforts.slice()
+  }
+  res.json({ efforts, fallback: FALLBACK_EFFORTS.slice() })
 })
 
 // ==================== Anthropic token 计数（Claude Code 预估用）====================
@@ -1457,6 +1532,140 @@ app.post('/api/providers/:name', (req, res) => {
   res.json({ ok: true })
 })
 
+// 单个 provider 里单个模型的一次连通性测试。三条链路（渠道包 / WorkBuddy / 通用端点）
+// 各自协议不同，但**返回口径必须一致**：{ ok, latency, ttfbMs, totalMs, genMs, tps, ... }，
+// 否则「测试全部模型」那张表得按来源各写一套列。
+// 单个 provider 里单个模型的一次连通性测试。三条链路（渠道包 / WorkBuddy / 通用端点）
+// 各自协议不同，但**返回口径必须一致**，否则「测试全部」那张表得按来源各写一套列：
+//   ok        是否连通
+//   ttfbMs    首字节耗时（用户感知的响应时间）；失败时 = 整次尝试的耗时
+//   totalMs   整次调用耗时；失败时与 ttfbMs 相同
+//   genMs/tps 纯生成耗时与速度；拿不到逐帧数据时为 0 / null
+// 失败分支也必须带全这几个字段 —— 少一个，界面上那句「连接失败 · -」就会露出来。
+function failedTestResult(startedAt, error) {
+  const totalMs = Date.now() - startedAt
+  return { ok: false, error, latency: totalMs, ttfbMs: totalMs, totalMs, genMs: 0, tps: null }
+}
+
+async function runProviderTest(provider, name, item, signal) {
+  const ref = `${name}/${item.id}`
+  const startedAt = Date.now()
+  let firstChunkMs = NaN
+  const onFirstChunk = ms => { firstChunkMs = ms }
+
+  // Channel 类型：交给渠道包的适配器发一次真实短对话（换号与限流在包内闭环）
+  if (models.isChannelProvider(provider)) {
+    // 已失活模型不测：用户以为测试会重新路由到它，恢复后才有意义
+    if (modelHealth.isOffline(ref)) {
+      return failedTestResult(startedAt, '该模型已失活，请先恢复再测')
+    }
+    try {
+      const attempt = await channelTestCompletion(item.id, signal, onFirstChunk)
+      const message = attempt.completion.choices?.[0]?.message || {}
+      modelHealth.noteSuccess(ref)
+      const timing = testTiming(attempt.completion, firstChunkMs, Date.now() - startedAt)
+      const usage = upstream.extractUsage(attempt.completion, false) || upstream.emptyUsage()
+      return {
+        ok: true,
+        ...timing,
+        latency: timing.ttfbMs,
+        reply: (message.content || message.reasoning_content || '').slice(0, 80),
+        finish: attempt.completion.choices?.[0]?.finish_reason,
+        // 用量统一给全：结果里那句「本次用量 N tokens」读的就是 totalTokens
+        inputTokens: usage.input,
+        outputTokens: usage.output,
+        cacheReadTokens: usage.cacheRead,
+        cacheWriteTokens: usage.cacheWrite,
+        totalTokens: upstream.usageTotalOrNull(usage) ?? timing.outputTokens ?? 0
+      }
+    } catch (err) {
+      if (signal.aborted) throw err
+      return failedTestResult(startedAt, err.message)
+    }
+  }
+
+  // WorkBuddy 类型：通过账号池发一次真实短对话验证连通性
+  if (models.isWorkbuddyProvider(provider)) {
+    try {
+      let aggregated = null
+      await workbuddy.forwardChat({
+        // 限制输出长度以加快连通性测试（上游仍强制流式，此处由本地聚合为单响应）
+        body: JSON.stringify({ model: item.id, messages: [{ role: 'user', content: 'hi' }], stream: false, max_tokens: 32 }),
+        isStream: false,
+        model: item.id,
+        // 按该源区域测试：国内源不能用国际账号验证（反之亦然）
+        realm: models.providerRegion(provider),
+        isAborted: () => signal.aborted,
+        onDone: payload => {
+          aggregated = payload
+        }
+      })
+      if (!aggregated) {
+        return failedTestResult(startedAt, '账号池未返回有效响应')
+      }
+      modelHealth.noteSuccess(ref)
+      // 非流式聚合拿不到逐帧时刻：首字节时间按整次耗时回报，速度不虚报
+      const timing = testTiming(aggregated, Date.now() - startedAt, Date.now() - startedAt)
+      const usage = upstream.extractUsage(aggregated, false) || upstream.emptyUsage()
+      return {
+        ok: true,
+        ...timing,
+        latency: timing.ttfbMs,
+        status: 200,
+        inputTokens: usage.input,
+        outputTokens: usage.output,
+        cacheReadTokens: usage.cacheRead,
+        cacheWriteTokens: usage.cacheWrite,
+        totalTokens: upstream.usageTotalOrNull(usage)
+      }
+    } catch (err) {
+      if (signal.aborted) throw err
+      return failedTestResult(startedAt, err.message)
+    }
+  }
+
+  // 通用 Provider：优先测 Anthropic 端点，没有则测 OpenAI
+  const testAnthropic = !!provider.baseURL
+  const maxTokens = item.maxOutput ? Math.min(32, item.maxOutput) : 32
+  const testBody = {
+    model: item.id,
+    max_tokens: maxTokens,
+    messages: [{ role: 'user', content: 'hi' }]
+  }
+  try {
+    const url = upstream.resolveEndpoint(provider, testAnthropic)
+    if (!url) {
+      return failedTestResult(startedAt, '未配置可用的端点 URL')
+    }
+    const headers = upstream.resolveHeaders(provider, testAnthropic)
+    const response = await axios.post(url, testBody, { headers, timeout: 30000, signal })
+    modelHealth.noteSuccess(ref)
+    const totalMs = Date.now() - startedAt
+    const usage = upstream.extractUsage(response.data, testAnthropic) || upstream.emptyUsage()
+    // 连通性测试不写入正式用量统计，避免污染数据。
+    // 非流式请求没有首字节时刻，速度按整次耗时算（不分帧，宁可保守）
+    return {
+      ok: true,
+      latency: totalMs,
+      ttfbMs: totalMs,
+      totalMs,
+      genMs: 0,
+      tps: null,
+      status: response.status,
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cacheReadTokens: usage.cacheRead,
+      cacheWriteTokens: usage.cacheWrite,
+      totalTokens: upstream.usageTotalOrNull(usage)
+    }
+  } catch (err) {
+    if (signal.aborted) throw err
+    const status = err.response?.status || 0
+    const message = err.response?.data?.error?.message || err.message || '连接失败'
+    return { ...failedTestResult(startedAt, message), status }
+  }
+}
+
 app.post('/api/providers/:name/test', async (req, res) => {
   const config = getConfig()
   const { name } = req.params
@@ -1475,127 +1684,51 @@ app.post('/api/providers/:name/test', async (req, res) => {
 
   const requestedId = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
   const model = (requestedId && provider.models.find(m => m.id === requestedId)) || provider.models[0]
+  // all=true：一次请求测这个源的**全部**模型，每个模型回一条带响应时间的结果。
+  //
+  // 面板上的「测试全部」走的是**前端逐个发单模型请求**，没走这里 —— 因为同一账号
+  // 连着打几个模型会被上游限流（表现为「服务端一口气跑全失败、单个测却成功」），
+  // 前端逐个发才能在模型之间插入间隔与限流退避。
+  // 这个分支保留给脚本 / 第三方客户端：一次调用拿到整源结果，它们不必自己写循环。
+  const testAll = req.body?.all === true && !requestedId
 
   // 「停止」：前端 abort 请求 → res 关闭 → 中止在途上游调用。
   // 不主动 removeListener：res 是一次性的，注册完随请求一起回收。
   const controller = new AbortController()
   res.on('close', () => { if (!res.writableEnded) controller.abort() })
 
-  // Channel 类型：交给渠道包的适配器发一次真实短对话（换号与限流在包内闭环）
-  if (models.isChannelProvider(provider)) {
-    const start = Date.now()
-    // 与 /api/channels/test 同口径：已失活模型不再作为测试候选，避免
-    // 用户以为测试会重新路由到它；手动恢复后才可再次测试。
-    const eligible = provider.models.filter(item => !modelHealth.isOffline(`${name}/${item.id}`))
-    const candidates = requestedId
-      ? (eligible.some(item => item.id === model.id) ? [model.id] : [])
-      : eligible.slice(0, 3).map(m => m.id)
-    if (!candidates.length) {
-      const why = requestedId && modelHealth.isOffline(`${name}/${model.id}`)
-        ? '该模型已失活，请先恢复再测'
-        : '没有可测模型：模型均已失活，请先恢复'
-      return res.json({ ok: false, error: why, latency: 0 })
+  // 全量模式：一个源一个 HTTP 请求，边测边把已有结果刷回去太复杂，
+  // 这里一次跑完统一返回 —— 但每个模型都带自己的耗时，界面上逐条显示
+  if (testAll) {
+    const results = []
+    for (const item of provider.models) {
+      if (controller.signal.aborted) break
+      const single = await runProviderTest(provider, name, item, controller.signal)
+      results.push({ model: item.id, ...single })
     }
-    const tried = []
-    for (const id of candidates) {
-      if (controller.signal.aborted) return
-      try {
-        const completion = await channelTestCompletion(id, controller.signal)
-        const message = completion.choices?.[0]?.message || {}
-        modelHealth.noteSuccess(`${name}/${id}`)
-        return res.json({
-          ok: true,
-          latency: Date.now() - start,
-          model: id,
-          reply: (message.content || message.reasoning_content || '').slice(0, 80),
-          tried
-        })
-      } catch (err) {
-        if (controller.signal.aborted) return
-        tried.push({ model: id, error: err.message })
-      }
-    }
-    const last = tried[tried.length - 1]
-    return res.json({ ok: false, error: last.error, latency: Date.now() - start, model: last.model, tried })
-  }
-
-  // WorkBuddy 类型：通过账号池发一次真实短对话验证连通性
-  if (models.isWorkbuddyProvider(provider)) {
-    const start = Date.now()
-    try {
-      let aggregated = null
-      await workbuddy.forwardChat({
-        // 限制输出长度以加快连通性测试（上游仍强制流式，此处由本地聚合为单响应）
-        body: JSON.stringify({ model: model.id, messages: [{ role: 'user', content: 'hi' }], stream: false, max_tokens: 32 }),
-        isStream: false,
-        model: model.id,
-        // 按该源区域测试：国内源不能用国际账号验证（反之亦然）
-        realm: models.providerRegion(provider),
-        isAborted: () => controller.signal.aborted,
-        onDone: payload => {
-          aggregated = payload
-        }
-      })
-      const latency = Date.now() - start
-      if (!aggregated) return res.json({ ok: false, error: '账号池未返回有效响应', latency, model: model.id })
-      modelHealth.noteSuccess(`${name}/${model.id}`)
-      const usage = upstream.extractUsage(aggregated, false) || upstream.emptyUsage()
-      return res.json({
-        ok: true,
-        latency,
-        status: 200,
-        model: model.id,
-        inputTokens: usage.input,
-        outputTokens: usage.output,
-        cacheReadTokens: usage.cacheRead,
-        cacheWriteTokens: usage.cacheWrite,
-        totalTokens: upstream.usageTotalOrNull(usage)
-      })
-    } catch (err) {
-      if (controller.signal.aborted) return
-      return res.json({ ok: false, error: err.message, latency: Date.now() - start, model: model.id })
-    }
-  }
-
-  // 测试：优先测 Anthropic 端点，没有则测 OpenAI；URL 与请求头复用统一封装，避免尾斜杠拼出双斜杠
-  const testAnthropic = !!provider.baseURL
-  const maxTokens = model.maxOutput ? Math.min(32, model.maxOutput) : 32
-  const testBody = {
-    model: model.id,
-    max_tokens: maxTokens,
-    messages: [{ role: 'user', content: 'hi' }]
-  }
-
-  const start = Date.now()
-  try {
-    const url = upstream.resolveEndpoint(provider, testAnthropic)
-    if (!url) {
-      return res.json({ ok: false, error: '未配置可用的端点 URL', latency: 0 })
-    }
-    const headers = upstream.resolveHeaders(provider, testAnthropic)
-    const response = await axios.post(url, testBody, { headers, timeout: 30000, signal: controller.signal })
-    modelHealth.noteSuccess(`${name}/${model.id}`)
-    const latency = Date.now() - start
-    const usage = upstream.extractUsage(response.data, testAnthropic) || upstream.emptyUsage()
-
-    // 连通性测试不写入正式用量统计，避免污染数据
-    res.json({
-      ok: true,
-      latency,
-      status: response.status,
-      model: model.id,
-      inputTokens: usage.input,
-      outputTokens: usage.output,
-      cacheReadTokens: usage.cacheRead,
-      cacheWriteTokens: usage.cacheWrite,
-      totalTokens: upstream.usageTotalOrNull(usage)
+    const passed = results.filter(r => r.ok).length
+    return res.json({
+      ok: passed > 0,
+      all: true,
+      total: results.length,
+      passed,
+      failed: results.length - passed,
+      results,
+      // 兼容单模型口径的字段：整组的「响应时间」取第一个成功模型的，全部失败取最后一条
+      latency: (results.find(r => r.ok) || results[results.length - 1] || {}).latency || 0,
+      model: (results.find(r => r.ok) || results[results.length - 1] || {}).model || ''
     })
+  }
+
+  // 单模型模式：请求点名了某个模型，或该源只有一个模型
+  const target = provider.models.find(m => m.id === model.id) || provider.models[0]
+  try {
+    const single = await runProviderTest(provider, name, target, controller.signal)
+    return res.json({ model: target.id, ...single })
   } catch (err) {
-    const latency = Date.now() - start
+    // 只有「用户点了停止」会抛到这里：响应已收尾，不再写
     if (controller.signal.aborted) return
-    const status = err.response?.status || 0
-    const message = err.response?.data?.error?.message || err.message || '连接失败'
-    res.json({ ok: false, error: message, status, latency, model: model.id })
+    res.json({ model: target.id, ...failedTestResult(Date.now(), err.message) })
   }
 })
 
@@ -3004,17 +3137,23 @@ app.post('/api/channels/test', async (req, res) => {
   for (const model of candidates) {
     if (controller.signal.aborted) return
     const attemptStart = Date.now()
+    // 首字节时间由 attempt 内的帧回调给出（换号重试时以最后一次为准）
+    let firstChunkMs = NaN
     try {
-      const completion = await channelTestCompletion(model, controller.signal)
+      const attempt = await channelTestCompletion(model, controller.signal, ms => { firstChunkMs = ms })
+      const completion = attempt.completion
       const message = completion.choices?.[0]?.message || {}
       // 测试通过 = 这个模型此刻真的能调：顺手清掉「连续失败」的失活标记，
       // 否则用户只能去别处点恢复
       const ref = channelModelRef(model)
       if (ref) modelHealth.noteSuccess(ref)
+      const timing = testTiming(completion, firstChunkMs, Date.now() - attemptStart)
       return res.json({
         ok: true,
         model,
-        latency: Date.now() - attemptStart,
+        // latency 保留原名（界面旧版本与渠道页历史数据都读它），语义是「首字节响应时间」
+        latency: timing.ttfbMs,
+        ...timing,
         // 正文为空时退回 reasoning：只要上游真回了内容，就说明链路是通的
         reply: (message.content || message.reasoning_content || '').slice(0, 80),
         finish: completion.choices?.[0]?.finish_reason,
