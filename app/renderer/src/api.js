@@ -86,12 +86,10 @@ export function getTokenStats() {
   return api.get('/api/token-stats').then(r => r.data)
 }
 
-export function getTokenStatsToday() {
-  return api.get('/api/token-stats/today').then(r => r.data)
-}
-
-export function getTokenStatsMonth() {
-  return api.get('/api/token-stats/month').then(r => r.data)
+// 状态面板四个时间维度（当日 / 本月 / 近三月 / 本年），一次请求取回。
+// 月维度由服务端按月汇总桶聚合，前端不再自己把按日明细加起来
+export function getTokenStatsRange() {
+  return api.get('/api/token-stats/range').then(r => r.data)
 }
 
 export function getTokenStatsByModel(modelName) {
@@ -108,6 +106,12 @@ export function getTokenStatsHourly(date) {
   return api.get(`/api/token-stats/hourly/${date}`).then(r => r.data)
 }
 
+// 按日历边界取用量统计（week / month / quarter / year），带回逐天明细。
+// 「本日」走 getTokenStatsHourly：它要按小时画图，粒度与这里不同
+export function getTokenStatsCalendar(range) {
+  return api.get(`/api/token-stats/calendar/${range}`).then(r => r.data)
+}
+
 // 清空全部 Token 统计（不可恢复）
 export function clearTokenStats() {
   return api.delete('/api/stats').then(r => r.data)
@@ -122,13 +126,22 @@ export function getRules() {
   return api.get('/api/rules').then(r => r.data)
 }
 
+// Auto 策略：auto 请求按哪一档口径挑模型（综合 / 延迟 / 成本 / 并发）
+export function getAutoStrategy() {
+  return api.get('/api/auto-strategy').then(r => r.data)
+}
+
+export function updateAutoStrategy(strategy) {
+  return api.put('/api/auto-strategy', { strategy }).then(r => r.data)
+}
+
 export function updateRules(rules) {
   return api.put('/api/rules', rules).then(r => r.data)
 }
 
 // model 为空时测试该 Provider 的默认模型（WorkBuddy 类型走真实对话，超时放宽）
-export function testProvider(name, model = '') {
-  return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000 }).then(r => r.data)
+export function testProvider(name, model = '', signal) {
+  return api.post(`/api/providers/${encodeURIComponent(name)}/test`, { model }, { timeout: 120000, signal }).then(r => r.data)
 }
 
 // 用 URL + Key 直接探测上游模型清单（无状态：表单未保存也能用）
@@ -153,6 +166,21 @@ export function updateServerConfig(config) {
 
 export function restartServer() {
   return api.post('/api/restart').then(r => r.data)
+}
+
+// 配置备份：导出含明文 apiKey 与账号凭据，导入是覆盖式（服务端先自动快照）
+// 导入要重建账号池与渠道 worker，耗时可能到十几秒，单独放宽超时
+export function exportConfig() {
+  return api.get('/api/config/export', { timeout: 60000 }).then(r => r.data)
+}
+
+export function importConfig(payload) {
+  return api.post('/api/config/import', payload, { timeout: 120000 }).then(r => r.data)
+}
+
+// 清空配置：抹掉模型来源、规则与账号凭据（服务端设置保留），需重建运行时
+export function clearConfig() {
+  return api.post('/api/config/clear', null, { timeout: 120000 }).then(r => r.data)
 }
 
 export function getFallback() {
@@ -364,7 +392,7 @@ export function wbEnabledModels(region) {
   return api.get('/api/workbuddy/models/enabled', { params }).then(r => r.data)
 }
 
-// 保存启用模型清单（按区域写入，并只同步同区域的 workbuddy Provider）
+// 保存启用模型清单（按区域写入，并刷新渠道源里 WorkBuddy 的模型目录）
 export function wbSaveEnabledModels(models, region) {
   const body = { models, region: region === 'global' ? 'global' : 'cn' }
   return api.post('/api/workbuddy/models/enabled', body, { timeout: 60000 }).then(r => r.data)
@@ -427,6 +455,76 @@ export function wbCompensationClaimAll() {
 // 单号领取补偿
 export function wbCompensationClaim(uid) {
   return api.post(`/api/workbuddy/accounts/${encodeURIComponent(uid)}/compensation`, {}, { timeout: 120000 }).then(r => r.data)
+}
+
+// ==================== 十个账号渠道 ====================
+
+// 渠道运行时状态（ready / failed / unavailable）+ 目录里的模型数
+export function channelsStatus() {
+  return api.get('/api/channels/status').then(r => r.data)
+}
+
+// 重新采集渠道目录并同步进 channels 源（登录成功后调用；平时由服务端排程自动做）
+export function channelsRefresh() {
+  return api.post('/api/channels/refresh', {}, { timeout: 120000 }).then(r => r.data)
+}
+
+// 渠道管理 RPC：方法名与 payload 由渠道包自己的方法表定义（后端原样透传），
+// 这里只负责剥掉两层 { ok, result: { ok, value } }，并把失败变成可 catch 的 Error
+export async function channelsRpc(method, payload = {}, timeout = 120000) {
+  let data
+  try {
+    ({ data } = await api.post('/api/channels/rpc', { method, payload }, { timeout }))
+  } catch (err) {
+    // 服务端把渠道包的错误翻成 4xx/5xx + { ok:false, error }，优先用它给出的文案
+    throw new Error(err.response?.data?.error || err.message)
+  }
+  if (!data?.ok) throw new Error(data?.error || '渠道接口调用失败')
+  const result = data.result
+  // 渠道包的响应是 { ok:true, value } / { ok:false, error:{message} }，两层都要判
+  if (result?.ok !== true) throw new Error(result?.error?.message || '渠道接口返回失败')
+  return result.value
+}
+
+// 渠道连通性测试：拿账号池里第一个可用模型发一次真实短对话
+// payload: { provider?, model? } —— 都不给时服务端依次试前几个候选模型
+// signal：调用方中止（界面「停止」）时同时中止服务端的在途上游调用
+export async function channelsTest(payload = {}, signal) {
+  try {
+    const { data } = await api.post('/api/channels/test', payload, { timeout: 180000, signal })
+    return data
+  } catch (err) {
+    // 主动中止不是测试结果：交给调用方按 abort 处理
+    if (signal?.aborted) throw err
+    // 「账号池里还没有可用模型」这类失败服务端回 400 + { ok:false, error }，
+    // 它是一次测试结果而不是网络异常，交给调用方按结果渲染
+    if (err.response && err.response.data) return err.response.data
+    throw err
+  }
+}
+
+// ==================== 模型失活 ====================
+
+// 失活台账（含原因与连续失败次数）；界面据此在模型上打「失活」标
+export function getModelHealth() {
+  return api.get('/api/model-health').then(r => r.data)
+}
+
+// 手动跑一轮余额/账号审计（刚充完值 / 刚启用账号时不用等下一轮定时器）
+export function auditModelHealth() {
+  return api.post('/api/model-health/audit', {}, { timeout: 120000 }).then(r => r.data)
+}
+
+export function reviveModel(ref) {
+  return api.post('/api/model-health/revive', { ref }).then(r => r.data)
+}
+
+// ==================== 渠道账号停用原因 ====================
+
+// 账号被上游禁用的原话（渠道包的 account.update 只有 enabled，原因存在
+// AiRoute 自己的台账里）；界面据此在账号行上打标签
+export function getAccountHealth() {
+  return api.get('/api/account-health').then(r => r.data)
 }
 
 // ==================== 更新检查 ====================

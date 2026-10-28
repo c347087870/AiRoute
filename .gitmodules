@@ -1,0 +1,3 @@
+[submodule "vendor/dsh-our-free-model"]
+	path = vendor/dsh-our-free-model
+	url = https://github.com/Ebony-Vinyl/dsh-our-free-model

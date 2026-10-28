@@ -1,7 +1,5 @@
 <template>
   <div class="routing">
-    <h1 class="page-title">路由规则</h1>
-
     <div v-if="!hasModels" class="warning-box">
       请先在 Provider 管理中配置至少一个模型，否则无法选择路由目标。
     </div>
@@ -19,7 +17,7 @@
                 <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </optgroup>
             </select>
-            <button class="btn-primary" @click="saveFallback">保存</button>
+            <AppButton variant="primary" @click="saveFallback">保存</AppButton>
           </div>
         </div>
         <div class="config-hint">
@@ -58,11 +56,11 @@
               <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </optgroup>
           </select>
-          <button class="btn-danger" @click="removeRule(i)" v-if="rule.condition !== 'default'">删除</button>
+          <AppButton variant="danger" @click="removeRule(i)" v-if="rule.condition !== 'default'">删除</AppButton>
         </div>
         <div class="section-actions">
-          <button class="btn-ghost" @click="addRule">+ 添加规则</button>
-          <button class="btn-primary" @click="saveAll('路由规则已保存')">保存路由规则</button>
+          <AppButton variant="secondary" @click="addRule">+ 添加规则</AppButton>
+          <AppButton variant="primary" @click="saveAll('路由规则已保存')">保存路由规则</AppButton>
         </div>
       </div>
     </div>
@@ -81,11 +79,11 @@
               <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </optgroup>
           </select>
-          <button class="btn-danger" @click="removeCustomRule(i)">删除</button>
+          <AppButton variant="danger" @click="removeCustomRule(i)">删除</AppButton>
         </div>
         <div class="section-actions">
-          <button class="btn-ghost" @click="addCustomRule">+ 添加匹配规则</button>
-          <button class="btn-primary" @click="saveAll('匹配规则已保存')">保存匹配规则</button>
+          <AppButton variant="secondary" @click="addCustomRule">+ 添加匹配规则</AppButton>
+          <AppButton variant="primary" @click="saveAll('匹配规则已保存')">保存匹配规则</AppButton>
         </div>
       </div>
     </div>
@@ -98,6 +96,7 @@ import { getProviders, getRules, updateRules, getFallback, updateFallback } from
 import { showToast } from '../composables/useToast.js'
 import { buildModelGroups, listModels, resolveRefLabel } from '../utils/models.js'
 
+import AppButton from '../components/AppButton.vue'
 const providers = ref({}) // Provider 配置表，键为 provider 名
 const fallbackModel = ref('') // 兜底模型引用（provider/model），空字符串表示不启用兜底
 const rules = ref([]) // 智能路由规则列表
@@ -202,72 +201,21 @@ onMounted(loadData)
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 24px;
-  color: var(--text-1);
-}
 
-.section {
-  margin-bottom: 28px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
-.config-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border-2);
-}
 
-.config-row:last-of-type {
-  border-bottom: none;
-}
 
-.config-label {
-  width: 200px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-1);
-  flex-shrink: 0;
-}
 
-.config-control {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
-.config-hint {
-  font-size: 12px;
-  color: var(--text-3);
-  padding: 4px 0 8px;
-}
 
-.warning-box {
-  background: var(--tint-warning);
-  border: 1px solid var(--warning);
-  color: var(--warning-text);
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  margin-bottom: 16px;
-}
 
 .fallback-select {
   width: 260px;
 }
 
 .rule-hint {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-3);
   padding: 8px 0;
 }
@@ -294,21 +242,21 @@ onMounted(loadData)
 
 .rule-arrow {
   color: var(--text-3);
-  font-size: 16px;
+  font-size: var(--fs-section);
 }
 
 .custom-label {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
   white-space: nowrap;
 }
 
 .custom-keyword {
   width: 160px;
-  padding: 8px 12px;
-  border-radius: 10px;
+  padding: 0 12px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-3);
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 .section-actions {

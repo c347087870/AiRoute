@@ -103,11 +103,15 @@ function oauthHeaders(opts = {}) {
 }
 
 // 步骤①：取授权 URL
+// 取链接的主机决定授权页品牌：国内版挂官网域（workbuddy.cn），国际版仍走 chatBase（workbuddy.ai）。
+// 走 chatBaseCN 覆盖：用户显式指定过 chat 端点时照旧跟随（与其余端点同一口径）
 async function oauthStart(opts = {}) {
+  const global = opts.realm === 'global'
+  const stateBase = global ? headersMod.chatBaseOf(null, opts) : (opts.chatBaseCN || C.OAUTH_STATE_HOST_CN)
   const data = await sendEnvelope({
     method: 'POST',
-    url: `${headersMod.chatBaseOf(null, opts)}${C.OAUTH_STATE_PATH}?platform=CLI`,
-    headers: oauthHeaders(opts),
+    url: `${stateBase}${C.OAUTH_STATE_PATH}?platform=CLI`,
+    headers: oauthHeaders(global ? opts : { ...opts, originReferer: opts.originReferer || stateBase }),
     data: {},
     timeoutMs: 30000
   })

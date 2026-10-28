@@ -1,6 +1,6 @@
 ---
 name: release
-description: 用于 AiRoute 发版收尾——建 PR → 合并 → 打 tag 触发 CI 打包并创建 GitHub Release。当用户说「发版 / 发布 / release / create pr && merge && release」时使用。前提：改动已在分支上、本地构建与测试已通过。构建、测试、产物命名规则见 README 的「开发与打包」与 CHANGELOG。
+description: 用于 AiRoute 发版收尾——建 PR → 合并 → 打 tag 触发 CI 打包并创建 GitHub Release 草稿（草稿需手动发布）。当用户说「发版 / 发布 / release / create pr && merge && release」时使用。前提：改动已在分支上、本地构建与测试已通过。构建、测试、产物命名规则见 README 的「开发与打包」与 CHANGELOG。
 ---
 
 # AiRoute 发版（PR → 合并 → 发布）
@@ -94,9 +94,11 @@ git checkout main && git pull --ff-only \
 | --- | --- |
 | `测试与版本校验` | `npm test` + `npm run test:e2e` + tag ↔ `package.json` 校验（允许 tag 带 `-` 后缀，如 `-beta.1`） |
 | `构建 (mac)` / `构建 (win)` | `npm run build` → `verify-release.js` → 收集 `app/release` 的产物 |
-| `创建 Release` | 用 `AiRoute-<版本>-x64-portable.exe` 复制 `AiRoute.exe`（旧名兼容）→ `sha256sum *` 生成 `SHA256SUMS.txt` → `gh release create --generate-notes`（tag 含 `-` 则加 `--prerelease`） |
+| `创建 Release（正式版草稿 / beta 直接发 pre-release）` | 用 `AiRoute-<版本>-x64-portable.exe` 复制 `AiRoute.exe`（旧名兼容）→ `sha256sum *` 生成 `SHA256SUMS.txt` → 正式版 `gh release create --generate-notes --draft`（人工 Publish）；带 `-` 后缀的 beta 版 `gh release create --generate-notes --prerelease`，**直接发布、不建草稿** |
 
-Release 已存在时改为 `gh release upload --clobber` 覆盖资产。
+草稿同样能按 tag 查到（gh 走 GraphQL 查 draft），重跑 workflow 时改为 `gh release upload --clobber` 覆盖资产，**草稿状态不变**。草稿不会出现在 `/releases/latest` 与公开列表中，所以已发布的旧客户端检测不到它——这正是正式版要人工确认后再发布的原因。
+
+**beta 版为什么不建草稿**：客户端按版本号分两条更新线路（正式版只看正式发布，预发布版只看 pre-release，见 `server/update.js` 的 `releaseLine`）。草稿对匿名调用**完全不可见**——资产下载一律 404，`/releases` 列表里也不出现；beta 客户端因此永远查不到它。beta 版必须直接发布成 pre-release 才走得到线上。
 
 `workflow_dispatch` 用**分支** ref 触发只构建；用 **tag** ref 触发仍会走 `创建 Release`。
 
@@ -112,6 +114,10 @@ curl -s -H "Authorization: token $TOKEN" \
 
 完成判据：`创建 Release` 成功，Release 上有 8 个资产（4 个 Windows exe、2 个 dmg、`AiRoute.exe`、`SHA256SUMS.txt`），且 `SHA256SUMS.txt` 与其余资产一一对应。
 
+**正式版发布是人工的一步**：核对资产与 SHA256 后执行 `gh release edit "v$VERSION" --draft=false`（或网页点 Publish）。在此之前正式线客户端不会看到新版本；不要为了「让更新生效」绕开草稿直接改发布状态，也不要重复上传。
+
+**beta 版不需要人工发布**：CI 已经把 pre-release 发出来了，beta 客户端立刻能查到。要撤回就 `gh release edit "v$VERSION" --prerelease=false --draft=true` 改回草稿（草稿对客户端重新不可见）。
+
 **校验一律以 Release 的 `SHA256SUMS.txt` 为准**——CI 会重新打包，本地 `verify-release.js` 算出的 SHA256 与线上必然不同。本地 SHA 只能证明配置正确，不能写进发布说明当线上值。
 
 收尾：`rm -f /tmp/release-*`，确认 `git status --short` 没有残留。
@@ -119,6 +125,7 @@ curl -s -H "Authorization: token $TOKEN" \
 ## 硬约束（违反会直接坏发布）
 
 - 便携版命名规则是 `AiRoute-<版本>-<arch>-portable.exe`、安装版 `-setup.exe`。改名必须同步 `server/update.js` 的 `PORTABLE_SUFFIX` / `SETUP_SUFFIX`，`scripts/test-workbuddy.js` 有「产物名 ↔ 更新拼名」一致性断言，不同步会红。
+- **beta 版不要建草稿**：客户端按版本号分两条线路（正式版只看正式发布，预发布版只看 pre-release）。草稿对匿名调用不可见，beta 客户端永远查不到。正式版保持草稿 + 人工 Publish。
 - 不要把 `nsis` / `portable` 的 `buildUniversalInstaller` 改成 `true`：会多出丢掉 `${arch}` 的 `AiRoute-<版本>-setup.exe`，与更新拼名对不上。
 - 不要改回按进程名 `taskkill`：`scripts/build.js` 只结束 `app/dist-electron` / `app/release` 下的实例，避免顶掉用户正在运行的 AiRoute。
 - 不要复用已发布的 tag；不要用本地 SHA256 当线上校验值；不要把 `/tmp` 之外的一次性文件（PR body、API 响应）提交进仓库。

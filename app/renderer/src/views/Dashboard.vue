@@ -1,173 +1,89 @@
 <template>
   <div class="dashboard">
-    <h1 class="page-title">状态面板</h1>
-
-    <div class="stats-grid">
-      <div class="card stat-card">
-        <div class="stat-label">当前模型</div>
-        <div class="stat-value primary">{{ currentModelLabel }}</div>
-      </div>
-      <div class="card stat-card">
-        <div class="stat-label">Router 状态</div>
-        <div class="stat-value" :class="isOnline ? 'green' : 'red'">
-          {{ isOnline ? '运行中' : '离线' }}
-        </div>
-      </div>
-      <div class="card stat-card">
-        <div class="stat-label">请求数</div>
-        <div class="stat-value">{{ formatNumber(stats.todayRequests) }} / {{ formatNumber(stats.totalRequests) }}</div>
-        <div class="stat-subtitle">今日 / {{ retentionLabel }}</div>
-        <div
-          class="stat-failed"
-          :title="`今日失败 ${stats.todayFailed} 次，${retentionLabel}失败 ${stats.totalFailed} 次（与 Token 统计同源）`"
-        >
-          失败 {{ formatNumber(stats.todayFailed) }} / {{ formatNumber(stats.totalFailed) }}
-        </div>
-      </div>
+    <!-- 时间维度：默认「当日」，切档后请求数与用量概览一起换口径 ——
+         页面上的数字必须属于同一个区间，否则「请求数」和「用量」会各说各话 -->
+    <div class="page-toolbar dashboard-toolbar">
+      <SegmentedTabs
+        v-model="selectedRange"
+        :options="RANGE_TABS"
+        label="状态面板时间维度"
+      />
     </div>
 
-    <!-- Token 统计面板 -->
+    <!-- 用量概览：当前区间只展示一份，输入 / 命中缓存 / 输出 + 命中率，
+         缓存写明细与趋势图在用量统计页。请求数与用量概览并排放在同一行 -->
     <div class="section">
       <div class="section-header">
-        <h2 class="section-title">Token 使用统计</h2>
-        <button class="btn-ghost btn-sm" @click="refreshTokenStats" :disabled="tokenStatsRefreshing">
-          {{ tokenStatsRefreshing ? '刷新中...' : '刷新' }}
-        </button>
+        <h2 class="section-title">用量概览</h2>
+        <router-link class="link-more" to="/token-stats">用量统计 →</router-link>
       </div>
-      <div class="token-stats-grid">
-        <div class="card token-stat-card">
-          <div class="token-stat-header">
-            <span class="token-stat-title">今日用量</span>
-            <span class="token-badge today">今天</span>
+      <div class="usage-grid">
+        <div class="card stat-card">
+          <div class="stat-label">请求数</div>
+          <AnimatedNumber class="stat-value" :value="periodStats.requests" />
+          <div
+            class="stat-subtitle"
+            :title="`${currentRange.label}成功 ${formatNumber(periodStats.count)} 次、失败 ${formatNumber(periodStats.failed)} 次；请求数 = 成功 + 失败，与用量统计同源`"
+          >
+            {{ currentRange.label }} · 失败 {{ formatNumber(periodStats.failed) }}
           </div>
-          <div class="token-stat-values">
-            <div class="token-stat-item" v-for="item in todayUsage" :key="item.key">
-              <div class="token-stat-label">{{ item.label }}</div>
-              <div class="token-stat-number" :class="item.color">{{ formatNumber(item.value) }}</div>
+        </div>
+        <div class="card usage-card">
+          <div class="usage-group">
+            <div class="usage-total">
+              <AnimatedNumber class="usage-total-value" :value="usageGroup.total" />
+              <span class="usage-total-unit">Token</span>
             </div>
-          </div>
-        </div>
-
-        <div class="card token-stat-card">
-          <div class="token-stat-header">
-            <span class="token-stat-title">本月用量</span>
-            <span class="token-badge month">本月</span>
-          </div>
-          <div class="token-stat-values">
-            <div class="token-stat-item" v-for="item in monthUsage" :key="item.key">
-              <div class="token-stat-label">{{ item.label }}</div>
-              <div class="token-stat-number" :class="item.color">{{ formatNumber(item.value) }}</div>
+            <div class="usage-split">
+              <span class="usage-part">
+                <span class="usage-part-label">输入</span>
+                <span class="usage-part-value input"><AnimatedNumber :value="usageGroup.input" /></span>
+              </span>
+              <span class="usage-part">
+                <span class="usage-part-label">命中缓存</span>
+                <span class="usage-part-value cacheRead"><AnimatedNumber :value="usageGroup.cacheRead" /></span>
+              </span>
+              <span class="usage-part">
+                <span class="usage-part-label">输出</span>
+                <span class="usage-part-value output"><AnimatedNumber :value="usageGroup.output" /></span>
+              </span>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 按模型统计 -->
-      <div class="card table-card" v-if="Object.keys(tokenStatsByModel).length > 0">
-        <h3 class="subsection-title">
-          各模型用量
-          <span class="subsection-hint" title="输入 Token 为未命中缓存的部分；缓存读/写单独计数，不与输入重复计算；总计 = 输入 + 缓存读 + 缓存写 + 输出">口径说明</span>
-        </h3>
-        <table class="model-token-table">
-          <thead>
-            <tr>
-              <th>模型</th>
-              <th>请求次数</th>
-              <th title="未命中缓存的输入 Token">输入 Token</th>
-              <th title="从缓存读取的输入 Token">缓存读</th>
-              <th title="写入缓存的输入 Token">缓存写</th>
-              <th>输出 Token</th>
-              <th title="输入 + 缓存读 + 缓存写 + 输出">总计</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(stat, model) in tokenStatsByModel" :key="model">
-              <td>{{ model }}</td>
-              <td>{{ formatNumber(stat.count) }}</td>
-              <td class="text-blue">{{ formatNumber(stat.input) }}</td>
-              <td class="text-purple">{{ formatNumber(stat.cacheRead) }}</td>
-              <td class="text-orange">{{ formatNumber(stat.cacheWrite) }}</td>
-              <td class="text-green">{{ formatNumber(stat.output) }}</td>
-              <td class="font-bold">{{ formatNumber(stat.total) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="section">
-      <h2 class="section-title">快速切换</h2>
-      <div class="switch-groups">
-        <div class="switch-group" v-for="group in quickSwitchGroups" :key="group.label">
-          <div class="group-label">{{ group.label }}</div>
-          <div class="model-chips">
-            <button
-              v-for="item in group.models"
-              :key="item.ref"
-              class="chip"
-              :class="{ active: currentModel === item.ref }"
-              :title="item.ref"
-              @click="handleSwitch(item.ref)"
-            >
-              {{ item.label }}
-            </button>
-          </div>
-        </div>
-        <div class="switch-group">
-          <div class="group-label">智能路由</div>
-          <div class="model-chips">
-            <button
-              class="chip"
-              :class="{ active: currentModel === AUTO_MODEL }"
-              :title="AUTO_MODEL"
-              @click="handleSwitch(AUTO_MODEL)"
-            >
-              Auto
-            </button>
+            <div class="usage-rate" :title="usageGroup.rateTitle">
+              缓存命中率 {{ formatPercent(usageGroup.hitRate) }}
+            </div>
           </div>
         </div>
       </div>
     </div>
 
+    <!-- 最近请求只留 5 条关键列，完整列表与筛选在日志页 -->
     <div class="section">
       <div class="section-header">
         <h2 class="section-title">最近请求</h2>
-        <button class="btn-ghost btn-sm" @click="refreshLogs" :disabled="logsRefreshing">
-          {{ logsRefreshing ? '刷新中...' : '刷新' }}
-        </button>
+        <router-link class="link-more" to="/logs">查看全部 →</router-link>
       </div>
       <div class="card table-card">
-        <table class="log-table" v-if="recentLogs.length">
+        <table class="table" v-if="recentLogs.length">
           <thead>
             <tr>
               <th>时间</th>
               <th>模型</th>
               <th>状态</th>
               <th>耗时</th>
-              <th>输入</th>
-              <th>缓存</th>
-              <th>输出</th>
-              <th>总计</th>
-              <th>Fallback</th>
+              <th title="输入 + 缓存读 + 缓存写 + 输出，明细见日志查看">总计 Token</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(log, i) in recentLogs" :key="i">
-              <td>{{ formatTime(log.timestamp) }}</td>
+              <td class="nowrap">{{ formatTime(log.timestamp) }}</td>
               <td>{{ log.model }}</td>
               <td>
                 <span :class="log.status === 200 ? 'text-green' : 'text-red'">
                   {{ log.status }}
                 </span>
               </td>
-              <td>{{ log.responseTime }}ms</td>
-              <td>{{ tokenCell(log.inputTokens) }}</td>
-              <td :class="{ 'text-purple': log.cacheReadTokens > 0 }">
-                {{ cacheCell(log.cacheReadTokens) }}
-              </td>
-              <td>{{ tokenCell(log.outputTokens) }}</td>
+              <td class="nowrap">{{ log.responseTime }}ms</td>
               <td>{{ tokenCell(log.totalTokens) }}</td>
-              <td>{{ log.fallback ? '是' : '-' }}</td>
             </tr>
           </tbody>
         </table>
@@ -179,96 +95,69 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useModel } from '../composables/useModel.js'
-import { showToast } from '../composables/useToast.js'
-import { getLogs, getStats, getHealth, getTokenStatsToday, getTokenStatsMonth, getTokenStats } from '../api.js'
-import { listModels, AUTO_MODEL } from '../utils/models.js'
-import { formatNumber, formatTime } from '../utils/format.js'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
+import AnimatedNumber from '../components/AnimatedNumber.vue'
+import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
+import { getLogs, getTokenStatsRange } from '../api.js'
+import { formatNumber, formatPercent, formatTime, calcCacheHitRate } from '../utils/format.js'
 
-const { currentModel, providers, currentModelLabel, loadModelData, switchModel } = useModel()
-
-// Token 单元格：上游未返回用量时服务端给 null，显示 '-'（与日志页口径一致），
+// 总计单元格：上游未返回用量时服务端给 null，显示 '-'（与日志页口径一致），
 // 直接 formatNumber(null) 会显示 0，容易被误读成「真实用量为 0」
 function tokenCell(v) {
   return v === null || v === undefined ? '-' : formatNumber(v)
 }
 
-// 缓存列单元格：与日志页一致——0 与未知都显示 '-'（缓存读/写为 0 是常态，显示 0 反而噪音）
-function cacheCell(v) {
-  return v ? formatNumber(v) : '-'
-}
+// 时间维度：day / month / quarter / year 由服务端 /api/token-stats/range 一次算好。
+// 月维度走月汇总桶而不是把按日明细加起来 —— 按日只留 35 天，月初用日明细加会少一截。
+// 区间细节只放在 title（悬停可见），不再在页面上常驻一行说明
+const RANGE_TABS = [
+  { value: 'day', label: '当日', title: '今天 0 点到现在' },
+  { value: 'month', label: '本月', title: '本月 1 日到现在' },
+  { value: 'quarter', label: '近三月', title: '本月与往前两个自然月（滚动三个月）' },
+  { value: 'year', label: '本年', title: '今年 1 月 1 日到现在' }
+]
 
+const selectedRange = ref('day') // 默认当日
 const recentLogs = ref([]) // 最近 5 条请求日志
-const isOnline = ref(false) // Router 是否在线，只由健康检查决定
-const stats = ref({ todayRequests: 0, todayFailed: 0, totalRequests: 0, totalFailed: 0, retentionDays: 0 }) // 请求数统计
-const logsRefreshing = ref(false) // 日志刷新中的 loading 状态
 
-// Token 统计数据
-const tokenStatsToday = ref(emptyTokenStats())
-const tokenStatsMonth = ref(emptyTokenStats())
-const tokenStatsByModel = ref({})
-const tokenStatsRefreshing = ref(false) // Token 统计刷新状态
+// 四个区间的 Token 统计，键与 RANGE_TABS 的 value 对应
+const rangeStats = ref(emptyRangeStats())
 
-// 空的 Token 统计对象，用于初始化和接口失败兜底
-function emptyTokenStats() {
+function emptyStat() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, count: 0, failed: 0 }
 }
 
-// 累计请求数的统计口径，避免与"今日"数字混淆
-const retentionLabel = computed(() => {
-  return stats.value.retentionDays ? `近 ${stats.value.retentionDays} 天` : '累计'
+function emptyRangeStats() {
+  return { day: emptyStat(), month: emptyStat(), quarter: emptyStat(), year: emptyStat() }
+}
+
+const currentRange = computed(
+  () => RANGE_TABS.find(r => r.value === selectedRange.value) || RANGE_TABS[0]
+)
+
+const selectedStats = computed(() => rangeStats.value[selectedRange.value] || emptyStat())
+
+// 请求次数口径 = 有 token 的请求（count）+ 失败请求（failed），与用量统计页一致
+const periodStats = computed(() => {
+  const stats = selectedStats.value
+  const count = Number(stats.count) || 0
+  const failed = Number(stats.failed) || 0
+  return { count, failed, requests: count + failed }
 })
 
-// 按 Provider 分组的模型列表，用于快速切换的 chip 分组
-const quickSwitchGroups = computed(() => {
-  const groups = []
-  for (const item of listModels(providers.value)) {
-    let group = groups.find(g => g.label === item.providerLabel)
-    if (!group) {
-      group = { label: item.providerLabel, models: [] }
-      groups.push(group)
-    }
-    group.models.push({ ref: item.ref, label: item.model.displayName || item.model.id })
+// 用量概览只保留总计 / 输入 / 输出与缓存命中；缓存写明细与趋势图在用量统计页
+const usageGroup = computed(() => {
+  const stats = selectedStats.value
+  return {
+    total: stats.total,
+    input: stats.input,
+    cacheRead: stats.cacheRead,
+    output: stats.output,
+    hitRate: calcCacheHitRate(stats),
+    rateTitle: '缓存命中率 = 命中缓存 ÷（输入 + 命中缓存），缓存写不计入分母'
   }
-  return groups
 })
-
-// 用量卡片统一拆成 输入/缓存读/缓存写/输出/总计 五格
-function buildUsageItems(tokenStats) {
-  return [
-    { key: 'input', label: '输入', value: tokenStats.input, color: 'blue' },
-    { key: 'cacheRead', label: '缓存读', value: tokenStats.cacheRead, color: 'purple' },
-    { key: 'cacheWrite', label: '缓存写', value: tokenStats.cacheWrite, color: 'orange' },
-    { key: 'output', label: '输出', value: tokenStats.output, color: 'green' },
-    { key: 'total', label: '总计', value: tokenStats.total, color: 'total' }
-  ]
-}
-
-// 今日用量的五格数据
-const todayUsage = computed(() => buildUsageItems(tokenStatsToday.value))
-
-// 本月用量的五格数据
-const monthUsage = computed(() => buildUsageItems(tokenStatsMonth.value))
-
-// 加载 Router 健康状态，只有这个接口的成败影响在线状态
-async function loadHealth() {
-  try {
-    await getHealth()
-    isOnline.value = true
-  } catch {
-    isOnline.value = false
-  }
-}
-
-// 加载请求数统计，失败时保留上一次的数据
-async function loadStats() {
-  try {
-    const data = await getStats()
-    if (data) stats.value = data
-  } catch (err) {
-    console.error('加载请求统计失败:', err)
-  }
-}
 
 // 加载最近 5 条请求日志
 async function loadLogs() {
@@ -279,66 +168,41 @@ async function loadLogs() {
   }
 }
 
-// 加载 Token 统计（今日、本月、各模型）
-// 用 allSettled：三个接口各自独立，任一失败不应把其余数据一起丢弃（否则用量显示为 0，误导用户）
+// 加载四个区间的 Token 汇总。失败时保留上一次的数据，
+// 轮询每 5 秒重试，没必要为一次抖动把数字清零
 async function loadTokenStats() {
-  const [today, month, all] = await Promise.allSettled([
-    getTokenStatsToday(),
-    getTokenStatsMonth(),
-    getTokenStats()
-  ])
-  if (today.status === 'fulfilled') tokenStatsToday.value = today.value || emptyTokenStats()
-  if (month.status === 'fulfilled') tokenStatsMonth.value = month.value || emptyTokenStats()
-  if (all.status === 'fulfilled') tokenStatsByModel.value = (all.value && all.value.byModel) || {}
-  for (const r of [today, month, all]) {
-    if (r.status === 'rejected') console.error('加载 Token 统计失败:', r.reason)
+  try {
+    const data = await getTokenStatsRange()
+    if (data) rangeStats.value = { ...emptyRangeStats(), ...data }
+  } catch (err) {
+    console.error('加载 Token 统计失败:', err)
   }
-}
-
-// 手动刷新最近日志
-async function refreshLogs() {
-  logsRefreshing.value = true
-  await loadLogs()
-  logsRefreshing.value = false
-}
-
-// 手动刷新 Token 统计数据
-async function refreshTokenStats() {
-  tokenStatsRefreshing.value = true
-  await loadTokenStats()
-  tokenStatsRefreshing.value = false
 }
 
 // 加载所有 Dashboard 数据，各接口独立失败互不影响
 async function loadData() {
-  await Promise.all([loadHealth(), loadStats(), loadLogs(), loadTokenStats()])
+  await Promise.all([loadLogs(), loadTokenStats()])
 }
 
-// 切换当前模型，失败时给出错误提示
-async function handleSwitch(ref) {
-  const ok = await switchModel(ref)
-  if (!ok) showToast('切换失败，请检查服务状态后重试', 'error')
-}
+// 顶部栏的「实时」角标由布局渲染，5 秒轮询由 usePolling 统一负责
+usePageActions({ live: true })
+usePolling(loadData)
 
-onMounted(async () => {
-  await loadModelData()
-  loadData()
-})
+onMounted(() => { loadData() })
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 24px;
-  color: var(--text-1);
+/* 工具条：全局 .page-toolbar 是整条右对齐，而这里是页面唯一的时间维度切换，
+   放在左侧与下方卡片的左边缘对齐 */
+.dashboard-toolbar {
+  justify-content: flex-start;
 }
 
-.stats-grid {
+/* 请求数卡与用量概览并排一行 */
+.usage-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: 1fr 2fr;
   gap: 16px;
-  margin-bottom: 28px;
 }
 
 .stat-card {
@@ -346,7 +210,7 @@ onMounted(async () => {
 }
 
 .stat-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 8px;
   text-transform: uppercase;
@@ -354,13 +218,10 @@ onMounted(async () => {
 }
 
 .stat-value {
-  font-size: 24px;
+  font-size: var(--fs-display);
   font-weight: 700;
   color: var(--text-1);
-}
-
-.stat-value.primary {
-  color: var(--primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-value.green {
@@ -371,36 +232,19 @@ onMounted(async () => {
   color: var(--danger);
 }
 
-/* 请求数卡片的统计口径说明 */
+/* 请求数卡片的统计口径说明，悬停显示完整口径 */
 .stat-subtitle {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   margin-top: 6px;
-}
-
-/* 失败数提示，鼠标悬停显示完整口径说明 */
-.stat-failed {
-  font-size: 11px;
-  color: var(--text-weak);
-  margin-top: 4px;
   cursor: help;
-}
-
-.section {
-  margin-bottom: 24px;
-}
-
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
 }
 
 .section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
@@ -408,235 +252,109 @@ onMounted(async () => {
   margin-bottom: 0;
 }
 
-/* 快速切换：按 Provider 分组，每组前带分组标题 */
-.switch-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+/* 实时刷新提示的样式已随「实时」角标搬到 App.vue 的顶部栏（全局样式） */
 
-.group-label {
-  font-size: 12px;
-  color: var(--text-3);
-  margin-bottom: 6px;
-}
-
-.model-chips {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.chip {
-  background: var(--bg-page);
-  border: 1px solid var(--border-3);
-  color: var(--text-2);
-  padding: 8px 16px;
-  border-radius: 20px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.chip:hover {
-  border-color: var(--primary);
+/* 二级页面入口：右对齐的轻量链接 */
+.link-more {
+  font-size: var(--fs-xs);
   color: var(--primary);
+  text-decoration: none;
+  white-space: nowrap;
 }
 
-.chip.active {
-  background: var(--primary-bg);
-  border-color: var(--primary);
-  color: var(--primary);
+.link-more:hover {
+  text-decoration: underline;
 }
 
-.log-table {
-  width: 100%;
-  border-collapse: collapse;
+/* 用量概览：一档一份，靠字号层级区分主次，不用底色块。
+   原来这里是「今天 / 本月」左右两栏，两栏还要用 subgrid 对齐行轨道；
+   改成按档切换后只剩一份，subgrid 与中间分隔线一起删掉 */
+.usage-card {
+  padding: 18px 24px;
 }
 
-.log-table th,
-.log-table td {
-  text-align: left;
-  padding: 8px 12px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border-2);
-  color: var(--text-1);
-}
-
-.log-table th {
-  color: var(--text-3);
-  font-weight: 500;
-}
-
-.text-green {
-  color: var(--success);
-}
-
-.text-red {
-  color: var(--danger);
-}
-
-.empty {
-  text-align: center;
-  color: var(--text-3);
-  padding: 24px;
-  font-size: 14px;
-}
-
-/* Token 统计样式 */
-.token-stats-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.token-stat-card {
-  padding: 20px;
-}
-
-.token-stat-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
-
-.token-stat-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.token-badge {
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.token-badge.today {
-  background: var(--tint-primary-soft);
-  color: var(--primary-text);
-}
-
-.token-badge.month {
-  background: var(--tint-purple);
-  color: var(--purple-text);
-}
-
-.token-stat-values {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 10px;
-}
-
-.token-stat-item {
-  text-align: center;
+.usage-group {
   min-width: 0;
 }
 
-.token-stat-label {
-  font-size: 11px;
-  color: var(--text-3);
-  margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+/* 卡内不再重复当前时间维度：顶部的分段控件已经标出选中的是哪一档，
+   再来一行「当日 / 本月」只是把同一件事说两遍 */
+.usage-total {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 10px;
 }
 
-.token-stat-number {
-  font-size: 18px;
+/* 等宽数字：切档时位数不跳动 */
+.usage-total-value {
+  font-size: var(--fs-display);
   font-weight: 700;
+  line-height: 1.15;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
 }
 
-.token-stat-number.blue {
+.usage-total-unit {
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+}
+
+.usage-split {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 18px;
+}
+
+.usage-part {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.usage-part-label {
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+}
+
+.usage-part-value {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-part-value.input {
   color: var(--primary);
 }
 
-.token-stat-number.green {
-  color: var(--success);
-}
-
-.token-stat-number.purple {
+.usage-part-value.cacheRead {
   color: var(--purple);
 }
 
-.token-stat-number.orange {
-  color: var(--warning);
+.usage-part-value.output {
+  color: var(--success);
 }
 
-.token-stat-number.total {
-  color: var(--text-1);
-}
-
-.subsection-title {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
-
-/* 统计口径说明入口，悬停查看完整口径 */
-.subsection-hint {
-  font-size: 11px;
-  font-weight: 400;
+/* 命中率：弱化到辅助信息层级，数字与上方统计保持同一行内基线 */
+.usage-rate {
+  margin-top: 8px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
-  border: 1px solid var(--border-3);
-  border-radius: 10px;
-  padding: 1px 8px;
-  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
   cursor: help;
-  vertical-align: 1px;
 }
 
-.model-token-table {
-  width: 100%;
-  border-collapse: collapse;
-}
+/* 窄屏下两张卡改成上下两段 */
+@media (max-width: 900px) {
+  .usage-card {
+    padding: 16px 18px;
+  }
 
-.model-token-table th,
-.model-token-table td {
-  text-align: left;
-  padding: 10px 12px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border-2);
-  color: var(--text-1);
-}
-
-.model-token-table th {
-  color: var(--text-3);
-  font-weight: 500;
-}
-
-.text-blue {
-  color: var(--primary);
-}
-
-.text-green {
-  color: var(--success);
-}
-
-.text-purple {
-  color: var(--purple);
-}
-
-.text-orange {
-  color: var(--warning);
-}
-
-.font-bold {
-  font-weight: 600;
-}
-
-/* 表格列较多，窄屏时允许卡片内横向滚动 */
-.table-card {
-  overflow-x: auto;
-}
-
-/* 窄屏下用量卡片改为三列，避免数字挤在一起 */
-@media (max-width: 1200px) {
-  .token-stat-values {
-    grid-template-columns: repeat(3, 1fr);
+  .usage-grid {
+    grid-template-columns: 1fr;
   }
 }
+
 </style>

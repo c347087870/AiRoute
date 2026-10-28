@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- 与 public/icon.png 同款：中央路由器 + 六个节点 -->
+  <rect width="1024" height="1024" rx="180" fill="#000"/>
+  <g stroke="#fff" stroke-width="52" fill="none">
+    <path d="M152 264h120c40 0 60 20 60 60v60"/>
+    <path d="M152 512h230"/>
+    <path d="M152 760h120c40 0 60-20 60-60v-60"/>
+    <path d="M872 264H752c-40 0-60 20-60 60v60"/>
+    <path d="M872 512H642"/>
+    <path d="M872 760H752c-40 0-60-20-60-60v-60"/>
+  </g>
+  <g fill="#fff">
+    <circle cx="152" cy="264" r="76"/>
+    <circle cx="152" cy="512" r="76"/>
+    <circle cx="152" cy="760" r="76"/>
+    <circle cx="872" cy="264" r="76"/>
+    <circle cx="872" cy="512" r="76"/>
+    <circle cx="872" cy="760" r="76"/>
+    <rect x="382" y="362" width="260" height="300" rx="70"/>
+  </g>
+  <g fill="#000">
+    <rect x="422" y="410" width="180" height="80" rx="30"/>
+    <circle cx="562" cy="450" r="18" fill="#fff"/>
+    <rect x="422" y="534" width="180" height="80" rx="30"/>
+    <circle cx="562" cy="574" r="18" fill="#fff"/>
+  </g>
+</svg>

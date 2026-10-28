@@ -1,26 +1,16 @@
 <template>
   <div class="token-stats-page">
-    <div class="page-header">
-      <h1 class="page-title">Token 使用统计</h1>
-      <div class="header-actions">
-        <button class="btn-danger btn-sm" @click="clearStats" :disabled="loading">清空</button>
-        <button class="btn-ghost" @click="refreshData" :disabled="loading">
-          {{ loading ? '刷新中...' : '刷新' }}
-        </button>
-      </div>
+    <div class="page-toolbar">
+      <AppButton variant="danger" @click="clearStats" :disabled="loading">清空</AppButton>
     </div>
 
-    <!-- 时间维度选择 -->
-    <div class="period-selector">
-      <button
-        v-for="period in periods"
-        :key="period.value"
-        class="period-btn"
-        :class="{ active: selectedPeriod === period.value }"
-        @click="selectPeriod(period.value)"
-      >
-        {{ period.label }}
-      </button>
+    <!-- 时间维度选择：通用分段控件（SegmentedTabs），与状态面板同一套外观与键盘行为 -->
+    <div class="page-toolbar period-toolbar">
+      <SegmentedTabs
+        v-model="selectedPeriod"
+        :options="periods"
+        label="用量统计时间维度"
+      />
     </div>
 
     <!-- 汇总统计卡片：总计 / 输入 / 缓存读 / 缓存写 -->
@@ -80,6 +70,18 @@
           <div class="summary-value orange">{{ formatNumber(currentStats.cacheWrite) }}</div>
         </div>
       </div>
+
+      <div class="card summary-card">
+        <div class="summary-icon green">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+          </svg>
+        </div>
+        <div class="summary-content">
+          <div class="summary-label" title="命中缓存 ÷（输入 + 命中缓存），缓存写不计入分母">缓存命中率</div>
+          <div class="summary-value green">{{ formatPercent(cacheHitRate) }}</div>
+        </div>
+      </div>
     </div>
 
     <!-- 趋势图表 -->
@@ -89,7 +91,7 @@
         <span class="title-meta">共 {{ formatNumber(reqCount(currentStats)) }} 次请求</span>
       </h2>
       <div class="card chart-container" @mouseleave="hideTooltip">
-        <div v-if="chartData.length > 0" class="line-chart">
+        <div v-if="chartData.length > 0" class="line-chart" ref="chartEl">
           <!-- Tooltip -->
           <div 
             v-if="tooltip.visible"
@@ -108,7 +110,7 @@
             </div>
             <div class="tooltip-row">
               <span class="tooltip-label">缓存读:</span>
-              <span class="tooltip-value text-purple">{{ formatNumber(tooltip.cacheRead) }}</span>
+              <span class="tooltip-value">{{ formatNumber(tooltip.cacheRead) }}</span>
             </div>
             <div class="tooltip-row">
               <span class="tooltip-label">缓存写:</span>
@@ -218,8 +220,8 @@
             <tr v-for="(stats, model) in modelStats" :key="model">
               <td>{{ model }}</td>
               <td>{{ formatNumber(reqCount(stats)) }}</td>
-              <td class="text-purple font-bold">{{ formatNumber(stats.total) }}</td>
-              <td class="text-purple">{{ formatNumber(stats.cacheRead) }}</td>
+              <td class="font-bold">{{ formatNumber(stats.total) }}</td>
+              <td class="text-muted">{{ formatNumber(stats.cacheRead) }}</td>
               <td class="text-orange">{{ formatNumber(stats.cacheWrite) }}</td>
               <td>
                 <div class="percentage-bar">
@@ -239,18 +241,32 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { getTokenStatsByPeriod, getTokenStatsHourly, getTokenStats, clearTokenStats } from '../api.js'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import {
+  getTokenStatsByPeriod,
+  getTokenStatsHourly,
+  getTokenStatsCalendar,
+  getTokenStatsRange,
+  getTokenStats,
+  clearTokenStats
+} from '../api.js'
 import { showToast } from '../composables/useToast.js'
-import { formatNumber, toLocalDateKey } from '../utils/format.js'
+import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
+import { formatNumber, formatPercent, calcCacheHitRate, toLocalDateKey } from '../utils/format.js'
 
-// 时间维度选项
+import AppButton from '../components/AppButton.vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
+// 时间维度选项：与状态面板同一套日历口径（本日 / 本周 / 本月 / 近三月 / 本年），
+// 另外保留「近三天」这个滚动窗口 —— 它回答的是「这两三天有没有异常」，
+// 和「本周」在周一当天重合、周二起就不一样，两者都需要
 const periods = [
-  { value: 'today', label: '今天（24小时）' },
+  { value: 'today', label: '本日' },
   { value: '3', label: '近三天' },
-  { value: '7', label: '近七天' },
-  { value: '15', label: '近半个月' },
-  { value: '30', label: '近一个月' }
+  { value: 'week', label: '本周' },
+  { value: 'month', label: '本月' },
+  { value: 'quarter', label: '近三月' },
+  { value: 'year', label: '本年' }
 ]
 
 const selectedPeriod = ref('today') // 默认显示今天的小时数据
@@ -275,6 +291,9 @@ const tooltip = ref({
 
 // 当前统计数据
 const currentStats = computed(() => periodData.value.summary || {})
+
+// 缓存命中率：与状态面板同一口径，都走 utils/format.js 的实现
+const cacheHitRate = computed(() => calcCacheHitRate(currentStats.value))
 
 // 图表数据
 // 请求次数口径 = count（有 token 的请求）+ failed（失败请求），与状态面板 /api/stats 一致
@@ -314,25 +333,59 @@ function reqCount(stats) {
 // 模型统计数据
 const modelStats = computed(() => modelStatsData.value.byModel || {})
 
-// 图表标题
+// 图表标题：直接用维度标签，不再用「近 N 天」拼 —— 本周 / 本月这类日历口径
+// 拼出来会是「近week天」这种错字
 const chartTitle = computed(() => {
-  if (selectedPeriod.value === 'today') {
-    return '今日每小时使用趋势'
-  } else {
-    const days = selectedPeriod.value
-    return `近${days}天使用趋势`
-  }
+  const found = periods.find(p => p.value === selectedPeriod.value)
+  const label = found ? found.label : ''
+  return selectedPeriod.value === 'today' ? `${label}每小时使用趋势` : `${label}每日使用趋势`
 })
 
 // SVG 图表配置
-const svgWidth = 800
+// svgWidth 用容器实测宽度：固定 800 的 viewBox 在宽屏下会被 preserveAspectRatio
+// 的 meet 缩放压成中间一条，两侧大片留白（图表「没撑满」）。改成 1:1 像素映射后
+// 图形宽度始终等于容器宽度。
+const chartEl = ref(null)
 const svgHeight = 300
 const paddingLeft = 60
 const paddingRight = 30
 const paddingTop = 20
 const paddingBottom = 40
-const chartWidth = svgWidth - paddingLeft - paddingRight
+
+const DEFAULT_SVG_WIDTH = 800
+const svgWidth = ref(DEFAULT_SVG_WIDTH)
+const chartWidth = computed(() => svgWidth.value - paddingLeft - paddingRight)
 const chartHeight = svgHeight - paddingTop - paddingBottom
+
+// 容器宽度变化时重算 viewBox（窗口缩放 / 侧栏折叠都会触发）
+let resizeObserver = null
+function syncChartWidth() {
+  const el = chartEl.value
+  if (!el) return
+  const w = Math.round(el.clientWidth)
+  if (w > 0 && w !== svgWidth.value) svgWidth.value = w
+}
+
+// 图表容器是 v-if 渲染的：数据到位后才挂载，ResizeObserver 要跟着挂载时机走
+watch(chartEl, (el, oldEl) => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  if (!el) return
+  syncChartWidth()
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(syncChartWidth)
+    resizeObserver.observe(el)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+})
 
 // 计算最大值
 const maxValue = computed(() => {
@@ -364,7 +417,7 @@ const linePoints = computed(() => {
 function getX(index) {
   const data = chartData.value
   if (data.length <= 1) return paddingLeft + chartWidth / 2
-  return paddingLeft + (index / (data.length - 1)) * chartWidth
+  return paddingLeft + (index / (data.length - 1)) * chartWidth.value
 }
 
 // 获取Y坐标
@@ -400,7 +453,7 @@ function handleChartMouseMove(event) {
   const svgRect = svgEl.getBoundingClientRect()
 
   // 计算鼠标在 SVG 坐标系中的 X 位置
-  const scaleX = svgWidth / svgRect.width
+  const scaleX = svgWidth.value / svgRect.width
   const mouseXInSvg = (event.clientX - svgRect.left) * scaleX
 
   // 找到离鼠标最近的数据点
@@ -409,7 +462,7 @@ function handleChartMouseMove(event) {
     updateTooltipPosition(event, lineChartEl, 0)
   } else {
     // 将 mouseXInSvg 映射到数据索引
-    const ratio = (mouseXInSvg - paddingLeft) / chartWidth
+    const ratio = (mouseXInSvg - paddingLeft) / chartWidth.value
     const nearestIndex = Math.round(ratio * (dataLen - 1))
     const clampedIndex = Math.max(0, Math.min(dataLen - 1, nearestIndex))
 
@@ -480,41 +533,43 @@ function hideTooltip() {
   tooltip.value.index = -1
 }
 
-// 选择时间维度
-async function selectPeriod(period) {
-  selectedPeriod.value = period
+// 选择时间维度：分段控件用 v-model 改 selectedPeriod，这里监听它去取数
+watch(selectedPeriod, async (period) => {
   await loadPeriodData(period)
-}
+})
 
-// 按字段累加明细，用于把小时明细合成为「今天」的汇总
+// 按字段累加明细，用于把小时明细合成为「本日」的汇总。
+// failed 必须一起加：请求数口径是 count + failed，漏掉它会比状态面板少一截
 function sumBy(list, key) {
   return list.reduce((sum, item) => sum + (Number(item[key]) || 0), 0)
 }
 
-// 加载时间段数据
-async function loadPeriodData(period) {
-  loading.value = true
+function sumByKeys(list) {
+  const keys = ['input', 'output', 'cacheRead', 'cacheWrite', 'total', 'count', 'failed']
+  return Object.fromEntries(keys.map(key => [key, sumBy(list, key)]))
+}
+
+// 加载时间段数据。silent：轮询触发时不拉 loading（只用于禁用「清空」按钮，
+// 每 5 秒闪一下会让按钮看起来不可用）
+async function loadPeriodData(period, { silent = false } = {}) {
+  if (!silent) loading.value = true
   try {
     if (period === 'today') {
-      // 今天：获取按小时的数据，必须用本地日期键，UTC 日期会与服务端统计口径错开一天
+      // 本日：获取按小时的数据，必须用本地日期键，UTC 日期会与服务端统计口径错开一天。
+      // 汇总与服务端 /range 的 day 用同一口径（带 failed），不在前端自己加 ——
+      // 前端只加 count 会让「请求数」比状态面板少掉失败的那部分
       const today = toLocalDateKey()
-      const hourlyData = await getTokenStatsHourly(today)
-      const details = hourlyData.details || []
+      const [hourlyData, range] = await Promise.all([getTokenStatsHourly(today), getTokenStatsRange()])
       periodData.value = {
-        summary: {
-          input: sumBy(details, 'input'),
-          output: sumBy(details, 'output'),
-          cacheRead: sumBy(details, 'cacheRead'),
-          cacheWrite: sumBy(details, 'cacheWrite'),
-          total: sumBy(details, 'total'),
-          count: sumBy(details, 'count')
-        },
-        details
+        summary: range?.day || sumByKeys(hourlyData.details || []),
+        details: hourlyData.details || []
       }
+    } else if (period === '3') {
+      // 近三天是滚动窗口（含今天往前三段），不是日历边界
+      periodData.value = await getTokenStatsByPeriod(3)
     } else {
-      // 多天：获取按天的数据
-      const days = parseInt(period)
-      periodData.value = await getTokenStatsByPeriod(days)
+      // 本周 / 本月 / 近三月 / 本年：按日历边界取汇总 + 逐天明细
+      periodData.value = await getTokenStatsCalendar(period)
     }
     
     // 同时加载模型统计
@@ -522,14 +577,19 @@ async function loadPeriodData(period) {
     modelStatsData.value = allStats
   } catch (err) {
     console.error('Failed to load token stats:', err)
+  } finally {
+    if (!silent) loading.value = false
   }
-  loading.value = false
 }
 
 // 刷新数据
 async function refreshData() {
   await loadPeriodData(selectedPeriod.value)
 }
+
+// 顶部栏的「实时」角标由布局渲染；数据靠 5 秒轮询保持最新
+usePageActions({ live: true })
+usePolling(() => loadPeriodData(selectedPeriod.value, { silent: true }))
 
 // 清空全部 Token 统计（二次确认，不可恢复；状态面板请求数同源一并归零）
 async function clearStats() {
@@ -555,62 +615,21 @@ onMounted(() => {
   padding-bottom: 40px;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
+
+
+
+/* 时间维度选择器：与状态面板一致靠左对齐，与下方卡片左边缘齐平 */
+.period-toolbar {
+  justify-content: flex-start;
 }
 
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text-1);
-}
 
-/* 时间维度选择器 */
-.period-selector {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
 
-.period-btn {
-  background: var(--bg-page);
-  border: 1px solid var(--border-3);
-  color: var(--text-2);
-  padding: 10px 20px;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-weight: 500;
-}
-
-.period-btn:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: var(--tint-primary);
-}
-
-.period-btn.active {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #FFFFFF;
-}
-
-/* 汇总卡片 */
+/* 汇总卡片：总计 / 输入 / 缓存读 / 缓存写 / 命中率 五张，窄屏逐档降列数 */
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -625,26 +644,29 @@ onMounted(() => {
 .summary-icon {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
 
-.summary-icon.purple {
-  background: var(--tint-purple);
-  color: var(--purple);
-}
-
+/* 图标底一律中性灰：汇总卡是「读数」，不该用品牌紫/蓝去抢注意力；
+   只有橙（缓存写）与绿（命中率）保留语义色，用来区分「需要注意的」与「健康的」 */
+.summary-icon.purple,
 .summary-icon.blue {
-  background: var(--tint-primary-soft);
-  color: var(--primary);
+  background: var(--bg-hover);
+  color: var(--text-2);
 }
 
 .summary-icon.orange {
-  background: var(--tint-warning-soft);
-  color: var(--warning);
+  background: var(--tint-warning);
+  color: var(--warn-text);
+}
+
+.summary-icon.green {
+  background: var(--ok-bg);
+  color: var(--success);
 }
 
 .summary-content {
@@ -652,46 +674,39 @@ onMounted(() => {
 }
 
 .summary-label {
-  font-size: 12px;
-  color: var(--text-3);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
   margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .summary-value {
-  font-size: 24px;
+  font-size: var(--fs-display);
   font-weight: 700;
+  /* 等宽数字：四个汇总卡片并排，位数不同也不会看起来左右错位 */
+  font-variant-numeric: tabular-nums;
 }
 
-.summary-value.purple {
-  color: var(--purple);
-}
-
+/* 主数值用正文色：Token 总量是这一页真正的主角，颜色越少它越突出 */
+.summary-value.purple,
 .summary-value.blue {
-  color: var(--primary);
+  color: var(--text-1);
 }
 
 .summary-value.orange {
-  color: var(--warning);
+  color: var(--warn-text);
+}
+
+.summary-value.green {
+  color: var(--ok-text);
 }
 
 /* 图表区域 */
-.section {
-  margin-bottom: 24px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
 /* 标题右侧的次要信息，请求次数从汇总卡片移到这里展示 */
 .title-meta {
   margin-left: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: var(--text-3);
 }
@@ -750,7 +765,7 @@ onMounted(() => {
   justify-content: center;
   height: 250px;
   color: var(--text-3);
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 /* Tooltip 样式 */
@@ -758,7 +773,7 @@ onMounted(() => {
   position: absolute;
   background: var(--bg-elevated);
   border: 1px solid var(--border-3);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 12px 16px;
   box-shadow: var(--shadow-pop);
   pointer-events: none;
@@ -767,7 +782,7 @@ onMounted(() => {
 }
 
 .tooltip-time {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 8px;
@@ -784,7 +799,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 4px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .tooltip-row:last-child {
@@ -811,9 +826,11 @@ onMounted(() => {
 .model-table td {
   text-align: left;
   padding: 12px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
   color: var(--text-1);
+  /* 数字列等宽对齐；模型名里的英文数字同样适用，不影响中文 */
+  font-variant-numeric: tabular-nums;
 }
 
 .model-table th {
@@ -830,7 +847,7 @@ onMounted(() => {
   position: relative;
   height: 24px;
   background: var(--border-2);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -845,22 +862,13 @@ onMounted(() => {
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-1);
 }
 
-.text-purple {
-  color: var(--purple);
-}
 
-.text-orange {
-  color: var(--warning);
-}
 
-.font-bold {
-  font-weight: 600;
-}
 
 /* 响应式 */
 @media (max-width: 1200px) {
@@ -879,3 +887,4 @@ onMounted(() => {
   }
 }
 </style>
+

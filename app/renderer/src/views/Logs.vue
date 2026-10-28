@@ -1,13 +1,11 @@
 <template>
   <div class="logs">
-    <div class="page-header">
-      <h1 class="page-title">日志查看</h1>
+    <div class="page-toolbar">
       <div class="header-actions">
         <span v-if="logSize" class="log-size text-muted">
           日志已占用 {{ formatBytes(logSize.totalSize) }} · {{ logSize.fileCount }} 个文件
         </span>
-        <button class="btn-danger btn-sm" :disabled="clearing" @click="clearAllLogs">清空</button>
-        <button class="btn-ghost btn-sm" @click="refreshAll">刷新</button>
+        <AppButton variant="danger" :disabled="clearing" @click="clearAllLogs">清空</AppButton>
       </div>
     </div>
 
@@ -32,12 +30,12 @@
         <option :value="200">最近 200 条</option>
       </select>
 
-      <button class="btn-ghost btn-sm" @click="resetFilters">重置</button>
+      <AppButton variant="secondary" @click="resetFilters">重置</AppButton>
     </div>
 
     <div class="card">
       <div class="table-wrap scroll-log" v-if="logs.length">
-        <table class="log-table">
+        <table class="table">
           <thead>
             <tr>
               <th>时间</th>
@@ -109,10 +107,10 @@
           <option value="">全部账号</option>
           <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || String(a.uid).slice(0, 8) }}</option>
         </select>
-        <button class="btn-ghost btn-sm" @click="loadCreditHistory">刷新</button>
+        <AppButton variant="secondary" @click="loadCreditHistory">刷新</AppButton>
       </div>
       <div class="table-wrap scroll-credit" v-if="creditEntries.length">
-        <table class="log-table">
+        <table class="table">
           <thead>
             <tr>
               <th>时间</th>
@@ -135,9 +133,9 @@
       </div>
       <div v-else class="empty">暂无积分变动记录</div>
       <div class="credit-pager" v-if="creditTotal > 0">
-        <button class="btn-ghost btn-sm" :disabled="creditPage <= 1" @click="changeCreditPage(-1)">上一页</button>
+        <AppButton variant="secondary" :disabled="creditPage <= 1" @click="changeCreditPage(-1)">上一页</AppButton>
         <span class="text-muted">第 {{ creditPage }} / {{ creditTotalPages }} 页</span>
-        <button class="btn-ghost btn-sm" :disabled="creditPage >= creditTotalPages" @click="changeCreditPage(1)">下一页</button>
+        <AppButton variant="secondary" :disabled="creditPage>= creditTotalPages" @click="changeCreditPage(1)">下一页</AppButton>
       </div>
     </div>
   </div>
@@ -147,8 +145,11 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { getLogs, getLogModels, clearLogs, getLogsSize, wbAccounts, wbCreditHistory } from '../api.js'
 import { showToast } from '../composables/useToast.js'
+import { usePageActions } from '../composables/usePageActions.js'
+import { usePolling } from '../composables/usePolling.js'
 import { formatNumber, formatTime, formatBytes } from '../utils/format.js'
 
+import AppButton from '../components/AppButton.vue'
 const logs = ref([]) // 当前加载出来的日志列表（服务端已按任务合并，一条 = 一个任务）
 const logSize = ref(null) // 日志目录占用 { totalSize, fileCount }
 const limit = ref(50) // 显示条数
@@ -213,8 +214,9 @@ function accountLabel(uid) {
   return String(uid).slice(0, 8)
 }
 
-// 加载日志；服务端已按任务合并（一次输入 + 其工具循环 = 一条记录）
-async function loadLogs() {
+// 加载日志；服务端已按任务合并（一次输入 + 其工具循环 = 一条记录）。
+// silent：轮询触发时不弹错误 toast（没有用户手势，下一次轮询会自己重试）
+async function loadLogs({ silent = false } = {}) {
   try {
     logs.value = (await getLogs({
       limit: limit.value,
@@ -222,16 +224,16 @@ async function loadLogs() {
       status: statusFilter.value
     })) || []
   } catch (err) {
-    showToast('日志加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
+    if (!silent) showToast('日志加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
   }
 }
 
 // 加载模型下拉选项
-async function loadModels() {
+async function loadModels({ silent = false } = {}) {
   try {
     modelOptions.value = await getLogModels()
   } catch (err) {
-    showToast('模型列表加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
+    if (!silent) showToast('模型列表加载失败: ' + (err?.response?.data?.error || err?.message || '无法连接服务'), 'error', 4000)
   }
 }
 
@@ -313,9 +315,19 @@ function changeCreditPage(delta) {
 }
 
 // 全量刷新：日志 + 模型选项 + 目录占用 + 账号池昵称 + 积分历史
-async function refreshAll() {
-  await Promise.all([loadLogs(), loadModels(), loadSize(), loadAccounts(), loadCreditHistory()])
+async function refreshAll({ silent = false } = {}) {
+  await Promise.all([
+    loadLogs({ silent }),
+    loadModels({ silent }),
+    loadSize(),
+    loadAccounts(),
+    loadCreditHistory()
+  ])
 }
+
+// 顶部栏的「实时」角标由布局渲染；数据靠 5 秒轮询保持最新
+usePageActions({ live: true })
+usePolling(() => refreshAll({ silent: true }))
 
 // 重置筛选条件，条数属于展示设置不参与重置
 function resetFilters() {
@@ -342,7 +354,7 @@ async function clearAllLogs() {
 }
 
 // 模型 / 状态 / 条数变化后立即重新加载
-watch([modelFilter, statusFilter, limit], loadLogs)
+watch([modelFilter, statusFilter, limit], () => loadLogs())
 
 // 积分历史账号筛选变化：回到第一页重新加载
 watch(creditUid, () => {
@@ -354,41 +366,18 @@ onMounted(refreshAll)
 </script>
 
 <style scoped>
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
 
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-1);
-}
 
-.header-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
 .log-size {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-right: 4px;
 }
 
-.filter-bar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
 
+/* 高度与内边距交给全局大号下拉规则（App.vue 的 select） */
 .filter-select {
-  font-size: 13px;
-  padding: 8px 12px;
+  min-width: 132px;
 }
 
 .credit-card {
@@ -404,17 +393,17 @@ onMounted(refreshAll)
 }
 
 .credit-title {
-  font-size: 15px;
+  font-size: var(--fs-section);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .credit-hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .credit-note {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-left: auto;
 }
 
@@ -428,7 +417,7 @@ onMounted(refreshAll)
   justify-content: flex-end;
   gap: 10px;
   padding-top: 12px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .scroll-log {
@@ -441,36 +430,10 @@ onMounted(refreshAll)
   overflow: auto;
 }
 
-.table-wrap {
-  overflow-x: auto;
-}
 
-.log-table {
-  width: 100%;
-  border-collapse: collapse;
-}
 
-.log-table th,
-.log-table td {
-  text-align: left;
-  padding: 10px 12px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border-2);
-  color: var(--text-1);
-}
 
-.log-table th {
-  color: var(--text-3);
-  font-weight: 500;
-  position: sticky;
-  top: 0;
-  background: var(--bg-card);
-  white-space: nowrap;
-}
 
-.nowrap {
-  white-space: nowrap;
-}
 
 .input-cell {
   max-width: 260px;
@@ -479,31 +442,21 @@ onMounted(refreshAll)
   white-space: nowrap;
 }
 
-.text-green {
-  color: var(--success);
-}
 
-.text-red {
-  color: var(--danger);
-}
 
 .text-yellow {
   color: var(--warning);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .outcome-tag {
   margin-left: 6px;
   padding: 0 4px;
   border: 1px solid var(--warning);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--warning);
-  font-size: 11px;
+  font-size: var(--fs-mini);
   white-space: nowrap;
-}
-
-.text-muted {
-  color: var(--text-4);
 }
 
 .error-cell {
@@ -511,35 +464,15 @@ onMounted(refreshAll)
   word-break: break-word;
 }
 
-.empty {
-  text-align: center;
-  color: var(--text-3);
-  padding: 40px;
-  font-size: 14px;
-}
 
+/* 数字/账号列：统一走全局等宽栈（数字按位对齐由全局 .table 的 tabular-nums 负责） */
 .token-cell {
-  font-family: 'Courier New', monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
 }
 
-.text-blue {
-  color: var(--primary);
-}
 
-.text-green {
-  color: var(--success);
-}
 
-.text-purple {
-  color: var(--purple);
-}
 
-.text-orange {
-  color: var(--warning);
-}
 
-.font-bold {
-  font-weight: 600;
-}
 </style>

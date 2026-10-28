@@ -28,6 +28,22 @@ let rt = null
 // 账号操作运行态（uid → 动作名；进程内状态，供面板显示「保活中」等）
 const runningActions = new Map()
 
+// 关停运行时：导入配置/账号后要按新文件重新 init，否则池里还是旧账号。
+// 与 __resetForTest 同一步骤，但语义是生产用的 —— 停定时器后再让 init 重建。
+function shutdown() {
+  if (!rt) return
+  try {
+    rt.scheduler?.stop?.()
+  } catch {}
+  try {
+    rt.session?.stopGC?.()
+  } catch {}
+  try {
+    rt.pool?.stopFlusher?.()
+  } catch {}
+  rt = null
+}
+
 // 初始化运行时（幂等）
 // opts: { dataDir, poolConfig, promptMode, promptFile, sanitizeFingerprints, log }
 function init(opts = {}) {
@@ -699,12 +715,30 @@ async function forwardChat(opts) {
       // 该换模型，重试同一模型不会自愈）。区域隔离下不跨区取证：只看本区域。
       const modelBlocked = diag.modelCooled > 0 && diag.healthy === 0 && diag.cooling === 0
       const realmLabel = pickRealm === 'global' ? '国际版' : '国内版'
+      // 6004 模型级限流是有重置墙钟的暂时状态：把等待信息透出，别让「无此模型/无权限」
+      // 的含糊文案背锅（也不该因此在模型失活台账里记失败）
+      const rateLimitOnly = modelBlocked && diag.modelRateLimited === diag.modelCooled
+      const rateLimitHint = rateLimitOnly
+        ? (() => {
+            const resetAt = Math.min(...Object.values(r.pool.status())
+              .filter(s => s.realm === pickRealm)
+              .flatMap(s => s.rateLimitedModels || [])
+              .filter(item => item.model === model)
+              .map(item => item.resetAt || item.until)
+              .filter(t => t > Date.now()), Infinity)
+            return Number.isFinite(resetAt)
+              ? `模型级限流中，${new Date(resetAt).toLocaleTimeString('zh-CN', { hour12: false })} 重置`
+              : '模型级限流中'
+          })()
+        : ''
       const err = new Error(
         modelBlocked
-          ? `模型 ${model} 在${realmLabel}账号池中不可用（该后端无此模型、账号类型无权限或模型级限流），请切换其他模型`
+          ? `模型 ${model} 在${realmLabel}账号池中不可用（${rateLimitOnly ? rateLimitHint : '该后端无此模型、账号类型无权限或模型级限流'}），请切换其他模型`
           : `${realmLabel}账号池中${errMod.NO_HEALTHY_HINT}`
       )
       err.code = modelBlocked ? 'model_unavailable' : errMod.NO_HEALTHY_CODE
+      // 仅限流：客户端该等重置而不是换模型；也不计入模型连续失败（见 router 判据）
+      err.rateLimited = rateLimitOnly
       err.noHealthy = true
       // 状态码：模型不可用属客户端可纠正的请求问题（400）；池中无号才是网关侧 503
       err.status = modelBlocked ? 400 : 503
@@ -714,7 +748,7 @@ async function forwardChat(opts) {
       err.gatewayHint = modelBlocked
         ? errMod.gatewayHint(errMod.ERR_KIND.MODEL_BLOCKED, '', hintCtx)
         : errMod.noHealthyAccountHint()
-      r.pushLog('chat', `请求失败：${err.message}（账号诊断：总 ${diag.total} / 可用 ${diag.healthy} / 冷却 ${diag.cooling} / 模型受限 ${diag.modelCooled} / 禁用 ${diag.disabled}）`, 'warn')
+      r.pushLog('chat', `请求失败：${err.message}（账号诊断：总 ${diag.total} / 可用 ${diag.healthy} / 冷却 ${diag.cooling} / 模型受限 ${diag.modelCooled}（其中限流 ${diag.modelRateLimited}）/ 禁用 ${diag.disabled}）`, 'warn')
       throw err
     }
 
@@ -1969,6 +2003,7 @@ function errMsgOf(err) {
 
 module.exports = {
   init,
+  shutdown,
   getRuntime,
   updateConfig,
   // OAuth

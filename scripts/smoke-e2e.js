@@ -117,18 +117,25 @@ function startMockUpstream() {
 
       // OpenAI chat/completions
       if (stream) {
-        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
-        res.write(
-          `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: '你好' }, finish_reason: null }] })}\n\n`
-        )
-        res.write(
-          `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: '，世界' }, finish_reason: null }] })}\n\n`
-        )
-        res.write(
-          `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 9, total_tokens: 29, prompt_tokens_details: { cached_tokens: 5 } } })}\n\n`
-        )
-        res.write('data: [DONE]\n\n')
-        res.end()
+        // 并发用例（并发优先策略）需要一个「还没结束」的上游：请求体里带 hold
+        // 就先压 600ms 不写任何字节，好让第二个请求在它仍挂着时到达网关
+        const holdMs = /hold/.test(JSON.stringify(body.messages || [])) ? 600 : 0
+        const emit = () => {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+          res.write(
+            `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: '你好' }, finish_reason: null }] })}\n\n`
+          )
+          res.write(
+            `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: '，世界' }, finish_reason: null }] })}\n\n`
+          )
+          res.write(
+            `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 9, total_tokens: 29, prompt_tokens_details: { cached_tokens: 5 } } })}\n\n`
+          )
+          res.write('data: [DONE]\n\n')
+          res.end()
+        }
+        if (holdMs) setTimeout(emit, holdMs)
+        else emit()
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -304,10 +311,14 @@ async function main() {
       assert.strictEqual(r.json.port, gwPort)
     })
 
-    await check('GET /api/system/status 版本与端口', async () => {
+    await check('GET /api/system/status 版本、线路与端口', async () => {
       const r = await fetchJson(`${base}/api/system/status`)
       assert.strictEqual(r.json.port, gwPort)
       assert.ok(typeof r.json.version === 'string' && r.json.version.length > 0)
+      // 更新线路：beta 构建走 beta 线，其余走正式线（与 server/update.js 的 releaseLine 同规则）
+      assert.ok(['beta', 'stable'].includes(r.json.line), `line 应为 beta 或 stable，实际 ${r.json.line}`)
+      const expectBeta = /-(alpha|beta|rc|next|dev)([.\-]|$)/i.test(r.json.version)
+      assert.strictEqual(r.json.line, expectBeta ? 'beta' : 'stable', '线路判定应与版本号一致')
     })
 
     await check('GET /api/benchmark/questions 返回题库', async () => {
@@ -326,16 +337,64 @@ async function main() {
       assert.strictEqual(r.status, 400)
     })
 
+    // 状态面板的四个时间维度：字段齐备，且当月口径不能小于当日
+    // （月维度走月汇总桶，当日走按日桶，两者独立存储，写错一侧就会在这里露出来）
+    await check('GET /api/token-stats/range 四档齐备且口径自洽', async () => {
+      const r = await fetchJson(`${base}/api/token-stats/range`)
+      assert.strictEqual(r.status, 200)
+      for (const key of ['day', 'month', 'quarter', 'year']) {
+        const s = r.json[key]
+        assert.ok(s && typeof s === 'object', `${key} 必须存在`)
+        for (const field of ['input', 'output', 'cacheRead', 'cacheWrite', 'total', 'count', 'failed']) {
+          assert.strictEqual(typeof s[field], 'number', `${key}.${field} 必须是数字`)
+        }
+      }
+      const req = s => s.count + s.failed
+      assert.ok(req(r.json.month) >= req(r.json.day), '本月请求数不应少于当日')
+      assert.ok(req(r.json.quarter) >= req(r.json.month), '近三月请求数不应少于本月')
+      assert.ok(req(r.json.year) >= req(r.json.quarter), '本年请求数不应少于近三月')
+      assert.ok(r.json.year.total >= r.json.month.total, '本年 Token 不应少于本月')
+    })
+
     await check('GET /api/token-stats/hourly/:date 非法日期 → 400', async () => {
       const r = await fetchJson(`${base}/api/token-stats/hourly/2026-1-1`)
       assert.strictEqual(r.status, 400)
     })
 
-    await check('GET /v1/models 返回配置模型 + 别名', async () => {
+    await check('GET /v1/models 只暴露 auto 伪模型', async () => {
       const r = await fetchJson(`${base}/v1/models`)
       const ids = r.json.data.map(m => m.id)
-      assert.ok(ids.includes('mock-large'))
-      assert.ok(ids.includes('claude-opus-4-20250514'))
+      // 客户端只需填 auto，真实模型与别名一律不再播报
+      assert.deepStrictEqual(ids, ['auto'])
+    })
+
+    await check('Auto 策略：可读可改，非法值 400', async () => {
+      const r = await fetchJson(`${base}/api/auto-strategy`)
+      assert.strictEqual(r.status, 200)
+      assert.strictEqual(r.json.strategy, 'balanced')
+      assert.deepStrictEqual(r.json.strategies.map(item => item.id), ['balanced', 'latency', 'cost', 'connections'])
+
+      const bad = await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: '不存在的档' })
+      })
+      assert.strictEqual(bad.status, 400)
+
+      const ok = await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'connections' })
+      })
+      assert.strictEqual(ok.status, 200)
+      assert.strictEqual(ok.json.strategy, 'connections')
+
+      // 复位
+      await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'balanced' })
+      })
     })
 
     // ==================== 配置写入校验 ====================
@@ -613,6 +672,60 @@ async function main() {
       }
     })
 
+    // ==================== 模型失活 ====================
+    group('6.5 模型失活（连续失败 → 下线 → 手动恢复）')
+
+    await check('连续 3 次失败 → 模型失活、请求被拒、恢复后回来', async () => {
+      const setState = ref => fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: ref })
+      })
+      try {
+        await setState('fail-provider/dead')
+        // 前面 Fallback 用例可能已经消耗掉 1 次失败，这里多打几次保证越过阈值
+        for (let i = 0; i < 3; i += 1) {
+          await fetchJson(`${base}/v1/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: `health-probe-${i}` }] })
+          })
+        }
+
+        const ledger = await fetchJson(`${base}/api/model-health`)
+        assert.strictEqual(ledger.status, 200)
+        const record = ledger.json.models.find(item => item.ref === 'fail-provider/dead')
+        assert.ok(record, `台账里应有 fail-provider/dead，实际：${JSON.stringify(ledger.json.models)}`)
+        assert.strictEqual(record.offline, true)
+        assert.strictEqual(record.reason, 'errors')
+
+        const blocked = await fetchJson(`${base}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'after-offline' }] })
+        })
+        assert.strictEqual(blocked.status, 500)
+        assert.match(blocked.json.error, /失活/, '错误文案要说清是失活，而不是「没配置」')
+
+        const revived = await fetchJson(`${base}/api/model-health/revive`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ref: 'fail-provider/dead' })
+        })
+        assert.strictEqual(revived.status, 200)
+      } finally {
+        await setState('mock-provider/mock-large')
+      }
+    })
+
+    // ==================== 账号禁用台账 ====================
+
+    await check('账号停用原因台账可读（无渠道账号时为空数组，不报错）', async () => {
+      const resp = await fetchJson(`${base}/api/account-health`)
+      assert.strictEqual(resp.status, 200)
+      assert.deepStrictEqual(resp.json, { ok: true, accounts: [] })
+    })
+
     // ==================== 智能路由 ====================
     group('7. 智能路由（auto）')
 
@@ -639,9 +752,45 @@ async function main() {
       })
     })
 
+    await check('并发优先策略：并发的两个请求摊到不同模型上', async () => {
+      // 策略是全局一档：先把「并发优先」选上，再用 auto 这个模型名发请求
+      await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'connections' })
+      })
+      const before = mock.requests.filter(q => q.url.includes('/chat/completions')).length
+      const call = () => fetchJson(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'auto',
+          messages: [{ role: 'user', content: 'hold 并发' }],
+          stream: true
+        })
+      })
+      // 两个请求同时发出：第一个还挂着（mock 压 600ms 不吐字节）时第二个才建链，
+      // 这时它必须看见「第一个已占用」而换一个模型
+      const [first, second] = await Promise.all([call(), call()])
+      assert.strictEqual(first.status, 200, first.text.slice(0, 200))
+      assert.strictEqual(second.status, 200, second.text.slice(0, 200))
+      const landed = mock.requests
+        .filter(q => q.url.includes('/chat/completions'))
+        .slice(before)
+        .map(q => q.body.model)
+      assert.strictEqual(landed.length, 2, `应有两次上游请求：${landed}`)
+      assert.notStrictEqual(landed[0], landed[1], `并发的两条请求应落到不同模型：${landed}`)
+
+      // 复位
+      await fetchJson(`${base}/api/auto-strategy`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ strategy: 'balanced' })
+      })
+    })
+
     // ==================== 无可用 Provider ====================
     group('8. 边界与错误处理')
-
     await check('缺少 API Key 的 Provider → 500 且日志记录', async () => {
       const sw = await fetchJson(`${base}/api/state`, {
         method: 'POST',

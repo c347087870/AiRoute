@@ -13,6 +13,22 @@ export function formatCompact(num) {
   return String(value)
 }
 
+// 缓存命中率：缓存读 ÷（未命中输入 + 缓存读）。缓存写不计入分母——
+// 写缓存的那部分输入本来就没命中，算进去会把刚写入上下文的首轮请求也当成「可命中」
+export function calcCacheHitRate(stats) {
+  const cacheRead = Number(stats?.cacheRead) || 0
+  const input = Number(stats?.input) || 0
+  const cacheable = input + cacheRead
+  if (cacheable <= 0) return null
+  return (cacheRead / cacheable) * 100
+}
+
+// 百分比一位小数，无效值显示占位符
+export function formatPercent(rate) {
+  if (rate === null || rate === undefined || !Number.isFinite(Number(rate))) return '-'
+  return `${Number(rate).toFixed(1)}%`
+}
+
 // 时间戳格式化为本地时间（YYYY-MM-DD HH:mm:ss）
 export function formatTime(ts) {
   if (!ts) return '-'

@@ -41,11 +41,15 @@ function refLabel(providers, ref) {
 let trayRef = null
 let mainWindowRef = null
 
-// 托盘图标：Windows 直接用原图；macOS 菜单栏图标按「点」计算，
-// 需要把 1024px 原图缩到 18pt（并提供 2x 位图给 retina），否则图标会撑满整个菜单栏
+// 托盘图标：任务栏/菜单栏都要按「点」缩到小尺寸，否则 1024px 原图
+// 在 Windows 任务栏（16pt）会被系统硬缩发糊，macOS 菜单栏会撑满整条
 function loadTrayIcon(iconPath) {
   const image = nativeImage.createFromPath(iconPath)
-  if (process.platform !== 'darwin' || image.isEmpty()) return image
+  if (image.isEmpty()) return image
+  if (process.platform === 'win32') {
+    return image.resize({ width: 16, height: 16, quality: 'best' })
+  }
+  if (process.platform !== 'darwin') return image
   const trayImage = nativeImage.createEmpty()
   trayImage.addRepresentation({ scaleFactor: 1, buffer: image.resize({ width: 18, height: 18, quality: 'best' }).toPNG() })
   trayImage.addRepresentation({ scaleFactor: 2, buffer: image.resize({ width: 36, height: 36, quality: 'best' }).toPNG() })

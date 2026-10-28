@@ -1,16 +1,13 @@
 <template>
   <div class="benchmark">
-    <h1 class="page-title">模型测分</h1>
-
-    <!-- 顶部 Tab：运行评测 / 评测结果 / 题库管理 -->
-    <div class="tabs">
-      <button
-        v-for="tab in tabs"
-        :key="tab.value"
-        class="tab-btn"
-        :class="{ active: activeTab === tab.value }"
-        @click="activeTab = tab.value"
-      >{{ tab.label }}</button>
+    <!-- 顶部 Tab：运行评测 / 评测结果 / 题库管理
+         统一用 SegmentedTabs（与状态面板、渠道账号页同一套外观与键盘行为） -->
+    <div class="page-toolbar benchmark-toolbar">
+      <SegmentedTabs
+        v-model="activeTab"
+        :options="tabs"
+        label="模型测评页视图切换"
+      />
     </div>
 
     <!-- ============ Tab 1：运行评测 ============ -->
@@ -25,8 +22,8 @@
           <h2 class="block-title">选择模型</h2>
           <div class="block-actions">
             <span class="muted">已选 {{ selectedRefs.length }} 个</span>
-            <button class="btn-ghost btn-sm" @click="selectAllModels">全选</button>
-            <button class="btn-ghost btn-sm" @click="clearModels">清空</button>
+            <AppButton variant="secondary" @click="selectAllModels">全选</AppButton>
+            <AppButton variant="secondary" @click="clearModels">清空</AppButton>
           </div>
         </div>
         <div v-if="!modelGroupsByProvider.length" class="empty-hint">暂无可用模型</div>
@@ -48,8 +45,8 @@
           <h2 class="block-title">选择题目</h2>
           <div class="block-actions">
             <span class="muted">已选 {{ selectedQuestionIds.length }} 题</span>
-            <button class="btn-ghost btn-sm" @click="selectAllCategories">全选</button>
-            <button class="btn-ghost btn-sm" @click="clearCategories">清空</button>
+            <AppButton variant="secondary" @click="selectAllCategories">全选</AppButton>
+            <AppButton variant="secondary" @click="clearCategories">清空</AppButton>
           </div>
         </div>
         <div v-if="!categoryGroups.length" class="empty-hint">题库为空，请到「题库管理」添加题目</div>
@@ -94,7 +91,7 @@
               @change="clampConcurrency"
             />
           </label>
-          <button class="btn-primary" :disabled="!canStart" @click="startRun">{{ startButtonText }}</button>
+          <AppButton variant="primary" :disabled="!canStart" @click="startRun">{{ startButtonText }}</AppButton>
         </div>
         <div class="hint">
           预计请求数 {{ estimateRequests }} 次（{{ selectedRefs.length }} 模型 × {{ selectedQuestionIds.length }} 题）
@@ -105,7 +102,7 @@
             <span>评测进度</span>
             <span class="muted">{{ progressCompleted }} / {{ progressTotal }}</span>
           </div>
-          <div class="progress-bar">
+          <div class="progress-track">
             <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
           </div>
           <div class="hint">{{ running ? '评测进行中，每 1 秒刷新一次进度…' : '评测已结束' }}</div>
@@ -121,9 +118,9 @@
             <option v-for="run in runs" :key="run.id" :value="run.id">{{ runLabel(run) }}</option>
             <option v-if="!runs.length" value="">暂无评测记录</option>
           </select>
-          <button class="btn-ghost btn-sm" @click="loadRuns()">刷新</button>
-          <button class="btn-danger btn-sm" :disabled="!selectedRunId" @click="deleteRun">删除本条</button>
-          <button class="btn-danger btn-sm" :disabled="!runs.length" @click="clearRuns">清空全部</button>
+          <AppButton variant="secondary" @click="loadRuns()">刷新</AppButton>
+          <AppButton variant="danger" :disabled="!selectedRunId" @click="deleteRun">删除本条</AppButton>
+          <AppButton variant="danger" :disabled="!runs.length" @click="clearRuns">清空全部</AppButton>
         </div>
         <div v-if="runDetail" class="run-meta">
           <span class="badge" :class="statusClass(runDetail.status)">{{ statusText(runDetail.status) }}</span>
@@ -249,10 +246,10 @@
             <option v-for="group in categoryGroups" :key="group.category" :value="group.category">{{ group.category }}</option>
           </select>
           <input v-model="keyword" class="search-input" placeholder="搜索 ID / 标题 / 分类 / 提示词" />
-          <button class="btn-primary btn-sm" @click="openEdit(-1)">+ 新增题目</button>
-          <button class="btn-ghost btn-sm" @click="triggerImport">导入 JSON</button>
-          <button class="btn-ghost btn-sm" @click="exportQuestions">导出 JSON</button>
-          <button class="btn-ghost btn-sm" @click="resetToBuiltin">恢复内置题库</button>
+          <AppButton variant="primary" @click="openEdit(-1)">+ 新增题目</AppButton>
+          <AppButton variant="secondary" @click="triggerImport">导入 JSON</AppButton>
+          <AppButton variant="secondary" @click="exportQuestions">导出 JSON</AppButton>
+          <AppButton variant="secondary" @click="resetToBuiltin">恢复内置题库</AppButton>
           <input
             ref="fileInput"
             type="file"
@@ -283,8 +280,8 @@
               <td>{{ scoringModeLabel(item.scoring && item.scoring.mode) }}</td>
               <td>{{ item.scoring ? item.scoring.maxScore : '-' }}</td>
               <td>
-                <button class="btn-ghost btn-sm" @click="openEdit(questionIndex(item))">编辑</button>
-                <button class="btn-danger btn-sm" @click="removeQuestion(item)">删除</button>
+                <AppButton variant="secondary" @click="openEdit(questionIndex(item))">编辑</AppButton>
+                <AppButton variant="danger" @click="removeQuestion(item)">删除</AppButton>
               </td>
             </tr>
             <tr v-if="!filteredQuestions.length">
@@ -301,7 +298,7 @@
       <div class="card modal">
         <div class="modal-header">
           <h2>{{ editingIndex === -1 ? '新增题目' : '编辑题目' }}</h2>
-          <button class="modal-close" @click="showEditDialog = false">×</button>
+          <AppButton variant="ghost" iconOnly class="modal-close" @click="showEditDialog = false">×</AppButton>
         </div>
         <div class="form">
           <div class="form-row">
@@ -359,8 +356,8 @@
           </div>
         </div>
         <div class="modal-actions">
-          <button class="btn-ghost" @click="showEditDialog = false">取消</button>
-          <button class="btn-primary" @click="saveEdit">保存</button>
+          <AppButton variant="secondary" @click="showEditDialog = false">取消</AppButton>
+          <AppButton variant="primary" @click="saveEdit">保存</AppButton>
         </div>
       </div>
     </div>
@@ -370,12 +367,12 @@
       <div class="card modal modal-sm">
         <div class="modal-header">
           <h2>导入题库</h2>
-          <button class="modal-close" @click="importDialog.visible = false">×</button>
+          <AppButton variant="ghost" iconOnly class="modal-close" @click="importDialog.visible = false">×</AppButton>
         </div>
         <p class="modal-text">文件解析成功，共 {{ importDialog.list.length }} 道题目，请选择导入方式：</p>
         <div class="modal-actions">
-          <button class="btn-ghost" @click="doImport('append')">追加到现有题库</button>
-          <button class="btn-primary" @click="doImport('replace')">替换现有题库</button>
+          <AppButton variant="secondary" @click="doImport('append')">追加到现有题库</AppButton>
+          <AppButton variant="primary" @click="doImport('replace')">替换现有题库</AppButton>
         </div>
       </div>
     </div>
@@ -395,14 +392,10 @@ import { useEscClose } from '../composables/useEscClose.js'
 import { listModels, buildModelGroups, resolveRefLabel } from '../utils/models.js'
 import { formatNumber, formatTime, toLocalDateKey } from '../utils/format.js'
 
+import AppButton from '../components/AppButton.vue'
+import SegmentedTabs from '../components/SegmentedTabs.vue'
 const { providers, loadModelData } = useModel()
 
-// 顶部 Tab 定义
-const tabs = [
-  { value: 'run', label: '运行评测' },
-  { value: 'results', label: '评测结果' },
-  { value: 'questions', label: '题库管理' }
-]
 const activeTab = ref('run') // 当前激活的 Tab
 
 // 评分方式选项，编辑弹窗与列表展示共用
@@ -435,6 +428,14 @@ const runDetail = ref(null) // 当前评测记录详情（含每题回答）
 const expandedModels = ref([]) // 展开明细的模型引用列表
 const expandedOutputs = ref([]) // 展开完整输出的答案键列表
 
+// 顶部 Tab：与状态面板、渠道账号页同一套分段控件，附带计数徽标
+// （题库多少道、历史多少次评测，切过去之前就能看到）
+const tabs = computed(() => [
+  { value: 'run', label: '运行评测' },
+  { value: 'results', label: '评测结果', badge: runs.value.length },
+  { value: 'questions', label: '题库管理', badge: questions.value.length }
+])
+
 // 题库管理筛选与编辑状态
 const filterCategory = ref('') // 列表分类筛选值
 const keyword = ref('') // 列表关键词搜索值
@@ -465,7 +466,7 @@ const modelGroupsByProvider = computed(() => {
     }
     map.get(item.providerName).models.push({
       ref: item.ref,
-      label: item.model.displayName || item.model.id
+      label: item.label
     })
   }
   return [...map.values()]
@@ -609,9 +610,9 @@ function statusText(status) {
 
 // 评测状态徽章的样式类
 function statusClass(status) {
-  if (status === 'completed') return 'badge-ok'
-  if (status === 'running') return 'badge-running'
-  if (status === 'failed' || status === 'error') return 'badge-fail'
+  if (status === 'completed') return 'ok'
+  if (status === 'running') return 'info'
+  if (status === 'failed' || status === 'error') return 'bad'
   return ''
 }
 
@@ -1043,39 +1044,10 @@ onUnmounted(stopPolling)
 </script>
 
 <style scoped>
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 20px;
-  color: var(--text-1);
-}
 
-/* 顶部 Tab */
-.tabs {
-  display: flex;
-  gap: 8px;
-  border-bottom: 1px solid var(--border-2);
-  margin-bottom: 20px;
-}
-
-.tab-btn {
-  background: transparent;
-  color: var(--text-2);
-  padding: 10px 18px;
-  border-radius: 10px 10px 0 0;
-  font-size: 14px;
-  font-weight: 500;
-  border-bottom: 2px solid transparent;
-}
-
-.tab-btn:hover {
-  color: var(--primary);
-}
-
-.tab-btn.active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
-  background: var(--tint-primary);
+/* 顶部 Tab：分段控件靠左，与下方卡片的左边缘对齐（全局 .page-toolbar 默认右对齐） */
+.benchmark-toolbar {
+  justify-content: flex-start;
 }
 
 .tab-panel {
@@ -1094,7 +1066,7 @@ onUnmounted(stopPolling)
 }
 
 .block-title {
-  font-size: 16px;
+  font-size: var(--fs-section);
   font-weight: 600;
   margin: 0;
   color: var(--text-1);
@@ -1106,44 +1078,26 @@ onUnmounted(stopPolling)
   gap: 8px;
 }
 
-.section {
-  margin-bottom: 20px;
-}
 
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: var(--text-1);
-}
 
 .muted {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-top: 10px;
 }
 
 .empty-hint {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-3);
   padding: 16px 0;
   text-align: center;
 }
 
-.warning-box {
-  background: var(--tint-warning);
-  border: 1px solid var(--warning);
-  color: var(--warning-text);
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  margin-bottom: 14px;
-}
 
 /* 复选框分组 */
 .group {
@@ -1151,7 +1105,7 @@ onUnmounted(stopPolling)
 }
 
 .group-title {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 8px;
@@ -1169,7 +1123,7 @@ onUnmounted(stopPolling)
   gap: 8px;
   padding: 8px 10px;
   border: 1px solid var(--border-1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-hover);
   cursor: pointer;
   min-width: 0;
@@ -1180,7 +1134,7 @@ onUnmounted(stopPolling)
 }
 
 .check-main {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1188,7 +1142,7 @@ onUnmounted(stopPolling)
 }
 
 .check-sub {
-  font-size: 11px;
+  font-size: var(--fs-mini);
   color: var(--text-3);
   margin-left: auto;
   white-space: nowrap;
@@ -1209,7 +1163,7 @@ onUnmounted(stopPolling)
 }
 
 .field-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -1231,23 +1185,12 @@ onUnmounted(stopPolling)
 .progress-head {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
   margin-bottom: 8px;
 }
 
-.progress-bar {
-  height: 10px;
-  background: var(--border-2);
-  border-radius: 5px;
-  overflow: hidden;
-}
 
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--primary), #4DA6FF);
-  transition: width 0.3s ease;
-}
 
 /* 工具栏 */
 .toolbar {
@@ -1280,33 +1223,16 @@ onUnmounted(stopPolling)
   gap: 16px;
   flex-wrap: wrap;
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .run-error {
   color: var(--danger);
 }
 
-.badge {
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-}
 
-.badge-ok {
-  background: var(--tint-success);
-  color: var(--success);
-}
 
-.badge-running {
-  background: var(--tint-primary-soft);
-  color: var(--primary);
-}
 
-.badge-fail {
-  background: var(--tint-danger);
-  color: var(--danger);
-}
 
 /* 表格 */
 .data-table {
@@ -1318,7 +1244,7 @@ onUnmounted(stopPolling)
 .data-table td {
   text-align: left;
   padding: 12px;
-  font-size: 13px;
+  font-size: var(--fs-small);
   border-bottom: 1px solid var(--border-2);
   color: var(--text-1);
   white-space: nowrap;
@@ -1347,7 +1273,7 @@ onUnmounted(stopPolling)
   height: 22px;
   min-width: 120px;
   background: var(--border-2);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -1362,7 +1288,7 @@ onUnmounted(stopPolling)
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -1375,13 +1301,7 @@ onUnmounted(stopPolling)
   color: var(--danger);
 }
 
-.font-bold {
-  font-weight: 600;
-}
 
-.text-purple {
-  color: var(--purple);
-}
 
 /* 分类对比表横向滚动，首列固定 */
 .table-scroll {
@@ -1424,12 +1344,12 @@ onUnmounted(stopPolling)
 
 .arrow {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   width: 12px;
 }
 
 .detail-title {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -1457,25 +1377,25 @@ onUnmounted(stopPolling)
 }
 
 .qid {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--purple);
   font-weight: 600;
 }
 
 .qtitle {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-1);
 }
 
 .score {
-  font-size: 13px;
+  font-size: var(--fs-small);
   font-weight: 600;
   color: var(--primary);
 }
 
 .prompt-box {
   margin-bottom: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 
@@ -1488,11 +1408,11 @@ onUnmounted(stopPolling)
   white-space: pre-wrap;
   word-break: break-word;
   background: var(--bg-hover);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 10px;
   margin-top: 6px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   max-height: 200px;
   overflow-y: auto;
 }
@@ -1502,9 +1422,9 @@ onUnmounted(stopPolling)
   word-break: break-word;
   background: var(--bg-hover);
   border: 1px solid var(--border-2);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   cursor: pointer;
 }
@@ -1516,68 +1436,32 @@ onUnmounted(stopPolling)
 
 .answer-error {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--danger);
 }
 
 .answer-comment {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--purple);
   background: var(--tint-purple);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
 }
 
 /* 弹窗 */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
 
-.modal {
-  width: 560px;
-  max-height: 84vh;
-  overflow-y: auto;
-}
 
 .modal-sm {
   width: 420px;
 }
 
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
 
-.modal-header h2 {
-  font-size: 18px;
-  margin: 0;
-  color: var(--text-1);
-}
 
-.modal-close {
-  background: transparent;
-  border: none;
-  color: var(--text-3);
-  font-size: 24px;
-  cursor: pointer;
-  line-height: 1;
-}
 
-.modal-close:hover {
-  color: var(--danger);
-}
 
 .modal-text {
-  font-size: 14px;
+  font-size: var(--fs-base);
   color: var(--text-1);
   margin-bottom: 20px;
 }
@@ -1590,20 +1474,15 @@ onUnmounted(stopPolling)
 }
 
 .form-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
 .form-row textarea {
   resize: vertical;
   font-family: inherit;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 18px;
-}
 </style>
+

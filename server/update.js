@@ -13,6 +13,9 @@ const path = require('path')
 const REPO = 'c347087870/AiRoute'
 const CACHE_TTL = 30 * 60 * 1000
 const CHECKSUM_ASSET = 'SHA256SUMS.txt'
+// beta 线拉列表时取多少条：Release 按创建时间倒序，最高版本一定落在前面，
+// 60 条足够跨过「同一版本线发了很多补丁」的情况
+const RELEASES_PAGE = 60
 
 // 发布资产名：AiRoute-<version>-<arch>.<ext>（与 electron-builder.json 的 artifactName 模板一致）
 // 架构取运行时的 process.arch：Apple Silicon / Windows on ARM 上 Electron 原生报 arm64，其余按 x64
@@ -100,15 +103,87 @@ function getLocalVersion() {
   return '0.0.0'
 }
 
-// 三段式版本比较：a > b 返回 1，相等 0，小于 -1（忽略 v 前缀与预发布后缀）
-function compareVersion(a, b) {
-  const pa = String(a).replace(/^v/i, '').split('-')[0].split('.').map(n => parseInt(n, 10) || 0)
-  const pb = String(b).replace(/^v/i, '').split('-')[0].split('.').map(n => parseInt(n, 10) || 0)
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0)
-    if (d !== 0) return d > 0 ? 1 : -1
+// 版本号拆成 { 数字段, 预发布标识 }：2.0.0-beta.3 → { nums: [2,0,0], pre: 'beta.3' }
+function parseSemver(version) {
+  const text = String(version || '').replace(/^v/i, '').trim()
+  const [core, ...rest] = text.split('-')
+  const nums = core.split('.').map(n => parseInt(n, 10) || 0)
+  while (nums.length < 3) nums.push(0)
+  return { nums, pre: rest.join('-') }
+}
+
+// 是否预发布版本（带 -beta.3 这类后缀）——发布线路与「谁该看到它」都由它决定
+function isPrerelease(version) {
+  return !!parseSemver(version).pre
+}
+
+// 预发布标识按 semver 规则比较：数字段按数值、标识符逐个比、数字 < 字母、短的更小
+function comparePrerelease(a, b) {
+  const pa = String(a).split('.')
+  const pb = String(b).split('.')
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if (pa[i] === undefined) return -1
+    if (pb[i] === undefined) return 1
+    const na = /^\d+$/.test(pa[i])
+    const nb = /^\d+$/.test(pb[i])
+    if (na && nb) {
+      const d = Number(pa[i]) - Number(pb[i])
+      if (d !== 0) return d > 0 ? 1 : -1
+      continue
+    }
+    if (na !== nb) return na ? -1 : 1
+    if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1
   }
   return 0
+}
+
+// 完整 semver 比较：a > b 返回 1，相等 0，小于 -1。
+// 必须区分预发布：2.0.0-beta.3 > 2.0.0-beta.2，而 2.0.0 > 2.0.0-beta.3。
+// 旧的 compareVersion 砍掉后缀再比，beta.3 与 beta.2 会被判成相等，beta 线上永远发现不了更新
+function compareSemver(a, b) {
+  const pa = parseSemver(a)
+  const pb = parseSemver(b)
+  for (let i = 0; i < 3; i++) {
+    const d = pa.nums[i] - pb.nums[i]
+    if (d !== 0) return d > 0 ? 1 : -1
+  }
+  if (!pa.pre && !pb.pre) return 0
+  if (!pa.pre) return 1 // 正式版高于任何同号预发布
+  if (!pb.pre) return -1
+  return comparePrerelease(pa.pre, pb.pre)
+}
+
+// 更新线路：beta 构建（版本号带 beta / rc / alpha / next 这类预发布标识）走 beta 线，
+// 其余走正式线。线路由本地版本号决定，不需要构建期额外注入——分支与版本的对应关系
+// （next → 2.0.0-beta.x、main → 1.x）本来就写在 package.json 里。
+// 只认这几个「试跑标识」而不是「任何带后缀的版本」：v1.6.1-macos.1 这类制品标记当时是
+// 当正式版发的，把它判成 beta 会让那批老用户莫名其妙收到 beta 包。
+// AIROUTE_UPDATE_LINE 可强制指定，仅供测试与排障
+const BETA_MARKER = /-(alpha|beta|rc|next|dev)([.\-]|$)/i
+
+function releaseLine(version, override) {
+  const forced = String(override === undefined ? process.env.AIROUTE_UPDATE_LINE : override || '').toLowerCase()
+  if (forced === 'beta' || forced === 'stable') return forced
+  return BETA_MARKER.test(String(version || '')) ? 'beta' : 'stable'
+}
+
+// 从 Release 列表里挑出这条线路上的最新版本。
+// 硬性排除草稿：草稿的下载资产对外一律 404（实测 v2.0.0-beta.3 草稿的 dmg 与 SHA256SUMS 都是 404），
+// 一旦被选中，用户会看到「有新版本」却永远下载失败。
+// 线路之间严格隔离：正式线只认非 prerelease，beta 线只认 prerelease。
+// 不能反过来「beta 线也能看到正式版」——那样 next 分支上的 2.0.0-beta.3 会被
+// 1.9.0 之外的正式版牵着走，两条线的版本号互相污染，隔离就没有意义。
+// hasAsset(release) 提供时优先挑「确实带本平台资产」的版本；一个都没有才退回最高版本，
+// 这样「只给另一个平台发了包」的版本不会把本平台用户卡在一个 404 上
+function pickRelease(releases, line, hasAsset) {
+  const wantPre = line === 'beta'
+  const list = (Array.isArray(releases) ? releases : [])
+    .filter(r => r && r.tag_name && !r.draft)
+    .filter(r => !!r.prerelease === wantPre)
+    .sort((a, b) => compareSemver(b.tag_name, a.tag_name))
+  if (!list.length) return null
+  if (typeof hasAsset !== 'function') return list[0]
+  return list.find(hasAsset) || list[0]
 }
 
 // 通道一：GitHub API，信息最全（更新说明 / 发布时间 / 安装包大小 / 资产 digest）
@@ -135,7 +210,8 @@ async function fetchByApi() {
   }
 }
 
-// 通道二：读取 releases/latest 的 302 重定向地址解析最新 tag（api.github.com 会被限速）
+// 通道二：读取 releases/latest 的 302 重定向地址解析最新 tag（api.github.com 会被限速）。
+// 只能拿到 tag，没有资产清单——beta 线因此还需要通道三来确认「这个 tag 真的带本平台资产」
 async function fetchByRedirect() {
   const res = await axios.get(`https://github.com/${REPO}/releases/latest`, {
     timeout: 8000,
@@ -149,25 +225,75 @@ async function fetchByRedirect() {
   return { tag: matched[1], notes: '', publishedAt: '', size: 0, assetName: '', assetDigest: '', checksumsUrl: '', pageUrl: `https://github.com/${REPO}/releases/tag/${matched[1]}` }
 }
 
+// 通道三 beta 专用：API 的 releases 列表（含 prerelease，草稿对匿名调用不可见）。
+// /releases/latest 永远只给正式版，beta 线必须自己拉列表再挑
+async function fetchReleaseList() {
+  const res = await axios.get(`https://api.github.com/repos/${REPO}/releases`, {
+    timeout: 8000,
+    params: { per_page: RELEASES_PAGE },
+    headers: { 'User-Agent': 'AiRoute', Accept: 'application/vnd.github+json' },
+    validateStatus: s => s === 200
+  })
+  const list = Array.isArray(res.data) ? res.data : []
+  if (!list.length) throw new Error('仓库没有可用的 Release')
+  return list
+}
+
+// 把一个 Release 对象整理成 checkUpdate 需要的形状（与 fetchByApi 同构）
+function describeRelease(data) {
+  const names = assetCandidates(data.tag_name)
+  const assets = data.assets || []
+  const asset = names.map(name => assets.find(a => a.name === name)).find(Boolean)
+  const checksumAsset = assets.find(a => a.name === CHECKSUM_ASSET)
+  return {
+    tag: data.tag_name,
+    notes: data.body || '',
+    publishedAt: data.published_at || '',
+    size: asset ? asset.size : 0,
+    assetName: asset ? asset.name : '',
+    assetDigest: asset ? asset.digest || '' : '',
+    checksumsUrl: checksumAsset ? checksumAsset.browser_download_url || '' : '',
+    pageUrl: data.html_url || `https://github.com/${REPO}/releases/tag/${data.tag_name}`
+  }
+}
+
 // 检查更新：force=true 跳过 30 分钟缓存（设置页手动检查用）
+// 两条线路互不干扰：正式构建只看正式版（服务端 /releases/latest 的口径），
+// beta 构建只看 prerelease，永远拿不到对方的版本号。
 async function checkUpdate(force) {
-  if (!force && cached && Date.now() - cached.at < CACHE_TTL) return cached.data
+  const current = getLocalVersion()
+  const line = releaseLine(current)
+  // 缓存按线路分开：同一进程内 beta 与正式构建不会互相污染（开发时切分支很常见）
+  if (!force && cached && cached.line === line && Date.now() - cached.at < CACHE_TTL) return cached.data
   let info
   let channel = 'api'
-  try {
-    info = await fetchByApi()
-  } catch {
-    channel = 'redirect'
-    info = await fetchByRedirect()
+  if (line === 'beta') {
+    // beta 线：拉列表 → 排除草稿 → 只要 prerelease → 优先挑带本平台资产的。
+    // beta 线暂时没有已发布的版本（例如只建了草稿）时不能报错：用户会看到
+    // 「检查更新失败」，可实际上没有任何可装的东西，如实回答「已是最新」更准确
+    channel = 'releases'
+    const list = await fetchReleaseList()
+    const picked = pickRelease(list, 'beta', r => (r.assets || []).length > 0)
+    info = picked ? describeRelease(picked) : { tag: `v${current}`, notes: '', publishedAt: '', size: 0, assetName: '', assetDigest: '', checksumsUrl: '', pageUrl: `https://github.com/${REPO}/releases` }
+  } else {
+    try {
+      info = await fetchByApi()
+    } catch {
+      channel = 'redirect'
+      info = await fetchByRedirect()
+    }
   }
-  const current = getLocalVersion()
   const latest = info.tag.replace(/^v/i, '')
   const assetName = info.assetName || assetCandidates(info.tag)[0]
   const data = {
     current,
     latest,
     tag: info.tag,
-    hasUpdate: compareVersion(latest, current) > 0,
+    // 用完整 semver 比较：beta 线要能分辨 beta.2 → beta.3，正式线要能把 2.0.0-beta.3 判为「比 1.9.0 新」
+    hasUpdate: compareSemver(latest, current) > 0,
+    // 线路随结果一起回前端：界面据此说明「你在 beta 线」，也方便排障时一眼看出走的哪条
+    line,
+    latestIsPrerelease: isPrerelease(latest),
     channel,
     pageUrl: info.pageUrl,
     notes: info.notes,
@@ -184,7 +310,7 @@ async function checkUpdate(force) {
     checksumsUrl: info.checksumsUrl || checksumsUrl(info.tag),
     downloadUrl: `https://github.com/${REPO}/releases/download/${info.tag}/${assetName}`
   }
-  cached = { at: Date.now(), data }
+  cached = { at: Date.now(), line, data }
   return data
 }
 
@@ -406,7 +532,12 @@ module.exports = {
   installAssetCandidates,
   normalizeInstallKind,
   canOneClick,
-  compareVersion,
+  compareSemver,
+  parseSemver,
+  isPrerelease,
+  comparePrerelease,
+  releaseLine,
+  pickRelease,
   parseChecksums,
   normalizeSha,
   SETUP_SUFFIX,

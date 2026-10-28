@@ -1,5 +1,7 @@
 # 依赖
 node_modules/
+# pnpm 全局/本地存储（海量内容寻址文件，不入库）
+.pnpm-store/
 
 # 敏感配置（含 API Key）
 server/models.json
@@ -14,10 +16,15 @@ server/benchmark-runs.json
 server/fallback.json
 server/rules.json
 server/server-config.json
+server/model-health.json
+server/account-health.json
 
 # WorkBuddy 账号凭证与池状态（含明文 accessToken/refreshToken，严禁提交）
 server/workbuddy-auths/
 server/workbuddy-state.json
+
+# 十个账号渠道的凭据、账号池与状态（channel-credentials.json 是明文，严禁提交）
+server/channels-data/
 
 # WorkBuddy 用量统计（运行时数据）
 server/usage.json
@@ -30,6 +37,8 @@ server/version-cache.json
 
 # 工具本地数据
 .codebuddy/
+# pnpm dev:isolated 的独立 Electron 用户目录（与正式版单实例锁隔离）
+.dev-userdata/
 .claude/
 .workbuddy-ai/
 # lockfile
@@ -42,6 +51,8 @@ app/server/
 app/renderer/dist/
 app/dist-electron/
 
+# 构建脚本独立安装的生产依赖（build.js 的中间产物）
+.build-node_modules/
 # 构建脚本重命名的旧依赖目录（删除失败时的残留）
 .build-node_modules.old.*
 
