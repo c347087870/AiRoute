@@ -153,14 +153,6 @@ check('渠道运行时状态可读', async () => {
   assert.deepEqual(body.providers, ['gemini'])
 })
 
-check('渠道模型出现在 /v1/models', async () => {
-  const res = await request('GET', '/v1/models')
-  // /v1/models 播报的是渠道包的模型 id（`gemini/…`），AiRoute 的引用则是
-  // `channels/gemini/…` —— 请求实际按「当前模型」路由，这里只验证目录里有它
-  const ids = JSON.parse(res.text).data.map(row => row.id)
-  assert.ok(ids.includes('gemini/gemini-2.5-pro'), `实际：${ids.slice(0, 5).join(',')}`)
-})
-
 check('非流式：正文、思考、工具调用、用量都转对', async () => {
   const res = await request('POST', '/v1/chat/completions', {
     model: 'channels/gemini/gemini-2.5-pro',

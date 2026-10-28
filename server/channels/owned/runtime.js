@@ -345,7 +345,12 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
         const modelIds = Array.isArray(payload.modelIds) ? payload.modelIds.filter(id => typeof id === 'string' && id) : []
         const ids = new Set(modelIds)
         const state = readState()
-        const next = {}
+        // 只改本 provider 的条目：整份替换会把别的渠道的关闭状态一起抹掉
+        // （在 Trae 勾一个模型就把 Qoder 的清单清成「全部启用」）
+        const next = { ...state.disabledModels }
+        for (const key of Object.keys(next)) {
+          if (key.startsWith(`${provider}/`)) delete next[key]
+        }
         for (const model of await modelsOf(provider)) {
           const full = `${provider}/${model.id}`
           if (!ids.has(full) && !ids.has(model.id)) next[full] = true

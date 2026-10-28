@@ -1126,44 +1126,12 @@ app.post('/v1/messages', handleRequest)
 app.post('/v1/chat/completions', handleRequest)
 app.post('/v1/responses', handleRequest)
 
+// 只播报 auto 伪模型：真实模型与别名都不再暴露给客户端。
+// 客户端只需填 `auto`，具体挑哪个模型由服务端按当前策略（见 auto-strategy.js）决定——
+// 这样一来客户端配置里不会写死具体模型，切换策略/模型无需改客户端。
+// 同时避免某些客户端把列表第一项当默认值而选中某个真实模型。
 app.get('/v1/models', (req, res) => {
-  const config = getConfig()
-  const seen = new Set()
-  const configured = []
-
-  // 失活模型不再播报：列表里出现它，客户端就会选中它，然后必然失败。
-  // 同一个模型 id 可能挂在多个源上（例如同一模型建两次），只要还有一个
-  // 可用的源就照常播报，只有「所有来源都失活」才隐藏。
-  const offlineRefs = modelHealth.offlineRefs()
-  const refs = listModelRefs(config)
-  const liveIds = new Set(refs.filter(item => !offlineRefs.has(item.ref)).map(item => item.model.id))
-  const offlineOnlyIds = new Set(
-    refs.filter(item => offlineRefs.has(item.ref) && !liveIds.has(item.model.id)).map(item => item.model.id)
-  )
-
-  for (const { model } of refs) {
-    if (seen.has(model.id)) continue
-    if (offlineOnlyIds.has(model.id)) continue
-    seen.add(model.id)
-    configured.push({ id: model.id, object: 'model', created: 0, owned_by: 'airoute' })
-  }
-
-  const aliases = [
-    'claude-opus-4-0-20250514', 'claude-opus-4-20250514',
-    'claude-sonnet-4-0-20250514', 'claude-sonnet-4-20250514',
-    'claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-20241022',
-    'claude-3-5-haiku-20241022', 'claude-3-opus-20240229',
-    'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'
-  ]
-  const extra = aliases.filter(a => !seen.has(a)).map(id => ({
-    id, object: 'model', created: 0, owned_by: 'airoute'
-  }))
-
-  // 几个 auto 伪模型排在配置模型之后、别名之前：客户端能选到它们，
-  // 但不会挤掉真实模型（有些客户端把列表第一项当默认值）
-  const autoModels = autoStrategy.listAutoModels().filter(item => !seen.has(item.id))
-
-  res.json({ object: 'list', data: [...configured, ...autoModels, ...extra] })
+  res.json({ object: 'list', data: autoStrategy.listAutoModels() })
 })
 
 // ==================== Anthropic token 计数（Claude Code 预估用）====================

@@ -147,7 +147,7 @@
         <span class="ob-foot-hint">{{ stepIndex + 1 }} / {{ STEPS.length }}</span>
         <div class="ob-actions">
           <AppButton variant="secondary" v-if="stepIndex > 0" @click="prev">上一步</AppButton>
-          <AppButton variant="primary" v-if="!isLast" @click="next">{{ nextLabel }}</AppButton>
+          <AppButton variant="primary" v-if="!isLast" @click="next">下一步</AppButton>
           <AppButton variant="primary" v-else @click="finish">开始使用</AppButton>
         </div>
       </footer>
@@ -172,13 +172,14 @@ import {
 } from '../api.js'
 import { useOnboarding } from '../composables/useOnboarding.js'
 import { useModel } from '../composables/useModel.js'
+import { showToast } from '../composables/useToast.js'
 
 import AppButton from '../components/AppButton.vue'
 import OauthAuthBlock from '../components/OauthAuthBlock.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
 const emit = defineEmits(['close', 'finish'])
 
-const { stepIndex } = useOnboarding()
+const { stepIndex, modelDefaultsApplied, markModelDefaultsApplied } = useOnboarding()
 // 复用共享的 provider 状态：与「Provider 管理」页看到的保持一致，
 // 自己再存一份必然会和别处对不上（渠道源里带的是启用清单口径的模型）
 const { loadModelData } = useModel()
@@ -217,11 +218,23 @@ const isLast = computed(() => stepIndex.value >= STEPS.length - 1)
 // 面板高度跟着内容走，不做高度过渡：翻步时整块面板直接变高，
 // 免得内容被一段高度动画挤着上下抖。
 
-// 下一步按钮的文案跟随「这一步还没做完」的状态：渠道没配好时说清楚，
-// 不然用户会以为「下一步」=「已经配好了」
-const nextLabel = computed(() => {
-  if (step.value.key === 'channel' && !hasChannelAccount.value) return '先跳过，稍后配置'
-  return '下一步'
+// 步骤内的阻塞：前两步各自有一个「做完才算做完」的条件，没满足就不放行。
+// 「跳过引导」仍然留着 —— 用户随时可以放弃引导去用界面，不必被流程困住；
+// 但只要他还在引导里，就不能带着「没登录 / 没选模型」的状态进入下一步。
+// 按钮不禁用：点了出一条轻提示，告诉他这一步要做什么，而不是对着一个点不动的按钮猜。
+// 数据还没取回时也按「没做」提示：此刻确实没有登录态/启用模型可用，
+// 说「正在读取」等于把内部状态抛给用户，而他此刻要做的动作没有区别。
+const canAdvance = computed(() => {
+  if (step.value.key === 'channel') return hasChannelAccount.value
+  if (step.value.key === 'model') return hasEnabledModel.value
+  return true
+})
+
+const blockHint = computed(() => {
+  if (canAdvance.value) return ''
+  if (step.value.key === 'channel') return '请先登录一个渠道账号'
+  if (step.value.key === 'model') return '请先启用至少一个模型'
+  return ''
 })
 
 // ==================== 环境自检 ====================
@@ -488,7 +501,6 @@ const switchError = ref('')
 const busyRef = ref('')
 // 目录加载中：期间不判「没有可用模型」，避免警告条闪现
 const modelLoading = ref(false)
-const modelDefaultsApplied = ref(false)
 
 // 具体模型的来源分组。与「渠道账号 → 模型」页同一套口径：全量目录 =
 // 渠道包 model.list + WorkBuddy 上游清单，disabled 由启用清单相减得到 ——
@@ -507,6 +519,12 @@ const CHANNEL_GROUP_ORDER = ['workbuddy', 'workbuddy-global', 'trae', 'qoder', '
 // 全量目录（含已关闭的模型）。组内模型行 { id, name, disabled, ref }，
 // ref 是完整引用 `channels/<provider>/<模型 id>`，写回时按它分组
 const modelGroups = ref([])
+
+// 第 2 步的完成条件：至少启用一个模型。目录行上的 disabled 就是启用状态的
+// 唯一事实来源（不另存一份勾选集合，否则必然和后端对不上）
+const hasEnabledModel = computed(() =>
+  modelGroups.value.some(group => group.models.some(m => !m.disabled))
+)
 
 async function loadModelCatalog() {
   modelLoading.value = true
@@ -567,13 +585,17 @@ async function loadModelCatalog() {
       models: byChannel.get(id).sort((a, b) => Number(a.disabled) - Number(b.disabled) || a.name.localeCompare(b.name))
     }))
 
-  if (!modelDefaultsApplied.value) {
-    modelDefaultsApplied.value = true
+  // 首次进入引导时把模型全部置为关闭，让用户自己挑一遍。
+  // 只在本次安装里做一次：每次打开引导都重置会清掉用户已有的启用配置
+  if (!modelDefaultsApplied()) {
     const results = await Promise.allSettled(modelGroups.value.map(async group => {
       group.models.forEach(model => { model.disabled = true })
       await saveGroupOf(`channels/${group.id}/`, [])
     }))
-    if (results.some(result => result.status === 'rejected')) {
+    // 全部写成功才记「已应用」：写失败了下次进这一步还要重来
+    if (results.every(result => result.status === 'fulfilled')) {
+      markModelDefaultsApplied()
+    } else {
       switchError.value = '关闭部分模型失败，请重新打开对应模型后再关闭。'
     }
   }
@@ -684,6 +706,11 @@ function prev() {
 }
 
 function next() {
+  // 没满足这一步的完成条件就不翻页：轻提示告诉他缺什么，不悄悄吞掉这次点击
+  if (!canAdvance.value) {
+    if (blockHint.value) showToast(blockHint.value, 'warn')
+    return
+  }
   if (stepIndex.value < STEPS.length - 1) stepIndex.value += 1
 }
 

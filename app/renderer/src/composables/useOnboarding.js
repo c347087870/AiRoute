@@ -14,6 +14,26 @@ import { ref } from 'vue'
 const STORAGE_KEY = 'airoute-onboarding'
 const VERSION = 1
 
+// 「进入引导时把模型全部置为关闭」只应用一次。
+// 引导可以从侧边栏随时重开，若每次重开都清空用户已启用的模型，配合第 2 步
+// 「至少启用一个模型」的阻塞，重开一次就得从头重选一遍。
+const MODEL_DEFAULTS_KEY = 'airoute-onboarding-model-defaults'
+
+function modelDefaultsApplied() {
+  try {
+    return localStorage.getItem(MODEL_DEFAULTS_KEY) === '1'
+  } catch {
+    // 存储不可用：当成已应用。宁可保留用户已有配置，也不要反复清空
+    return true
+  }
+}
+
+function markModelDefaultsApplied() {
+  try {
+    localStorage.setItem(MODEL_DEFAULTS_KEY, '1')
+  } catch {}
+}
+
 // 当前版本是否已经完成（或主动跳过）
 function readDone() {
   try {
@@ -110,6 +130,8 @@ export function useOnboarding() {
     skipOnboarding,
     resetOnboarding,
     markResume,
-    resumeOnboarding
+    resumeOnboarding,
+    modelDefaultsApplied,
+    markModelDefaultsApplied
   }
 }

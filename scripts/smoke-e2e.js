@@ -361,21 +361,11 @@ async function main() {
       assert.strictEqual(r.status, 400)
     })
 
-    await check('GET /v1/models 返回配置模型 + 别名', async () => {
-      const r = await fetchJson(`${base}/v1/models`)
-      const ids = r.json.data.map(m => m.id)
-      assert.ok(ids.includes('mock-large'))
-      assert.ok(ids.includes('claude-opus-4-20250514'))
-    })
-
     await check('GET /v1/models 只暴露 auto 伪模型', async () => {
       const r = await fetchJson(`${base}/v1/models`)
       const ids = r.json.data.map(m => m.id)
-      assert.ok(ids.includes('auto'))
-      // 策略改在「渠道-模型」页统一选，模型列表里不该再有另外三档
-      for (const id of ['auto-fast', 'auto-cheap', 'auto-least-conn']) {
-        assert.ok(!ids.includes(id), `${id} 不该再出现在 /v1/models`)
-      }
+      // 客户端只需填 auto，真实模型与别名一律不再播报
+      assert.deepStrictEqual(ids, ['auto'])
     })
 
     await check('Auto 策略：可读可改，非法值 400', async () => {
@@ -685,7 +675,7 @@ async function main() {
     // ==================== 模型失活 ====================
     group('6.5 模型失活（连续失败 → 下线 → 手动恢复）')
 
-    await check('连续 3 次失败 → 模型失活、不再出现在 /v1/models、恢复后回来', async () => {
+    await check('连续 3 次失败 → 模型失活、请求被拒、恢复后回来', async () => {
       const setState = ref => fetchJson(`${base}/api/state`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -709,9 +699,6 @@ async function main() {
         assert.strictEqual(record.offline, true)
         assert.strictEqual(record.reason, 'errors')
 
-        const listed = await fetchJson(`${base}/v1/models`)
-        assert.ok(!listed.json.data.some(item => item.id === 'dead'), '失活模型不该再被播报')
-
         const blocked = await fetchJson(`${base}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -726,8 +713,6 @@ async function main() {
           body: JSON.stringify({ ref: 'fail-provider/dead' })
         })
         assert.strictEqual(revived.status, 200)
-        const listedAgain = await fetchJson(`${base}/v1/models`)
-        assert.ok(listedAgain.json.data.some(item => item.id === 'dead'), '恢复后应重新播报')
       } finally {
         await setState('mock-provider/mock-large')
       }
