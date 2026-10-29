@@ -727,7 +727,7 @@ async function forwardChat(opts) {
       const rateLimitOnly = modelBlocked && diag.modelRateLimited === diag.modelCooled
       const rateLimitHint = rateLimitOnly
         ? (() => {
-            const resetAt = Math.min(...Object.values(r.pool.status())
+            const resetAt = Math.min(...r.pool.list()
               .filter(s => s.realm === pickRealm)
               .flatMap(s => s.rateLimitedModels || [])
               .filter(item => item.model === model)

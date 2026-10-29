@@ -20,6 +20,7 @@
 - **出站请求体带项目自证标识**：`prompt_cache_key` 曾是 `wb2a-<uid 前 8 位>-<hash>`，另有 23 处 `wb2api-*` 会话/请求 id。全部改为随机 UUID / 纯 32 hex —— 缓存键唯一性由 hash 本身保证，uid 明文不再出网
 - **流式首帧漏判 `200 + {code,msg}`**：只认 `{error}` 形态，上游内嵌业务错误帧被当正常帧透传，本可换号的失败变成「200 + 错误帧」。现两种形态都判，业务码非 0 标记为不合格帧交给换号逻辑
 - **Trae 签到 / 余额 / 用户信息的请求体与客户端不一致**：签到补 `req_source: 1`（IDE 口径，原为空 body）、余额 `req_source` 由 2 改为 1、`GetUserInfo` 的 `IDEVersion` 改用客户端版本（原来取聊天头的 `0.1.52`）
+- **模型级限流时诊断代码崩溃**：`runtime.js` 取「模型级限流重置时间」时把 `pool.status()`（单号查询，无参返回 `null`）当全量列表用，`Object.values(null)` 直接抛 `Cannot convert undefined or null to object`。表现是「某个模型被上游限流 → 测试秒失败并显示这句天书」，真实原因全被盖住。改用 `pool.list()`；现在返回「模型 X 在国内版账号池中不可用（模型级限流中，HH:MM 重置），请切换其他模型（账号诊断：总 N / 可用 0 / 模型受限 1）」
 
 ### 变更
 
@@ -30,9 +31,12 @@
 - **Qoder 国际版出现「排队中」= 官方禁用该号**：`10605` 排队不再等 30 秒×2 白跑，直接给账号打 `officialDisabled` 标记、从选号里剔除，面板显示红色「官方禁用」；勾选启用即可清除标记
 - **Qoder 活动平台 `cosy-version` 改为跟随官网同步的 IDE 版本**（原先写死 `0.4.8`）
 - **「模型来源」的模型行改成定宽网格**：名字｜上下文/输出（右对齐）｜状态｜测｜切换 五列固定，不再按内容宽度参差；状态列（耗时 / 失败 / 失活）固定宽度，右侧按钮不再左右跳
+- **「模型来源」每行的操作按钮移进标题行**：`测试全部 / 编辑 / 设为当前 / 删除` 原来是 `.row-main` 的兄弟节点，占着卡片右侧一列，把模型列表挤成左侧窄柱 —— 长模型名只能显示成省略号。现在按钮靠右跟在标题行，模型列表用满整卡宽度
+- **模型行的「测」与「切换」尺寸统一**：同高（`--btn-h`）、同宽（72px 列）、同字号、同圆角，只保留配色上的主次差异
 
 ### 新增
 
+- **「模型来源」页加模型搜索框**：按模型 id / 显示名 / 来源 id 子串匹配，命中的来源自动展开全部命中项，无命中的来源整块隐藏；Esc 清空。占位文案带总数（「共 N 个」）
 - **官网版本号自动同步（`server/channels/version-sync.js`）**：启动即拉、之后每 24 小时一次，双源取最大 —— Trae 用 `docs.trae.cn/ide_changelog` + 本机安装的 `product.json`（`appVersion` / `tronBuildVersion`），Qoder 用 `qoder.com/changelog` 的 `type=ide` 最新 `tag_name` + 本机 Launcher `state.ini`。结果落盘 `channels-data/channel-versions.json`，拉取失败静默沿用旧值；Trae 登录链接的 `plugin_version` / `x_app_version`、换证的 `IDEVersion`、Qoder 的 `cosy-version` 全部跟随
 - **`account.checkLogin`**：Trae 令牌主动校验（`CheckLogin`，不消耗积分），能力位 `capabilities.checkLogin` 随插件申报
 - **Trae 设备密钥与 `auth_client_id` 随凭据落盘**：重建凭据时保住设备绑定关系

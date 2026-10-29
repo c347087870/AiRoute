@@ -378,23 +378,19 @@
       <div v-if="modelGroups.length" class="card ch-enabled-card">
         <!-- 已开启模型：跨渠道拍平的可调用清单。
              下面的分组是**全量目录**（cline 一家就 493 条，绝大多数是灰的），
-             而用户真正要回答的问题只有一个：我的客户端现在能选到哪些模型。
-             单列一张卡片，不受模型过滤影响 —— 过滤输入框在下一张卡里，
-             让人一眼看出它没被筛（这张是完整清单，被截断会让人以为模型掉线） -->
+             而用户真正要回答的问题只有一个：我的客户端现在能选到哪些模型 -->
         <div class="ch-enabled-block">
           <div class="ch-model-group-head">
             <span class="ch-name">已开启模型</span>
             <span class="text-muted">共 <span class="ch-ok">{{ enabledModels.length }}</span> 个</span>
-            <!-- 这块自己的测试入口：只打这里列出的模型，也就是客户端现在真能调到的那些。
-                 和下面的「测试」不是一回事 —— 那个按渠道铺开、且受过滤收窄；
-                 这个不看过滤，关闭 / 已失效 / 已失活的本来就不在这张清单里 -->
+            <!-- 这块自己的测试入口：只打这里列出的模型，也就是客户端现在真能调到的那些 -->
             <span class="ch-group-actions">
               <!-- 测试中这个按钮变成「停止」：同一个位置点两次就是开始 / 取消，
                    不用扫到工具栏另一端去找「中止」，也不会被误当成「再开一轮」 -->
               <AppButton variant="secondary" :disabled="(!!testRun && !isTestRunning('enabled')) || !!busyKey || !enabledModels.length" :title="isTestRunning('enabled') ? `停止当前测试（已测 ${testRun.done}/${testRun.total}），在途的那次会立刻断开，不计失败` : `逐个真实调用这里列出的 ${enabledModels.length} 个已开启模型（渠道之间并发，同一渠道内串行 + 间隔，避免触发上游风控）；关闭的与已失效 / 已失活的本来就不在这张清单里`" @click="toggleModelTests('enabled')">
                 {{ isTestRunning('enabled') ? `停止 ${testRun.done}/${testRun.total}` : '测试' }}
               </AppButton>
-              <!-- 一键关闭清单里全部模型：清单本身就是范围，不需要过滤收窄 -->
+              <!-- 一键关闭清单里全部模型 -->
               <AppButton variant="secondary" :disabled="!!busyKey || !enabledModels.length" @click="closeAllEnabled">全部关闭</AppButton>
             </span>
           </div>
@@ -430,29 +426,8 @@
 
       <div class="card ch-models-card">
         <div class="ch-toolbar">
-          <!-- 模型过滤：全量目录动辄几百条，只按名称 / id 的子串匹配（不区分大小写）。
-               输入框留在工具栏里而不是每组头各放一个：过滤是页面级的视角，
-               放在组里会让人以为只作用于那一家。 -->
-          <span class="ch-model-filter" :class="{ active: modelFilterActive }">
-            <input
-              v-model="modelFilter"
-              type="text"
-              class="ch-model-filter-input"
-              :placeholder="`过滤 ${modelTotal} 个模型（名称 / id）`"
-              aria-label="按名称或 id 过滤模型"
-              @keydown.esc="clearModelFilter"
-            />
-            <button
-              v-if="modelFilterActive"
-              type="button"
-              class="ch-model-filter-clear"
-              title="清除过滤（Esc）"
-              @click="clearModelFilter"
-            >×</button>
-          </span>
-          <span v-if="modelFilterActive" class="text-muted ch-model-filter-hit">
-            匹配 <span class="ch-ok">{{ filteredModelTotal }}</span> / {{ modelTotal }} 个
-          </span>
+          <!-- 搜索框已提到「模型」页顶部（页面级），这里不再放第二个：
+               同一页两个输入框会让人不知道该用哪个 -->
           <!-- 「清除标记」已移除：批量清空测试结论会把每一格「多早测的、因为什么挂的」
                一起抹掉，而重测本身就会覆盖对应那条 —— 要清掉某条的陈旧结论，重测它即可 -->
           <!-- 全渠道的「测试 / 全部开启 / 全部关闭」已移除：
@@ -1873,8 +1848,8 @@ const enabledModels = computed(() => modelGroups.value.flatMap(group =>
 // ==================== 模型过滤 ====================
 
 // 全量目录动辄几百条（cline 一家 493 条），靠肉眼在里头找模型不现实。
-// 只做不区分大小写的纯子串匹配（id 与显示名都算）：用户手里有的是「知道名字的
-// 一部分」这个信息，正则/模糊语法只会多一条要学的东西，不会更准。
+// 只做不区分大小写的纯子串匹配（id / 显示名 / 渠道 id 都算）：用户手里有的是
+// 「知道名字的一部分」这个信息，正则 / 模糊语法只会多一条要学的东西，不会更准。
 //
 // 范围只到下面的全量目录：上面「已开启模型」不过滤 —— 它回答的是「客户端现在能
 // 选到什么」，是一份完整清单，缺几条反而会让人以为模型掉线了。
@@ -1882,11 +1857,12 @@ const modelFilter = ref('')
 
 const modelFilterActive = computed(() => modelFilter.value.trim() !== '')
 
-function matchModelFilter(m) {
+function matchModelFilter(m, providerId = '') {
   const keyword = modelFilter.value.trim().toLowerCase()
   if (!keyword) return true
   return String(m.id || '').toLowerCase().includes(keyword)
     || String(m.name || '').toLowerCase().includes(keyword)
+    || String(providerId || '').toLowerCase().includes(keyword)
 }
 
 // 过滤后的分组：计数按命中的模型重算，空组直接不显示
@@ -1894,7 +1870,7 @@ const filteredModelGroups = computed(() => {
   if (!modelFilterActive.value) return modelGroups.value
   return modelGroups.value
     .map(group => {
-      const models = group.models.filter(matchModelFilter)
+      const models = group.models.filter(m => matchModelFilter(m, group.id))
       return { ...group, models, ...groupCounts(group.id, models) }
     })
     .filter(group => group.models.length > 0)
@@ -2094,10 +2070,11 @@ async function toggleModel(providerId, m) {
 
 // 关掉「已开启模型」清单里的全部模型：清单本身就是范围，逐个关掉即可
 async function closeAllEnabled() {
-  const count = enabledModels.value.length
+  const targets = enabledModels.value
+  const count = targets.length
   busyKey.value = 'enabled:models'
   try {
-    for (const row of enabledModels.value) {
+    for (const row of targets) {
       await setModelsDisabled(row.provider, [row.model.id], true)
     }
     showToast(`已关闭 ${count} 个模型`)
@@ -2168,8 +2145,7 @@ function testTargetsOf(providerIds) {
 }
 
 // 「已开启模型」那块的测试范围：清单本身就是范围 —— enabledModels 已经排除了
-// 关闭 / 已失效 / 已失活，不必再筛一遍。
-// 刻意不跟过滤走：那块的展示不受过滤影响，它旁边的按钮也就该测这份完整清单
+// 关闭 / 已失效 / 已失活，不必再筛一遍
 function testTargetsOfEnabled() {
   return enabledModels.value.map(row =>
     ({ provider: row.provider, key: row.provider + '/' + row.model.id }))
