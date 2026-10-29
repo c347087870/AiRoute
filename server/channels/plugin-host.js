@@ -15,13 +15,18 @@
 const { createPluginStore } = require('./plugin-store')
 const { createPluginContext, validateBackend } = require('./plugin-api')
 const { createLoginServer } = require('./shared/login-server')
+const { createVersionSync } = require('./version-sync')
 
-function createPluginHost({ dataDir, logger = console }) {
+function createPluginHost({ dataDir, logger = console, settings }) {
   const store = createPluginStore({ dataDir, logger })
   // 全局只有一份登录回调服务：端口是稀缺资源，多个插件各自起一个会撞端口，
   // 而回调里的 state 已经能区分是哪次登录
   const login = createLoginServer({ logger })
-  const ctx = createPluginContext({ dataDir, logger, login })
+  // 版本号同步：Trae 登录页按客户端形态校验版本，Qoder 目录解析也依赖版本号。
+  // 每天拉一次官网，插件经 ctx.versions 读当前值
+  const versionSync = createVersionSync(dataDir, { logger })
+  versionSync.start()
+  const ctx = createPluginContext({ dataDir, logger, login, settings, versions: versionSync })
 
   // id → { item, plugin, backend, dir }（只有加载成功的在这里）
   const loaded = new Map()
@@ -133,6 +138,7 @@ function createPluginHost({ dataDir, logger = console }) {
   }
 
   async function shutdown() {
+    versionSync.stop()
     for (const instance of loaded.values()) {
       try {
         await instance.backend.shutdown?.()

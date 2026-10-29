@@ -108,8 +108,17 @@ function createFrameRebuilder(options = {}) {
     }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { payloads: [payload], valid: false }
 
+    // 失败帧两种形态：
+    //   ① { error: {...} }      标准 OpenAI 形态：原样透传（valid:true 表示不参与白名单校验）
+    //   ② { code: <非0>, msg }  上游 200 内嵌业务错误帧（11140 / 6021 实测形态）：
+    //      只认 ① 时它会被当成正常帧，响应头已提交就只能「200 + 错误帧」给客户端；
+    //      这里标记 valid:false，交给上层首帧否决逻辑决定是否换号重试。
     if (Object.prototype.hasOwnProperty.call(obj, 'error')) {
       return { payloads: [payload], valid: true } // error 帧绕过白名单原样透传
+    }
+    const codeNum = Number(obj.code)
+    if (obj.code != null && Number.isFinite(codeNum) && codeNum !== 0) {
+      return { payloads: [payload], valid: false }
     }
 
     // 先登记本帧真实 tool_call 的 index，再算合成调用的 index。

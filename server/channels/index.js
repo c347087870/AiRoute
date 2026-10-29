@@ -18,6 +18,7 @@ const paths = require('../paths')
 const workbuddy = require('../workbuddy/runtime')
 const accountHealth = require('../account-health')
 const { createOwnedRuntime } = require('./owned/runtime')
+const { createSettings } = require('./settings')
 const { BUILTIN_PLUGINS } = require('./plugin-store')
 
 // 渠道数据目录与代码目录分开：server/channels 是随包分发的代码，
@@ -29,6 +30,14 @@ function resolveDataDir() {
 let runtime = null
 let initializing = null
 let owned = null
+let channelSettings = null
+// 运行时还没起来时也要能读设置（面板可能在初始化完成前就打开）
+const settingsFileDir = () => (owned?.dataDir || resolveDataDir())
+
+function getSettings() {
+  if (!channelSettings) channelSettings = createSettings(settingsFileDir())
+  return channelSettings
+}
 
 // WorkBuddy 作为渠道包里的两个 provider（workbuddy / workbuddy-global）接进来。
 // 它的账号池与会话状态在主进程，worker 里的适配器只做代理 —— 这里就是被代理的
@@ -137,7 +146,9 @@ function init(options = {}) {
     const dataDir = options.dataDir || resolveDataDir()
     // 凭据与状态要写文件：目录不存在时第一次登录会 ENOENT
     fs.ensureDirSync(dataDir)
-    owned = createOwnedRuntime({ dataDir, logger, onChanged: options.onChanged })
+    const settings = createSettings(dataDir)
+    channelSettings = settings
+    owned = createOwnedRuntime({ dataDir, logger, onChanged: options.onChanged, settings })
     // 认领渠道包时代留下的账号：同一份凭据文件、同一套键名，
     // 这里只补账号清单，所以用户不需要重新登录
     try {
@@ -269,6 +280,7 @@ module.exports = {
   init,
   listBuiltinPlugins,
   getRuntime,
+  getSettings,
   refreshModels,
   refreshWorkbuddyOnly,
   rpc,

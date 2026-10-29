@@ -8,6 +8,8 @@
 //   ctx.logger       { info, warn, error }
 //   ctx.credentials  凭据读写（shared/accounts 的那一套，语义见下）
 //   ctx.loginServer  本地登录回调服务（浏览器 302 回来的那个端口）
+//   ctx.settings     渠道运行参数（冷却/并发/选号，面板内页可改；见 settings.js）
+//   ctx.versions     官网版本号同步器（get() 返回 { trae:{appVersion,pluginVersion}, qoder:{appVersion} }）
 //
 // 插件拿到的是**函数**，不是路径：换存储实现时插件不用改。
 
@@ -20,13 +22,22 @@ const accounts = require('./shared/accounts')
 // 凭据键名，重算 hash 会让迁移过来的账号读不到凭据（见 NOTICE.md）。
 const credentialsApi = accounts
 
-function createPluginContext({ dataDir, logger = console, login = createLoginServer({ logger }) } = {}) {
+function createPluginContext({ dataDir, logger = console, login = createLoginServer({ logger }), settings, versions } = {}) {
   if (!dataDir) throw new Error('插件上下文缺少 dataDir')
+  const FALLBACK_VERSIONS = {
+    updatedAt: 0,
+    sources: {},
+    trae: { appVersion: '3.4.9', pluginVersion: '2.3.97430' },
+    qoder: { appVersion: '0.4.11' },
+  }
   return {
     dataDir,
     logger,
     credentials: credentialsApi,
     loginServer: login,
+    // 缺省给一份只读默认值：插件在测试里被单独实例化时不该因为少这个参数炸掉
+    settings: settings || { get: () => ({}), update: () => ({}) },
+    versions: versions || { get: () => FALLBACK_VERSIONS },
   }
 }
 

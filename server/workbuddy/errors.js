@@ -218,19 +218,33 @@ function isWafBlocked(status, body) {
   return !hasEnvelope
 }
 
-// 是否模型级 429 限流（code 6004）
+// 是否模型级 429 限流：
+//   · 6004 恒定模型级；
+//   · 6000 只有带「切换其他模型」文案时才是模型级（不带该文案的 6000 语义未知，
+//     仍按账号级处理，避免误判）；
+//   · 14003「模型繁忙」是模型级：同号换模型立刻可用，且响应里没有恢复时刻。
 function isModelRateLimit(body) {
-  return /"code"\s*:\s*"?6004"?/.test(String(body || ''))
+  const raw = String(body || '')
+  if (/"code"\s*:\s*"?6004"?/.test(raw)) return true
+  if (/"code"\s*:\s*"?6000"?/.test(raw) && raw.includes('切换其他模型')) return true
+  if (/"code"\s*:\s*"?14003"?/.test(raw)) return true
+  return false
 }
 
-// 是否渠道级队列满载（code 6021 queue.full）：推理集群排队打满时上游回
-// 429 + {"code":6021,"msg":"queue.full.title"}。这是渠道容量事件，不是账号问题——
-// 同一时刻换任何账号都撞同一堵墙。按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号。
-// 结构码为主判据，"queue.full" 文案为外卡（避免 code 形态差异漏判）。
+// 仅 14003「模型繁忙」：用短窗口（60s 起、×2、封顶 3m），与时长型配额锁区分
+function isModelBusy(body) {
+  return /"code"\s*:\s*"?14003"?/.test(String(body || ''))
+}
+
+// 是否渠道级队列满载（code 6021 queue.full / 6020 queue.waiting）：推理集群排队
+// 打满或排队等待时上游回的 429。这是渠道容量事件，不是账号问题——同一时刻换任何
+// 账号都撞同一堵墙。按限流处置会逐号软冷却，实测单次 6020 就冻整号 10 分钟。
+// 结构码为主判据，文案为外卡（避免 code 形态差异漏判）。
 function isUpstreamBusy(body) {
   const raw = String(body || '')
-  if (literalCode(raw, '6021')) return true
-  return raw.toLowerCase().includes('queue.full')
+  if (literalCode(raw, '6021') || literalCode(raw, '6020')) return true
+  const lower = raw.toLowerCase()
+  return lower.includes('queue.full') || lower.includes('queue.waiting')
 }
 
 // 是否重复签到（幂等判定）
@@ -444,6 +458,7 @@ module.exports = {
   modelBlockReasonFor,
   isWafBlocked,
   isModelRateLimit,
+  isModelBusy,
   isAlreadyCheckin,
   parseRetryAfter,
   parseRateReset,

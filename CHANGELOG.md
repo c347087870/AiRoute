@@ -2,6 +2,48 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.1] - 2026-10-29
+
+渠道插件与上游对齐的一轮：Trae 登录按客户端实测参数重写、渠道设置拆到每家、WorkBuddy 错误分诊与状态落盘修完，另加官网版本号自动同步。
+
+### 修复
+
+- **Trae 账号登录彻底不可用（P0）**：登录页按客户端形态校验，`auth_from` / `client_id` / 版本号三组值必须成套。我们发的是 SOLO 应用参数（`auth_from=solo`、`client_id=en1oxy7wnw8j9n`、`x_app_version=0.1.61`），而账号是 Trae 桌面客户端的，登录页因此不给授权码。现按客户端实测链接逐参数对齐：`auth_from=trae`、`client_id=ono9krqynydwx5`、`x_app_type=stable`、`x_env` 空值、`channel_name=common`、`machine_id` 64 位 hex
+- **Trae 登录缺 PKCE**：上游已切到 PKCE，我们还在用「直接回传 refreshToken」的老流程。现每轮生成 `code_verifier`（48 字节 base64url，`S256`），授权码换证走 `POST /trae/api/v3/oauth/ExchangeToken`，带 `CodeVerifier` 与 `DeviceInfo`（含 EC P-256 公钥 PEM —— 空值会被判 `20405` 设备绑定拒绝）；私钥随凭据落盘
+- **`auth_callback_url` 被 URL 编码**：官方页面对它做正则匹配，编码成 `http%3A%2F%2F…` 后拿不到回调地址（页面停在「认证中 / 网络错误」）。改为原样拼接；回调地址也不再带 `?state=`（与官方客户端同形），回调端支持无 state 匹配
+- **一次登录成功后回调端口被关掉**：之后每次登录都指向死端口，表现为「网络错误」。改为共用监听常驻，缓存端口失效时自动重建
+- **渠道账号「删除」不生效**：面板传展示 id（`qoder-5876b00e`），插件要的是凭据 uid，旧实现直接把 id 当 uid —— 接口回 ok、账号还在，还在注册表里留下幽灵条目。`account.delete` / `update` / `refresh` 统一先按 id→uid 解析
+- **WorkBuddy 上游错误分诊缺三类**：`6020`（queue.waiting）被当成账号级软冷却（单次即冻整号 10 分钟）、`6000`（带「切换其他模型」文案）与 `14003`（模型繁忙）同样按账号级处理 → 整号冷却 600s 起、翻倍到 2h，实测 4 个号 8 次命中就能让整池停 10 分钟。现按上游语义分流为 `upstream_busy` / 模型级冷却，并新增模型繁忙短窗口（60s 起翻倍、封顶 3m）
+- **模型级冷却被 `softRateMax` 截断**：上游说 19:25 恢复、网关 19:14 就去重试。模型级改走独立函数对齐上游墙钟，账号级封顶语义不变
+- **refresh 失效被当成账号死**：AT 未过期时上游 chat 照常可用，旧逻辑按 session dead 连续计数把号永久禁用。现用 `atStillValid` 判定：AT 有效则保留账号并清零历史计数
+- **`clearSessionDead` 清零不落盘**：重启后旧计数复活，刚被 refresh 证明存活的号下次失败直接撞阈值被禁用。补 `dirty = true`（0→0 不置脏，避免高频调用制造写盘）
+- **出站请求体带项目自证标识**：`prompt_cache_key` 曾是 `wb2a-<uid 前 8 位>-<hash>`，另有 23 处 `wb2api-*` 会话/请求 id。全部改为随机 UUID / 纯 32 hex —— 缓存键唯一性由 hash 本身保证，uid 明文不再出网
+- **流式首帧漏判 `200 + {code,msg}`**：只认 `{error}` 形态，上游内嵌业务错误帧被当正常帧透传，本可换号的失败变成「200 + 错误帧」。现两种形态都判，业务码非 0 标记为不合格帧交给换号逻辑
+- **Trae 签到 / 余额 / 用户信息的请求体与客户端不一致**：签到补 `req_source: 1`（IDE 口径，原为空 body）、余额 `req_source` 由 2 改为 1、`GetUserInfo` 的 `IDEVersion` 改用客户端版本（原来取聊天头的 `0.1.52`）
+
+### 变更
+
+- **渠道运行参数改为「每家一份」**：`channel-settings.json` 从单一平面结构改为「顶层默认 + `providers.<id>` 覆盖」，Trae / Qoder 国际版 / Qoder 国内版各存一份，改一家不再影响另一家。传输参数（首帧上限 / 先发响应头 / 空闲心跳）也从页面底部的全局卡搬进每张渠道卡的「设置」里
+- **Trae 中转对齐上游行为**：请求体补 `model_name`（`<配置名>__dev`）、会话信封（`conversation_id` / `session_id` / `project_id` / `workspace_id` / `mode` / `package_type` / `ide_version` 等）；Max 模式真正接上（`is_max_mode` + `prompt_max_tokens=168000`，只有目录声明了 max 档的模型才带）；首字 10 秒无字节就换号；分级重试表（429 按 `Retry-After`、503/529 指数、`thinking.signature` 重试一次、积分耗尽换号）；六种选号策略（默认仍是清单顺序）；会话粘性 30 分钟；连续 3 错熔断；单号在途上限；11140 自动停号
+- **Trae 形态清洗与工具名别名**：出站前把别家 CLI 的身份句改写成中性句、剥掉 `cc_*` 与 `x-anthropic-*` 键值（默认开，可关）；工具名别名表默认空，配了请求侧改名、响应侧回改
+- **Trae 续期加 v3 兜底**：v1（`ClientSecret: '-'`）失败后自动尝试 v3（带 `DeviceInfo` + `DeviceProof` 私钥签名），救回「v1 端点拒了但设备绑定仍有效」的号
+- **Qoder 国际版出现「排队中」= 官方禁用该号**：`10605` 排队不再等 30 秒×2 白跑，直接给账号打 `officialDisabled` 标记、从选号里剔除，面板显示红色「官方禁用」；勾选启用即可清除标记
+- **Qoder 活动平台 `cosy-version` 改为跟随官网同步的 IDE 版本**（原先写死 `0.4.8`）
+- **「模型来源」的模型行改成定宽网格**：名字｜上下文/输出（右对齐）｜状态｜测｜切换 五列固定，不再按内容宽度参差；状态列（耗时 / 失败 / 失活）固定宽度，右侧按钮不再左右跳
+
+### 新增
+
+- **官网版本号自动同步（`server/channels/version-sync.js`）**：启动即拉、之后每 24 小时一次，双源取最大 —— Trae 用 `docs.trae.cn/ide_changelog` + 本机安装的 `product.json`（`appVersion` / `tronBuildVersion`），Qoder 用 `qoder.com/changelog` 的 `type=ide` 最新 `tag_name` + 本机 Launcher `state.ini`。结果落盘 `channels-data/channel-versions.json`，拉取失败静默沿用旧值；Trae 登录链接的 `plugin_version` / `x_app_version`、换证的 `IDEVersion`、Qoder 的 `cosy-version` 全部跟随
+- **`account.checkLogin`**：Trae 令牌主动校验（`CheckLogin`，不消耗积分），能力位 `capabilities.checkLogin` 随插件申报
+- **Trae 设备密钥与 `auth_client_id` 随凭据落盘**：重建凭据时保住设备绑定关系
+- 回归用例：新增 `scripts/test-version-sync.js`（6 项）与 `scripts/test-trae-relay.js`（19 项），`test-workbuddy` 276 → 280 项（含一条走真实 flusher 的落盘用例，已用变异测试确认能测出缺陷）
+
+### 已知限制
+
+- **Qoder 国际版被官方放队列的账号不会自愈**：标记为「官方禁用」后需要换号或等上游解除，勾选「启用」只会再试一次
+- **Trae 工具名别名默认不生效**：别名表默认空（不猜测哪些工具名敏感），需要时在 `channel-settings.json` 的 `traeToolAlias` 里配
+- **调度抖动只做了时间抖动与夜猫子 Top-N**：余额刷新遍历仍是固定 800ms 账号间隔，没有逐号随机偏移
+
 ## [2.0.0] - 2026-10-28
 
 首个正式版。相对 `2.0.0-beta.4` 的改动如下。

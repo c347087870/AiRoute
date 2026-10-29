@@ -247,7 +247,9 @@ function buildInferPayload(ask, requestId) {
     request_id: requestId,
     request_set_id: requestId,
     chat_record_id: requestId,
-    session_id: crypto.randomUUID(),
+    // 同一段对话复用同一个 session_id：上游按 session 做前缀缓存，
+    // 每轮换 id 等于每轮都从冷缓存开始（输入价全额）
+    session_id: ask.sessionId || crypto.randomUUID(),
     stream: true,
     chat_task: 'FREE_INPUT',
     chat_context: {

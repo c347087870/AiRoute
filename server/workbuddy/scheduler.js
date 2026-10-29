@@ -160,7 +160,35 @@ function createScheduler(deps) {
     taskSweepMinutes:
       Number.isFinite(Number(sc0.taskSweepMinutes)) && Number(sc0.taskSweepMinutes) > 0
         ? Number(sc0.taskSweepMinutes)
-        : DEF.taskSweepMinutes
+        : DEF.taskSweepMinutes,
+    // 周期任务人味化（默认 0 = 与旧行为逐字一致）：
+    //   · 抖动：在基准间隔上叠加 ±permill‰ 的偏移，避免整点全池齐射
+    //   · 夜猫子参与上限：0 = 不限；>0 时只取积分最高的前 N 个号
+    balanceJitterPermill: clampPermill(sc0.balanceJitterPermill),
+    sweepJitterPermill: clampPermill(sc0.sweepJitterPermill),
+    nightAccountCap: clampCount(sc0.nightAccountCap)
+  }
+
+  // 抖动上限 ±50%，再大就不是「抖动」而是换了个节拍
+  function clampPermill(value) {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return Math.min(Math.round(n), 500)
+  }
+
+  function clampCount(value) {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return Math.round(n)
+  }
+
+  // 周期任务抖动：在基准间隔上叠加 ±permill‰ 的随机偏移。
+  // 默认 permill=0 → 返回 0，行为与旧版逐字一致。
+  function jitterMs(baseMs, permill) {
+    if (!permill) return 0
+    const span = Math.floor((baseMs * permill) / 1000)
+    if (span <= 0) return 0
+    return Math.floor((Math.random() * 2 - 1) * span)
   }
 
   // 小时制任务表（tick 命中的判定依据）
@@ -844,7 +872,7 @@ function createScheduler(deps) {
 
   // 单账号活跃上报 + 自检
   async function activityOne(a) {
-    const cid = `wb2api-${Date.now()}`
+    const cid = crypto.randomUUID()
     try {
       await reportChatActivity(a, cid, '', DEFAULT_REPORT_MODEL_ID, DEFAULT_REPORT_MODEL_NAME)
     } catch (e) {
@@ -957,7 +985,7 @@ function createScheduler(deps) {
     const lb = label(uid, a.nickname)
     if (adoptTried[uid] === cstYMD(Date.now())) return // 当日已判定门槛未达
     try {
-      await reportChatActivity(a, `wb2api-adopt-${Date.now()}`, '', DEFAULT_REPORT_MODEL_ID, DEFAULT_REPORT_MODEL_NAME)
+      await reportChatActivity(a, crypto.randomUUID(), '', DEFAULT_REPORT_MODEL_ID, DEFAULT_REPORT_MODEL_NAME)
       await sleep(ADOPT_REPORT_GAP_MS)
     } catch (e) {
       log(`travel ${lb}: adopt preflight report: ${errMsg(e)}`)
@@ -1070,7 +1098,7 @@ function createScheduler(deps) {
         /* 流已关闭 */
       }
       try {
-        await reportChatActivity(a, `wb2api-night-${Date.now()}-${i}`, '', 'glm-5.2', 'GLM-5.2')
+        await reportChatActivity(a, crypto.randomUUID(), '', 'glm-5.2', 'GLM-5.2')
       } catch (e) {
         return { ok, error: `第 ${i + 1} 次上报失败: ${errMsg(e)}` }
       }
@@ -1086,7 +1114,15 @@ function createScheduler(deps) {
       log('blackcat: 当前不在 23:00–08:00 计数窗口，跳过')
       return '窗口外跳过'
     }
-    for (const st of pool.list()) {
+    // 夜猫子参与上限：默认 0 = 全池（旧行为）。>0 时按积分降序取前 N 个，
+    // 避免 23 点整池十几个号同时做真实对话（最重的指纹，实测被上游聚类封号）
+    let nightList = pool.list()
+    if (cfg.nightAccountCap > 0) {
+      nightList = [...nightList]
+        .sort((a, b) => (Number(b.credits) || 0) - (Number(a.credits) || 0))
+        .slice(0, cfg.nightAccountCap)
+    }
+    for (const st of nightList) {
       if (stopped) break
       if (st.disabled) continue
       const a = pool.authByUID(st.uid)
@@ -1285,15 +1321,17 @@ function createScheduler(deps) {
     }
     lastTickAt = now
 
-    // 余额后台刷新（分钟级，独立于整点排程）
-    if (cfg.balanceRefreshMinutes > 0 && now - lastBalanceAt >= cfg.balanceRefreshMinutes * 60000) {
+    // 余额后台刷新（分钟级，独立于整点排程）。jitter=0 时与旧行为完全一致
+    const balanceBase = cfg.balanceRefreshMinutes * 60000
+    if (cfg.balanceRefreshMinutes > 0 && now - lastBalanceAt >= balanceBase + jitterMs(balanceBase, cfg.balanceJitterPermill)) {
       lastBalanceAt = now
       void runTask('balance')
     }
 
     // 任务补领清扫（分钟级、幂等）：把「已达标未领」的成长任务奖励领掉。
     // 只做 accept/claim 两条读改请求，不跑任何行为链路，故分钟级成本可忽略。
-    if (cfg.taskSweepEnabled && cfg.taskSweepMinutes > 0 && now - lastSweepAt >= cfg.taskSweepMinutes * 60000) {
+    const sweepBase = cfg.taskSweepMinutes * 60000
+    if (cfg.taskSweepEnabled && cfg.taskSweepMinutes > 0 && now - lastSweepAt >= sweepBase + jitterMs(sweepBase, cfg.sweepJitterPermill)) {
       lastSweepAt = now
       void runTask('taskSweep')
     }
@@ -1432,6 +1470,9 @@ function createScheduler(deps) {
       const n = Number(patch.taskSweepMinutes)
       cfg.taskSweepMinutes = Number.isFinite(n) && n > 0 ? n : DEF.taskSweepMinutes
     }
+    if ('balanceJitterPermill' in patch) cfg.balanceJitterPermill = clampPermill(patch.balanceJitterPermill)
+    if ('sweepJitterPermill' in patch) cfg.sweepJitterPermill = clampPermill(patch.sweepJitterPermill)
+    if ('nightAccountCap' in patch) cfg.nightAccountCap = clampCount(patch.nightAccountCap)
     // 时点/开关变化后清空当日去重，使新时点在当前小时即可命中
     fired.clear()
     return {

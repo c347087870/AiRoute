@@ -37,7 +37,8 @@ function toNumber(value) {
 }
 
 function initStatObj() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, count: 0, failed: 0 }
+  // credits：按积分计费的渠道（Qoder）用它记账；token 渠道恒为 0
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, count: 0, failed: 0, credits: 0 }
 }
 
 // 补齐历史数据缺失的缓存与失败计数字段，避免 undefined 累加出 NaN
@@ -50,7 +51,8 @@ function normalizeStatObj(raw) {
     cacheWrite: toNumber(source.cacheWrite),
     total: toNumber(source.total),
     count: toNumber(source.count),
-    failed: toNumber(source.failed)
+    failed: toNumber(source.failed),
+    credits: toNumber(source.credits)
   }
 }
 
@@ -135,16 +137,18 @@ function accumulate(target, usage) {
   target.cacheWrite += usage.cacheWrite
   target.total += usage.input + usage.cacheRead + usage.cacheWrite + usage.output
   target.count += 1
+  if (usage.credits) target.credits = (target.credits || 0) + usage.credits
 }
 
 // 记录一次请求的 Token 用量
-// usage: { input, output, cacheRead, cacheWrite }，缺失字段按 0 处理
+// usage: { input, output, cacheRead, cacheWrite, credits }，缺失字段按 0 处理
 function recordTokens(model, usage, timestamp = Date.now()) {
   const input = toNumber(usage?.input)
   const output = toNumber(usage?.output)
   const cacheRead = toNumber(usage?.cacheRead)
   const cacheWrite = toNumber(usage?.cacheWrite)
-  const normalized = { input, output, cacheRead, cacheWrite }
+  const credits = toNumber(usage?.credits)
+  const normalized = { input, output, cacheRead, cacheWrite, ...credits > 0 ? { credits } : {} }
   const statKey = model || 'unknown'
 
   const dayKey = getDayKey(timestamp)

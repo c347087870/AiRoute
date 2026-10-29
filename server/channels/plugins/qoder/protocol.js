@@ -31,6 +31,17 @@ const USERINFO_PATH = '/api/v1/userinfo'
 // ⚠️ 余额不只在 userQuota：实测有账号 userQuota.remaining=0 而 addOnQuota.remaining=100，
 // 只读一层会显示 0 —— 三层（套餐/资源包/专用资源包）都要加。
 const USAGE_PATH = '/sash/api/v2/me/usage'
+// 活动平台（每日领取积分）：官方桌面端 0.4.8 主进程调它。
+// ⚠️ 头集合必须逐字对齐，且**不发任何 cosy-machine\*** —— 派生值会让服务端把
+// 「每日领取 100 Credits」整条静默过滤（HTTP 200 + 只剩 VIEW_DETAILS）。
+const CAMPAIGNS_PATH = '/sash/api/v1/me/campaigns'
+const campaignClaimPath = id => `/sash/api/v1/me/campaigns/${encodeURIComponent(String(id))}/claim`
+// 旧签到端点（部分区域已下线，只剩活动平台）：404/405/410 才算「本区没有」
+const CHECKIN_STATUS_PATH = '/sash/api/v1/me/daily-check-in/status'
+const CHECKIN_CLAIM_PATH = '/sash/api/v1/me/daily-check-in/claim'
+// 桌面端身份：活动平台缺任一都会「200 + 空列表」
+const DESKTOP_CLIENT_TYPE = '10'
+const DESKTOP_CLIENT_VERSION = '0.4.8'
 
 // PKCE 字符集：RFC 7636 的 unreserved（66 个），与官方实现同一集合
 const PKCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
@@ -38,31 +49,102 @@ const PKCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234
 // ── 产品配置 ──
 
 // 目录 key 与展示名。采样自 2026-09 的客户端目录；远端目录拉不到时用它兜底。
+//
+// ⚠️ 字段口径按官方 `context_config` / `thinking_config` 还原，别照抄「能力上限」：
+//   · contextWindow 用**默认档**（官方多为 200K），1M 是可选档，写 1M 会让客户端
+//     按 1M 估算上下文、迟迟不压缩，真到 800K 时被上游直接拒；
+//   · maxInputTokens 是官方 `max_input_tokens`（部分模型 180K），下发加密请求体时用它；
+//   · efforts 的默认档来自 `thinking_config.enabled.efforts[*].is_default`；
+//   · isFree 是官方 `is_free`（免费额度模型），面板据此打「免费」标签。
 const COMMON_MODELS = [
-  { id: 'auto', name: 'Auto', contextWindow: 200000, supportsImage: true, supportsThinking: true },
-  { id: 'smodel', name: 'Sonus', contextWindow: 1000000, supportsImage: true, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
-  { id: 'cmodel', name: 'Cantus', contextWindow: 1000000, supportsImage: true, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
-  { id: 'kmodel_latest', name: 'Kimi-K3', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  { id: 'kmodel', name: 'Kimi-K2.8-Preview', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  { id: 'gmodel', name: 'GLM-5.3', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  { id: 'gfmodel', name: 'GLM-5.3-Flash', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'max'], defaultEffort: 'max' },
-  { id: 'dmodel', name: 'DeepSeek-V4-Pro', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'max'], defaultEffort: 'max' },
-  { id: 'dfmodel', name: 'DeepSeek-Flash', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'max', 'low'], defaultEffort: 'max' },
-  { id: 'mmodel', name: 'MiniMax-M3', contextWindow: 1000000, supportsImage: true },
+  // auto 官方 enable=false（按账号套餐开放），保留 key 只为不打断已有配置
+  { id: 'auto', name: 'Auto', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true, supportsThinking: true },
+  {
+    id: 'smodel', name: 'Sonus', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+    efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high',
+  },
+  {
+    id: 'cmodel', name: 'Cantus', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+    efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high',
+  },
+  {
+    id: 'kmodel_latest', name: 'Kimi-K3', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+    efforts: ['high', 'low', 'max'], defaultEffort: 'max',
+  },
+  {
+    id: 'kmodel', name: 'Kimi-K2.8-Preview', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true,
+    efforts: ['high', 'low', 'max'], defaultEffort: 'max',
+  },
+  {
+    id: 'gmodel', name: 'GLM-5.3', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+    efforts: ['high', 'low', 'max'], defaultEffort: 'max',
+  },
+  {
+    id: 'gfmodel', name: 'GLM-5.3-Flash', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true,
+    efforts: ['high', 'max'], defaultEffort: 'max',
+  },
+  {
+    id: 'dmodel', name: 'DeepSeek-V4-Pro', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true,
+    efforts: ['high', 'max'], defaultEffort: 'max',
+  },
+  {
+    id: 'dfmodel', name: 'DeepSeek-Flash', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true,
+    efforts: ['high', 'max', 'low'], defaultEffort: 'max',
+  },
+  {
+    id: 'mmodel', name: 'MiniMax-M3', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+  },
   // 免费额度模型：e2e 探针用它以免消耗积分（priceFactor 0 是**免费**，不是缺失）
-  { id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 1000000, supportsImage: true, isFree: true, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium' },
-  { id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1000000, supportsImage: true, isFree: true, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium' },
+  {
+    id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+    isFree: true, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'xhigh',
+  },
+  {
+    id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 200000, maxInputTokens: 180000, supportsImage: true,
+    isFree: true, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium',
+  },
   // 这两个只有「关闭思考」，没有档位表
-  { id: 'qmodel_latest', name: 'Qwen3.7-Max', contextWindow: 1000000, supportsImage: true },
-  { id: 'qmodel', name: 'Qwen3.7-Plus', contextWindow: 1000000, supportsImage: true },
+  { id: 'qmodel_latest', name: 'Qwen3.7-Max', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true },
+  { id: 'qmodel', name: 'Qwen3.7-Plus', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true },
 ]
 
+// CN 独有的模型（intl 目录里没有这两个 key；采样自官方 cn 目录）
 const CN_ONLY_MODELS = [
-  { id: 'q37fmodel', name: 'Qwen3.7-Flash', contextWindow: 1000000, supportsImage: true },
-  { id: 'gm51model', name: 'GLM-5.2', contextWindow: 1000000, supportsImage: true, efforts: ['high', 'max'], defaultEffort: 'max' },
-  // CN 的 mmodel 是 M2.7 且不支持图片，档位表只有 200K 一档
-  { id: 'mmodel_cn', name: 'MiniMax-M2.7', contextWindow: 200000 },
+  { id: 'q37fmodel', name: 'Qwen3.7-Flash', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true },
+  {
+    id: 'gm51model', name: 'GLM-5.2', contextWindow: 200000, maxInputTokens: 200000, supportsImage: true,
+    efforts: ['high', 'max'], defaultEffort: 'max',
+  },
 ]
+
+// 双区同 key 不同型号：CN 的 mmodel 是 MiniMax-M2.7（不支持图片、默认 200K）。
+// ⚠️ 上游只认 key `mmodel`，以前的 `mmodel_cn` 是我们自己编的伪 key ——
+// 发上去会 400，所以这里改成「按区域覆盖同名条目 + 保留旧别名」。
+const CN_MODEL_OVERRIDES = [
+  { id: 'mmodel', name: 'MiniMax-M2.7', contextWindow: 200000, maxInputTokens: 200000, supportsImage: false },
+]
+
+// 历史别名：老配置里可能引用过这些 id，路由时要能认出来（不新增对外 id）
+const MODEL_ALIASES = {
+  mmodel_cn: 'mmodel',
+  'minimax-m2.7': 'mmodel',
+  'minimax-m3': 'mmodel',
+  'kimi-k3': 'kmodel_latest',
+  'kimi-k2.8-preview': 'kmodel',
+  'glm-5.3': 'gmodel',
+  'glm-5.3-flash': 'gfmodel',
+  'glm-5.2': 'gm51model',
+  'deepseek-v4-pro': 'dmodel',
+  'deepseek-flash': 'dfmodel',
+  'qwen3.8-max': 'qmodel_38max',
+  'qwen3.8-flash': 'qfmodel',
+  'qwen3.7-max': 'qmodel_latest',
+  'qwen3.7-plus': 'qmodel',
+  'qwen3.7-flash': 'q37fmodel',
+  sonus: 'smodel',
+  cantus: 'cmodel',
+  ultimate: 'smodel',
+}
 
 const PRODUCTS = {
   qoder: {
@@ -70,11 +152,18 @@ const PRODUCTS = {
     displayName: 'Qoder',
     authBase: 'https://qoder.com',
     openApiBase: 'https://openapi.qoder.sh',
+    // 活动平台（每日领取积分）的候选基址：主域不通时按序回落。
+    // 只有「连接失败 / 404 / 405 / 410」才换下一个；401/403/429 属于业务错误，换基址没用。
+    openApiCandidates: ['https://openapi.qoder.sh', 'https://center.qoder.sh', 'https://openapi.qoder.com'],
     // ⚠️ 加密端点在 api2.qoder.sh；api2-v2.qoder.sh 是公开端点，混用会 404
     inferBase: 'https://api2.qoder.sh',
+    // 推理域名的兜底序列：COSY 签名只覆盖 path，换 host 不影响签名有效性
+    inferHosts: ['https://api2.qoder.sh', 'https://api1.qoder.sh', 'https://api3.qoder.sh'],
     // 取自 asar 的 authClientIds.prod。用 testClientId 会在授权回调阶段被拒
     clientId: 'e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb',
     userAgentPrefix: 'qoder',
+    // 活动平台要求逐字 'Qoder'，且必须带桌面端身份头（缺了会「200 + 空列表」）
+    desktopUserAgent: 'Qoder',
     // 决定服务端把请求路由到哪个池；缺 business 的请求会落到故障节点
     clientMetadata: { client_type: '5', business_product: 'cli', business_type: 'agent', scene: 'assistant' },
     models: COMMON_MODELS,
@@ -84,13 +173,51 @@ const PRODUCTS = {
     displayName: 'Qoder (国内版)',
     authBase: 'https://qoder.cn',
     openApiBase: 'https://openapi.qoder.com.cn',
+    openApiCandidates: ['https://openapi.qoder.com.cn', 'https://qoder.com.cn'],
     // CN 的 algo 网关换了域名，路径与协议同形
     inferBase: 'https://gateway.qoder.com.cn',
+    inferHosts: ['https://gateway.qoder.com.cn'],
     clientId: '732aef47-9cf2-46a2-95fe-4cebb5d0d1fa',
     userAgentPrefix: 'qoder',
+    desktopUserAgent: 'Qoder',
     clientMetadata: { client_type: '5', business_product: 'cli', business_type: 'agent', scene: 'assistant' },
-    models: [...COMMON_MODELS, ...CN_ONLY_MODELS.filter(model => !COMMON_MODELS.some(each => each.id === model.id))],
+    models: mergeModels(COMMON_MODELS, CN_MODEL_OVERRIDES, CN_ONLY_MODELS),
   },
+}
+
+// 按 id 覆盖再追加：保证「同 key 不同型号」与「区域独占」都表达得出来
+function mergeModels(base, overrides = [], extra = []) {
+  const byId = new Map(base.map(model => [model.id, model]))
+  for (const model of overrides) byId.set(model.id, model)
+  const out = [...byId.values()]
+  for (const model of extra) if (!byId.has(model.id)) out.push(model)
+  return out
+}
+
+/**
+ * 客户端填的模型名 → 上游目录 key。
+ *
+ * 接受：裸 key、展示名（Qwen3.8-Max）、小写展示名、历史别名，以及 `key (Name)` 形态。
+ * 官方客户端允许用户填展示名，只认裸 key 会让「Qwen3.8-Max」直接 400。
+ */
+function resolveModelKey(productId, input) {
+  const product = PRODUCTS[productId]
+  const raw = String(input || '').trim()
+  if (!product || !raw) return ''
+  const stripped = raw.replace(/^[^/]*\//, '') // 去掉 provider/ 前缀
+  const candidates = [stripped]
+  const paren = stripped.match(/^(.+?)\s*\((.*)\)$/)
+  if (paren) candidates.push(paren[1].trim(), paren[2].trim())
+  for (const candidate of candidates) {
+    const lower = candidate.toLowerCase()
+    const hit = product.models.find(model =>
+      model.id === candidate || model.id.toLowerCase() === lower || (model.name || '').toLowerCase() === lower)
+    if (hit) return hit.id
+    if (MODEL_ALIASES[lower] && product.models.some(model => model.id === MODEL_ALIASES[lower])) {
+      return MODEL_ALIASES[lower]
+    }
+  }
+  return ''
 }
 
 // ── PKCE 设备码登录 ──
@@ -233,6 +360,33 @@ function applyRefresh(credential, payload) {
   return next
 }
 
+// 设备码登录拿不到过期时间时的兜底寿命。官方设备令牌实测约 30 天；
+// 不写 expire_time 会让 needsRefresh 永远为假 —— 该号永不主动续期，只能等 401。
+const DEFAULT_CREDENTIAL_TTL_MS = 30 * 24 * 3600 * 1000
+
+// machine_id 由 (安装盐, uid) 派生：同一账号换一次登录不该变成「另一台设备」。
+// 形状要与官方一致（UUIDv4：第 13 位 4、第 17 位 8/9/a/b）。
+function deriveMachineId(seed) {
+  const hex = crypto.createHash('sha256').update(String(seed)).digest('hex').slice(0, 32).split('')
+  hex[12] = '4'
+  hex[16] = 'a'
+  const s = hex.join('')
+  return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`
+}
+
+// 每日领取窗口：固定 UTC+8 10:00（不用系统时区 —— 用户机器时区改了不该影响判据）
+const CHECKIN_WINDOW_HOUR = 10
+const UTC8_OFFSET_MS = 8 * 3600 * 1000
+
+function nextCheckinWindow(nowMs = Date.now()) {
+  // 换算到 UTC+8 的「日历日」，算出距下一个 10:00 的毫秒数
+  const shifted = nowMs + UTC8_OFFSET_MS
+  const dayStart = Math.floor(shifted / 86400000) * 86400000
+  const windowStart = dayStart + CHECKIN_WINDOW_HOUR * 3600 * 1000
+  const next = shifted < windowStart ? windowStart : windowStart + 86400000
+  return next - UTC8_OFFSET_MS
+}
+
 // ── 积分余额 ──
 
 // 安全读数字：上游可能发字符串数字；解析不出返回 undefined（不编造 0）
@@ -276,19 +430,32 @@ function parseUsageBalance(body) {
   const usage = body.qoderUsage
   if (typeof usage !== 'object' || usage === null) return null
   const packages = []
+  let unlimited = false
   const plan = parseQuota(usage.userQuota)
   if (plan) packages.push({ name: '套餐额度', ...plan })
   const addOn = parseQuota(usage.addOnQuota)
   if (addOn) packages.push({ name: '资源包', ...addOn })
-  const dedicated = Array.isArray(usage.dedicatedResourcePackages) ? usage.dedicatedResourcePackages : []
-  for (const item of dedicated) {
-    const pkg = parseQuota(item)
-    if (pkg) packages.push({ name: '专用资源包', ...pkg })
+  for (const key of ['dedicatedResourcePackages', 'orgResourcePackages']) {
+    const list = Array.isArray(usage[key]) ? usage[key] : []
+    for (const item of list) {
+      const pkg = parseQuota(item)
+      if (pkg) packages.push({ name: key === 'dedicatedResourcePackages' ? '专用资源包' : '组织资源包', ...pkg })
+    }
+  }
+  // 团队/共享池：`cap`（或 total）为负数表示不限量，报 0 会让团队号看起来「已耗尽」
+  for (const key of ['sharedQuota', 'teamQuota', 'orgSharedQuota']) {
+    const quota = usage[key]
+    if (!quota || typeof quota !== 'object') continue
+    const cap = readNumberField(quota, 'cap')
+    if (cap !== undefined && cap < 0) unlimited = true
+    const pkg = parseQuota(quota)
+    if (pkg) packages.push({ name: '共享池', ...pkg })
+    else if (cap !== undefined && cap < 0) packages.push({ name: '共享池', total: 0, used: 0, remaining: 0 })
   }
   if (packages.length === 0) return null
   // 逐包保留两位再合计，抑制浮点尾数
   const total = Math.round(packages.reduce((sum, pkg) => sum + pkg.remaining, 0) * 100) / 100
-  return { total, packages }
+  return { total, packages, ...unlimited ? { unlimited: true } : {} }
 }
 
 // ── 响应信封 ──
@@ -406,9 +573,19 @@ module.exports = {
   REFRESH_PATH,
   USERINFO_PATH,
   USAGE_PATH,
+  CAMPAIGNS_PATH,
+  campaignClaimPath,
+  CHECKIN_STATUS_PATH,
+  CHECKIN_CLAIM_PATH,
+  DESKTOP_CLIENT_TYPE,
+  DESKTOP_CLIENT_VERSION,
+  DEFAULT_CREDENTIAL_TTL_MS,
   PRODUCTS,
   createPkce,
   createDeviceSession,
+  deriveMachineId,
+  nextCheckinWindow,
+  resolveModelKey,
   buildAuthUrl,
   buildPollUrl,
   parseTokenPayload,

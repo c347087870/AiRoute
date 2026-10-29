@@ -31,6 +31,10 @@ module.exports = {
       logger: ctx.logger,
       credentials: ctx.credentials,
       login: ctx.loginServer,
+      // 渠道设置：首字超时、选号策略、粘性 TTL、脱敏开关都在「渠道设置」内页里改
+      settings: ctx.settings,
+      // 官网版本号同步（登录链接的 plugin_version / x_app_version 自动跟随）
+      versions: ctx.versions,
     })
 
     return {
@@ -48,6 +52,9 @@ module.exports = {
       startLogin: () => Trae.startLogin(),
       checkin: (provider, uid) => Trae.checkin(uid),
       balance: (provider, uid) => Trae.balance(uid),
+      // 令牌主动校验（CheckLogin，不消耗积分）：宿主 capabilitiesOf 靠这个方法存在与否
+      // 判定 checkLogin 能力，漏登记会让 account.checkLogin 一路报「不支持」
+      checkLogin: (provider, uid) => Trae.checkLogin(uid),
       refresh: () => Trae.refresh(),
       setEvents: handlers => Trae.setEvents(handlers),
       shutdown: () => Trae.shutdown(),

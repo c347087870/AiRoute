@@ -17,8 +17,8 @@ const path = require('path')
 
 const { createPluginHost } = require('../plugin-host')
 
-function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
-  const host = createPluginHost({ dataDir, logger })
+function createOwnedRuntime({ dataDir, logger = console, onChanged, settings }) {
+  const host = createPluginHost({ dataDir, logger, settings })
   const loaded = host.load()
 
   // 模型目录缓存（refresh 后整表重算）
@@ -103,6 +103,10 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
           context_window: model.maxContext,
           max_tokens: model.maxOutput,
           vision: model.vision === true,
+          // 上游标的免费额度模型：面板据此打「免费」标签（Qoder 的 q*model 就是这类）
+          ...model.isFree === true ? { is_free: true } : {},
+          // 上游明确禁用的模型：照样列出来并说明原因，比「选到才报错」清晰
+          ...model.disabledReason ? { disabled_reason: model.disabledReason } : {},
         }
         // 模型自带的推理档位（Trae 的 reasoning.efforts）同步进 Provider 配置，
         // 面板才能在模型行里让用户选档位
@@ -191,17 +195,19 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
   }
 
   // 这家支持哪些按账号的动作。判据取插件自己的**声明**，不是「方法存不存在」：
-  // Qoder 的 checkin() 是存在的（统一 ABI 里它必须有），但它永远回「不支持」，
-  // 用方法存在性判断会给 Qoder 画出一个必然失败的「领取积分」。
+  // 统一 ABI 里 checkin() 必须有，但「有没有端点」是插件才知道的事
+  // （Qoder 曾长期没有每日领取端点，现在走活动平台；哪天接口下线也只有插件知道）。
   //   · checkin：插件清单里的 checkinProviders；
   //   · balance：后端真的实现了 balance()；
-  //   · test：后端真的实现了 testAccount()（当前三家都没有，account.test 是旧 RPC）。
+  //   · test：后端真的实现了 testAccount()（当前几家都没有，account.test 是旧 RPC）。
+  //   · checkLogin：Trae 的令牌主动校验（CheckLogin，不消耗积分）
   function capabilitiesOf(provider, checkinProviders) {
     const instance = host.instanceOf(provider)
     return {
       checkin: checkinProviders.has(provider),
       balance: typeof instance?.backend?.balance === 'function',
       test: typeof instance?.backend?.testAccount === 'function',
+      checkLogin: typeof instance?.backend?.checkLogin === 'function',
     }
   }
 
@@ -222,6 +228,18 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
       logger.warn?.(`[channels] ${provider} 账号清单读取失败：${error.message}`)
       return []
     }
+  }
+
+  // 面板给的是展示 id（qoder-5876b00e / trae-a61779c9），插件要的是凭据键里的 uid。
+  // 统一在这里换算：以前的删除/改状态直接把 id 当 uid，结果「接口回 ok、账号还在」。
+  function findAccount(provider, payload) {
+    const rows = providerAccounts(provider)
+    const wanted = [payload?.accountId, payload?.uid].filter(value => typeof value === 'string' && value.length > 0)
+    for (const value of wanted) {
+      const hit = rows.find(row => row.id === value) || rows.find(row => row.uid === value)
+      if (hit) return hit
+    }
+    return undefined
   }
 
   // 插件可选的运维方法：没有这个方法就是「这家不支持」，返回统一的 unsupported，
@@ -291,30 +309,35 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
       }
 
       case 'account.delete': {
-        const uid = String(payload.accountId || payload.uid || '')
-        if (!provider || !uid) return { ok: false, error: providerError(payload?.provider) || '缺少 accountId' }
-        const removed = await optional(provider, 'removeAccount', uid)
+        // 面板传的是展示 id（qoder-5876b00e），插件要的是凭据键里的 uid。
+        // 直接拿 id 当 uid 会「删了个不存在的账号」：接口回 ok、账号还在。
+        if (!provider) return { ok: false, error: providerError(payload?.provider) }
+        const entry = findAccount(provider, payload)
+        if (!entry) return { ok: false, error: `账号 ${payload.accountId || payload.uid || ''} 不存在` }
+        const removed = await optional(provider, 'removeAccount', entry.uid)
         if (!removed.supported) return { ok: false, error: `${provider} 不支持删除账号` }
+        emitChanged()
         return { ok: true }
       }
 
       case 'account.update': {
         // 面板的「启用/停用」与账号健康台账的自动停用都走这里
-        const uid = String(payload.accountId || payload.uid || '')
-        const accountId = payload.accountId
-        if (!provider || !uid) return { ok: false, error: providerError(payload?.provider) || '缺少 accountId' }
+        if (!provider) return { ok: false, error: providerError(payload?.provider) }
+        const entry = findAccount(provider, payload)
+        if (!entry) return { ok: false, error: `账号 ${payload.accountId || payload.uid || ''} 不存在` }
         const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : {}
-        const updated = await optional(provider, 'updateAccount', uid, patch)
+        const updated = await optional(provider, 'updateAccount', entry.uid, patch)
         if (!updated.supported) return { ok: false, error: `${provider} 不支持修改账号` }
         emitChanged()
-        return { ok: true, accountId }
+        return { ok: true, accountId: entry.id }
       }
 
       case 'account.refresh': {
-        const uid = String(payload.accountId || payload.uid || '')
-        if (!provider || !uid) return { ok: false, error: providerError(payload?.provider) || '缺少 accountId' }
+        if (!provider) return { ok: false, error: providerError(payload?.provider) }
+        const entry = findAccount(provider, payload)
+        if (!entry) return { ok: false, error: `账号 ${payload.accountId || payload.uid || ''} 不存在` }
         try {
-          const res = await optional(provider, 'refreshAccount', uid)
+          const res = await optional(provider, 'refreshAccount', entry.uid)
           if (!res.supported) return { ok: false, error: `${provider} 不支持续期` }
           return { ok: true }
         } catch (error) {
@@ -334,6 +357,9 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
               name: model.name,
               disabled: state.disabledModels[`${provider}/${model.id}`] === true,
               dead: state.deadModels[`${provider}/${model.id}`] > Date.now(),
+              // 面板的「免费」标签与「上游禁用原因」：两者都来自插件目录
+              ...model.isFree === true ? { isFree: true } : {},
+              ...model.disabledReason ? { disabledReason: model.disabledReason } : {},
               // 上游声明的思考档位：Provider 弹窗的档位下拉与 /v1/models 的声明都用它
               ...model.reasoning?.efforts?.length
                 ? { efforts: model.reasoning.efforts, defaultEffort: model.reasoning.defaultEffort || '' }
@@ -428,6 +454,17 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
         if (!done.supported) return { ok: false, error: `${provider} 不提供余额查询端点` }
         const value = done.value || {}
         return { ok: true, value: { accountId: entry.id, balance: value.balance ?? value.total ?? null } }
+      }
+
+      // 令牌主动校验（Trae CheckLogin）：不消耗积分，保活/面板测试用
+      case 'account.checkLogin': {
+        const uid = String(payload.accountId || payload.uid || '')
+        if (!provider || !uid) return { ok: false, error: providerError(payload?.provider) || '缺少 accountId' }
+        const entry = providerAccounts(provider).find(row => row.id === uid || row.uid === uid)
+        if (!entry) return { ok: false, error: `账号 ${uid} 不存在` }
+        const done = await optional(provider, 'checkLogin', entry.uid)
+        if (!done.supported) return { ok: false, error: `${provider} 不支持令牌校验` }
+        return { ok: true, value: { accountId: entry.id, ...(done.value || {}) } }
       }
 
       case 'credits.claimAll': {
@@ -537,6 +574,8 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged }) {
       return instance.backend.complete(provider, { provider, model, openAi: request.openAi }, onChunk, signal)
     },
     importLegacyAccounts,
+    // 渠道运行参数：宿主与插件共读一份（面板内页写它）
+    settings,
     // 插件管理动作：装 / 卸 / 启停之后要重建运行时（清单变了，provider 集合就变了）
     store: host.store,
     close: async () => {

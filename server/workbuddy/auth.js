@@ -219,6 +219,15 @@ function needsRefresh(auth, within) {
   return Math.floor(Date.now() / 1000) + within >= expiresAt
 }
 
+// AT 是否仍然有效（留 5 分钟余量）。refresh 失败但 AT 未过期 ≠ 账号死：
+// 上游 chat 仍可用（实测 4/29 个账号 refresh 恒回 12153，但 AT 还剩 26~333 天，
+// /v2/chat/completions 全 200）。按 session dead 连续计数会把这些号永久禁用。
+function atStillValid(auth, marginSec = 300) {
+  const exp = Number(auth?.expiresAt || 0)
+  if (!Number.isFinite(exp) || exp <= 0) return false // 无 expiry 无法判定，按死处理
+  return Math.floor(Date.now() / 1000) + marginSec < exp
+}
+
 module.exports = {
   validUID,
   parseAuth,
@@ -226,6 +235,7 @@ module.exports = {
   pathFor,
   loadDir,
   needsRefresh,
+  atStillValid,
   // 企业上下文判定（计费口径 / 行为任务门控口径）
   isEnterprise,
   isEnterpriseSession,

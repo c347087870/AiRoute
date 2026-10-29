@@ -44,18 +44,32 @@ const DEFAULT_FUNCTION = 'solo_work_lite'
 // 版本过低时 glm-5.3 等新模型会报 4001。跟随 Trae 更新时一起动这两个值。
 const IDE_VERSION = '0.1.52'
 const IDE_VERSION_CODE = '20260811'
-// 登录门户认的是插件版本，与上面的 IDE 版本是两个独立字段
-const PLUGIN_VERSION = '2.3.62834'
+
+// ── 登录页参数（按 Trae 桌面客户端实测链接对齐）──
+// 登录页按客户端形态（auth_from / client_id / 版本号）校验，版本过旧会被判成
+// 「非官方客户端」而不给授权码。版本号由宿主的 version-sync 每天从官网同步
+// （changelog + 本机安装双源取最大），这里只存**兜底默认值**——同步还没完成
+// 或两个源都失败时用它，保证登录不至于整体不可用。
+const LOGIN_AUTH_FROM = 'trae'
+const LOGIN_CLIENT_ID = 'ono9krqynydwx5' // IDE 应用；SOLO 是 en1oxy7wnw8j9n
+const LOGIN_DEVICE_TYPE = 'windows'
+const LOGIN_DEVICE_BRAND = '20XHA000CD'
+const LOGIN_OS_VERSION = 'Windows 11 Home China'
+const LOGIN_CHANNEL_NAME = 'common'
+const LOGIN_APP_TYPE = 'stable'
+// 可被 version-sync 覆盖的两个版本号（登录链接 plugin_version 与 x_app_version）
+const LOGIN_FALLBACK = { pluginVersion: '2.3.97430', appVersion: '3.4.9' }
+// 授权码换证：v3 端点（v1 只认 refreshToken 分支，见 provider 的 fallback）
+const EXCHANGE_V3_PATH = '/trae/api/v3/oauth/ExchangeToken'
 
 const CLIENT_ID = 'en1oxy7wnw8j9n'
 const APP_ID = '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8'
 const USER_AGENT = `Trae/${IDE_VERSION}`
 
-// Max 模式（1M 上下文）常量。三件套必须成套下发，只改 max_tokens 会被按 200K 校验后拒绝。
+// Max 模式（1M 上下文）常量。上游只认 `is_max_mode` + `prompt_max_tokens:168000`
+// 这一对（填 1M 会被 4001 拒，真实上下文由上游内部决策），见 maxModeFields。
 const MAX_CONTEXT_TOKENS = 1000000
-const MAX_PROMPT_TOKENS = 936000
 const MAX_OUTPUT_TOKENS = 64000
-const MAX_MODE_TYPE = 1
 
 // 可调用通道白名单（顺序即优先级）。**白名单不只是排序**：22 个 function 里
 // 只有这些在本推理端点下真正可调用（chat / builder / inline_chat 实测稳定被拒，
@@ -115,7 +129,8 @@ const FALLBACK_MODELS = [
 // machine_id / device_id 必须**持久化**：前者是设备身份（每次换会触发风控或
 // 要求重新登录），后者是签到设备号（同一天两个账号共用会被判「该设备已签到」）。
 function generateMachineId() {
-  return crypto.randomBytes(16).toString('hex')
+  // 桌面客户端的 machine_id 是 64 位 hex（sha256 形态），不是 uuid
+  return crypto.randomBytes(32).toString('hex')
 }
 
 function generateDeviceId() {
@@ -271,36 +286,101 @@ function derivedUuid(seed, salt) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-// 登录 URL 的 login_trace_id：取拼接串的尾部 16 字符，让回调能关联回本次登录
-function traceId(machineId, deviceId) {
-  const joined = `${machineId}${deviceId}`
-  return joined.length >= 16 ? joined.slice(-16) : joined.padStart(16, '0')
+// 登录 URL：参数名、顺序与编码方式都被上游钉住。
+// 两个致命细节（Agent2API 实测）：
+//   ① `auth_callback_url` **不能编码** —— 官方页面对它做正则匹配，编码成
+//      `http%3A%2F%2F...` 后拿不到回调地址，页面永远停在「认证中」/「网络错误」；
+//   ② 必须带 PKCE（code_challenge + S256），否则页面只回授权码，换不到令牌。
+function buildLoginQuery(params) {
+  return params
+    .map(([key, value, encode]) => `${key}=${encode ? encodeURIComponent(value) : value}`)
+    .join('&')
 }
 
-// 登录 URL 的 17 个参数一个都不能少：参数名写成 callback_url 时 Trae 拿不到
-// 回调地址，登录页会永远停在「认证中」。
-function buildLoginUrl(machineId, deviceId, callbackUrl) {
-  const params = new URLSearchParams({
-    login_version: '1',
-    auth_from: 'solo',
-    login_channel: 'native_ide',
-    plugin_version: PLUGIN_VERSION,
-    auth_type: 'local',
-    client_id: CLIENT_ID,
-    redirect: '0',
-    login_trace_id: traceId(machineId, deviceId),
-    auth_callback_url: callbackUrl,
-    machine_id: machineId,
-    device_id: deviceId,
-    x_device_id: deviceId,
-    x_machine_id: machineId,
-    x_device_brand: 'PC',
-    x_device_type: 'PC',
-    x_os_version: '1.0',
-    x_app_version: IDE_VERSION,
-    x_app_type: 'stable',
+function buildLoginUrl(machineId, deviceId, callbackUrl, options = {}) {
+  // 版本号优先用宿主同步的官网值；每轮登录都重新读（同步是后台定时任务）
+  const synced = options.versions || {}
+  const pluginVersion = synced.pluginVersion || LOGIN_FALLBACK.pluginVersion
+  const appVersion = synced.appVersion || LOGIN_FALLBACK.appVersion
+  const params = [
+    ['login_version', '1', false],
+    ['auth_from', LOGIN_AUTH_FROM, false],
+    ['login_channel', 'native_ide', false],
+    ['plugin_version', pluginVersion, true],
+    ['auth_type', 'local', false],
+    ['client_id', LOGIN_CLIENT_ID, false],
+    ['redirect', '0', false],
+    // 每次登录一个新的 uuid：复用/推导出来的 trace 会被上游当成重放
+    ['login_trace_id', options.traceId || crypto.randomUUID(), true],
+    ['auth_callback_url', callbackUrl, false],
+    ['machine_id', machineId, true],
+    ['device_id', deviceId, true],
+    ['x_device_id', deviceId, true],
+    ['x_machine_id', machineId, true],
+    ['x_device_brand', LOGIN_DEVICE_BRAND, true],
+    ['x_device_type', LOGIN_DEVICE_TYPE, true],
+    ['x_os_version', LOGIN_OS_VERSION, true],
+    // x_env 在桌面客户端里是**空值**：保留参数名，值为空
+    ['x_env', '', true],
+    ['x_app_version', appVersion, true],
+    ['x_app_type', LOGIN_APP_TYPE, true],
+    ...(options.codeChallenge
+      ? [['code_challenge', options.codeChallenge, true], ['code_challenge_method', 'S256', false]]
+      : []),
+    ['channel_name', LOGIN_CHANNEL_NAME, false],
+  ]
+  return `${CONSOLE_HOST}/authorization?${buildLoginQuery(params)}`
+}
+
+// PKCE：48 字节 → base64url（无填充），challenge = SHA-256(verifier)
+function pkcePair() {
+  const verifier = crypto.randomBytes(48).toString('base64url')
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url')
+  return { verifier, challenge }
+}
+
+// 设备密钥对：官方每次登录现生成一套 EC P-256，公钥进 ExchangeToken 的
+// DeviceInfo.DevicePublicKey，私钥必须随凭据落盘（丢了等于断开设备绑定）
+function generateDeviceKeys() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+    namedCurve: 'prime256v1',
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   })
-  return `${CONSOLE_HOST}/authorization?${params.toString()}`
+  return { publicKey, privateKey }
+}
+
+// 授权码换证（v3）：CodeVerifier 与 DeviceInfo 缺一不可，空公钥会被判 20405
+function buildAuthCodeExchange({ authCode, codeVerifier, publicKey, machineId, deviceId }, appVersion = LOGIN_FALLBACK.appVersion) {
+  return {
+    urls: [
+      `https://api.trae.cn${EXCHANGE_V3_PATH}`,
+      `https://api.trae.com.cn${EXCHANGE_V3_PATH}`,
+      // 老端点兜底：桌面客户端历史上一直用它，v3 拒了再试一次
+      `https://api.trae.cn${EXCHANGE_PATH}`,
+    ],
+    body: {
+      ClientID: LOGIN_CLIENT_ID,
+      AuthCode: authCode,
+      CodeVerifier: codeVerifier,
+      IDEVersion: appVersion,
+      DeviceInfo: {
+        DeviceID: deviceId,
+        MachineID: machineId,
+        // IDE 客户端是 IDE_PC（SOLO 才是 SOLO_PC）
+        PlatformCode: 'IDE_PC',
+        DeviceType: 'PC',
+        DeviceName: 'DESKTOP-CPASOLO',
+        DeviceModel: LOGIN_DEVICE_BRAND,
+        ClientVersion: appVersion,
+        DevicePublicKey: publicKey,
+        DeviceBrand: 'Microsoft',
+        DeviceCPU: '',
+        OSInfo: LOGIN_DEVICE_TYPE,
+        OSVersion: LOGIN_OS_VERSION,
+      },
+    },
+  }
 }
 
 // 回调参数是 URL 编码的 JSON；Trae 的中文昵称存在**双重编码**（实测乱码
@@ -325,9 +405,37 @@ function jsonString(source, key) {
   return typeof value === 'string' ? value : ''
 }
 
-// 解析登录回调。Trae 授权页有**两套并列流程**：老流程直接回传 refreshToken，
-// 新流程（PKCE）回传 code。只认后者会把合法回调误判成失败，症状与「一直认证中」
-// 一样 —— 所以这里把 PKCE 形态单独识别出来并给出精确原因。
+// 从 authCodeInfo（JSON 或 JSON 字符串）里挖授权码：键名上游改过几版，递归找
+function extractAuthCode(raw) {
+  const parsed = parseJsonParam(raw)
+  if (!parsed || typeof parsed !== 'object') return ''
+  const keys = ['authCode', 'auth_code', 'AuthCode', 'AuthCodeToken', 'code']
+  const walk = value => {
+    if (!value || typeof value !== 'object') return ''
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const hit = walk(item)
+        if (hit) return hit
+      }
+      return ''
+    }
+    for (const key of keys) {
+      if (typeof value[key] === 'string' && value[key].trim().length > 0) return value[key].trim()
+    }
+    for (const nested of Object.values(value)) {
+      const hit = walk(nested)
+      if (hit) return hit
+    }
+    return ''
+  }
+  return walk(parsed)
+}
+
+// 解析登录回调。上游同时存在两条材料分支（Agent2API 实测）：
+//   · refreshToken —— 老流程，拿到就直接走续期链换凭据；
+//   · authCode     —— PKCE 新流程，要用本轮 code_verifier 去 v3 ExchangeToken 换。
+// 错误键必须先判：`error` / `errorCode` / `isRedirect=false` 时其余字段一律留空，
+// 否则会把「用户取消 + 一个残留 code」当成成功材料。
 function parseCallback(rawUrl) {
   let query
   try {
@@ -335,35 +443,38 @@ function parseCallback(rawUrl) {
   } catch {
     return { ok: false, reason: '回调 URL 无法解析' }
   }
+  const errorKey = ['error', 'error_code', 'err', 'errorCode']
+    .find(key => (query.get(key) || '').trim().length > 0)
+  if (errorKey) return { ok: false, reason: `上游拒绝授权：${errorKey}=${query.get(errorKey)}` }
+  if ((query.get('isRedirect') || '') === 'false') return { ok: false, reason: '上游返回 isRedirect=false（设备绑定被拒）' }
+
   const userInfo = parseJsonParam(query.get('userInfo'))
   const userJwt = parseJsonParam(query.get('userJwt'))
   let refreshToken = query.get('refreshToken') ?? ''
   if (refreshToken.length === 0) refreshToken = jsonString(userJwt, 'RefreshToken')
   const accessToken = refreshToken.length === 0 ? jsonString(userJwt, 'Token') : ''
-  const authCodeInfo = parseJsonParam(query.get('authCodeInfo'))
   const authCode = [
-    query.get('code') ?? '',
-    query.get('authCode') ?? '',
-    jsonString(authCodeInfo, 'code'),
-    jsonString(authCodeInfo, 'authCode'),
-    query.get('authCodeInfo') ?? '',
-  ].find(candidate => candidate.trim().length > 0)?.trim() ?? ''
+    query.get('authCode'),
+    query.get('auth_code'),
+    query.get('AuthCode'),
+    query.get('authorization_code'),
+    query.get('code'),
+  ].find(candidate => (candidate || '').trim().length > 0)?.trim()
+    || extractAuthCode(query.get('authCodeInfo'))
 
   const info = {
     refreshToken,
     accessToken,
+    authCode,
+    // 回调带回的 loginHost 才是这次授权实际发生的站点（可能与国际站不同）
+    loginHost: query.get('loginHost') || query.get('login_host') || '',
     uid: jsonString(userInfo, 'UserID'),
     nickname: jsonString(userInfo, 'ScreenName'),
     // 回调里的字段名是 TenantID，不是 EnterpriseID
     enterpriseId: jsonString(userInfo, 'TenantID'),
   }
-  if (info.refreshToken.length === 0 && info.accessToken.length === 0) {
-    return {
-      ok: false,
-      reason: authCode.length > 0
-        ? '上游返回了 PKCE 授权码（code / authCodeInfo），当前登录流程不认这种形态'
-        : '回调未携带 refreshToken / userJwt.Token / code',
-    }
+  if (info.refreshToken.length === 0 && info.accessToken.length === 0 && info.authCode.length === 0) {
+    return { ok: false, reason: '回调未携带 refreshToken / accessToken / authCode' }
   }
   return { ok: true, info }
 }
@@ -523,6 +634,10 @@ function buildCredential(exchange, userInfo, session, nowMs = Date.now()) {
     ...userInfo.email ? { email: userInfo.email } : {},
     machine_id: session.machineId,
     device_id: session.deviceId,
+    // 设备密钥对只写不读，但重建凭据时必须保住：抹掉等于断开这台设备与账号的绑定
+    ...session.devicePublicKey ? { device_public_key: session.devicePublicKey } : {},
+    ...session.devicePrivateKey ? { device_private_key: session.devicePrivateKey } : {},
+    ...session.authClientId ? { auth_client_id: session.authClientId } : {},
     enterprise_id: userInfo.enterpriseId,
   }
 }
@@ -542,11 +657,20 @@ function applyRefresh(credential, exchange) {
 // ── 模型目录 ──
 
 // 上下文窗口取 `context_window_tokens.dev`：`max` 那一档（1M）要开 Max 模式才可用，
-// 采信 max 会让客户端以为有 1M 窗口、实际请求被上游拒
+// 采信 max 会让客户端以为有 1M 窗口、实际请求被上游拒。
+// 但 max 档要单独记下来（contextWindowMax）：只有知道「这模型有更大的档」，
+// 才能判断什么时候该开 Max 模式 —— 两个口径分槽，互不兜底。
 function readContextWindow(entry) {
   const tokens = entry.context_window_tokens ?? entry.ContextWindowTokens
   if (typeof tokens !== 'object' || tokens === null) return undefined
   return readNumber(tokens, 'dev') ?? readNumber(tokens, 'Dev')
+}
+
+function readContextWindowMax(entry) {
+  const tokens = entry.context_window_tokens ?? entry.ContextWindowTokens
+  if (typeof tokens !== 'object' || tokens === null) return undefined
+  const max = readNumber(tokens, 'max') ?? readNumber(tokens, 'Max')
+  return max !== undefined && max > 0 ? max : undefined
 }
 
 function readDetailMaxTokens(entry, suffix = '') {
@@ -590,6 +714,7 @@ function parseConfigEntry(entry, channel) {
     isEnabled: readBoolean(entry, 'config_switch'),
     multimodal: displayRecord === undefined ? undefined : readBoolean(displayRecord, 'multimodal'),
     contextWindow: readContextWindow(entry),
+    contextWindowMax: readContextWindowMax(entry),
     maxOutputTokens: readDetailMaxTokens(entry),
     reasoning: reasoning === undefined ? undefined : {
       // 与 provider.js 的 reasoningFor 同一判据：只判「配置存在」不够，
@@ -730,10 +855,42 @@ function normalizeTools(body) {
   else delete body.tools
 }
 
+// 模型名 → 上游 wire 名。官方每个模型都有「配置名」和「内部模型名」两套写法：
+// 内部名统一是 <配置名>__dev，只有少数模型是点号风格（下划线变体会报 4023）。
+// 只发配置名时上游按兜底规则解析，新上架模型容易落到错误的档位/计费口径。
+const WIRE_NAME_EXCEPTIONS = { 'deepseek-v4.1-flash': 'deepseek-v4.1-flash__dev' }
+
+function wireModelName(configName) {
+  const name = String(configName || '').trim()
+  if (!name) return ''
+  if (WIRE_NAME_EXCEPTIONS[name]) return WIRE_NAME_EXCEPTIONS[name]
+  return name.includes('__') ? name : `${name}__dev`
+}
+
+// 会话信封：官方客户端每个请求都在 body 里带这三个 id 与一组版本/形态字段。
+// 我们原来只把它们放在 header（X-Machine-Id / X-Device-Id），body 是最小集 ——
+// 上游按 body 判客户端一致性时就少了一半证据，多轮上下文归属也只能靠猜。
+function buildEnvelope(identity = {}) {
+  return {
+    conversation_id: identity.conversationId || crypto.randomUUID(),
+    session_id: identity.sessionId || crypto.randomUUID(),
+    project_id: crypto.randomUUID(),
+    workspace_id: 'e04cdd',
+    mode: 'FunctionCall',
+    package_type: 'stable_cn',
+    ide_version: IDE_VERSION,
+    ide_version_code: IDE_VERSION_CODE,
+    app_id: APP_ID,
+    ...(identity.uid ? { user_id: identity.uid } : {}),
+    ...(identity.deviceId ? { device_id: identity.deviceId } : {}),
+    ...(identity.machineId ? { machine_id: identity.machineId } : {}),
+  }
+}
+
 // 把 OpenAI Chat 请求体转成 SOLO 格式。
 // `channel` 必须是**列出该模型的通道**：发错通道上游回流内 4001，
 // 而错误文案指向模型，极易误判成「这个模型坏了」。
-function transformToSolo(openAi, channel) {
+function transformToSolo(openAi, channel, identity = {}) {
   const body = { ...openAi, stream: true, function: channel || DEFAULT_FUNCTION }
   if (Array.isArray(body.messages)) body.messages = body.messages.map(transformMessage)
   const rawModel = typeof body.model === 'string' ? body.model : ''
@@ -741,20 +898,26 @@ function transformToSolo(openAi, channel) {
   const configName = (rawModel.includes('__') ? rawModel.split('__')[0] : rawModel) || DEFAULT_MODEL
   body.config_name = configName
   body.model = configName
+  body.model_name = wireModelName(configName)
+  Object.assign(body, buildEnvelope(identity))
+  // Max 模式：只有目录声明了「max 档 > dev 档」的模型才需要这一组字段
+  if (identity.maxMode) Object.assign(body, maxModeFields(identity.maxMode.maxContext, identity.maxMode.outputMax))
   normalizeToolChoice(body)
   normalizeTools(body)
   return body
 }
 
 // Max 模式（1M 上下文）：三件套必须成套，只调大 max_tokens 会被按 200K 拒绝
+// Max 模式（1M 上下文）：上游只认 is_max_mode + prompt_max_tokens 这一对，
+// 且 prompt_max_tokens 必须是 168000 —— 填 1M 会被 4001 拒（对方 2026-09 实测），
+// 真实上下文由上游内部决策，这个字段不钳制实际长度。
+const MAX_MODE_PROMPT_TOKENS = 168000
 function maxModeFields(maxContext, outputMax) {
   return {
-    model_auto_selection: { strategy: 'max', fallback_to_advance_model: null, entitlement_id: null },
-    model_selection_strategy: 'max',
-    mode_type: MAX_MODE_TYPE,
-    context_window_size: maxContext > 0 ? maxContext : MAX_CONTEXT_TOKENS,
-    prompt_max_tokens: MAX_PROMPT_TOKENS,
+    is_max_mode: true,
+    prompt_max_tokens: MAX_MODE_PROMPT_TOKENS,
     max_tokens: outputMax > 0 ? outputMax : MAX_OUTPUT_TOKENS,
+    context_window_size: maxContext > 0 ? maxContext : MAX_CONTEXT_TOKENS,
   }
 }
 
@@ -804,6 +967,133 @@ function normalizeToolCall(call) {
   return out
 }
 
+// ── 重试分诊 ──
+//
+// 上游的失败不能一个「错误」了事：429 是等一会儿再试，502/503 是同号重发或换号，
+// 400 里还有「思考签名抖动」「积分耗尽」「账号被限制」三种完全不同的处置。
+// 一律换号或一律 502 会把可恢复的抖动变成用户可见的失败。
+const RETRY = { RETRY: 'retry', SWITCH: 'switch', FATAL: 'fatal' }
+
+function errorText(value) {
+  return String(value || '')
+}
+
+function isThinkingSignatureError(body) {
+  return errorText(body).toLowerCase().includes('thinking.signature')
+}
+
+// 积分/额度耗尽：请求本身合法，换号才有意义
+function isCreditExhaustedError(body) {
+  const lower = errorText(body).toLowerCase()
+  return lower.includes('insufficient credit') || lower.includes('积分不足') || lower.includes('额度不足')
+}
+
+// 账号级风控（11140）：与渠道级 11-128 相反 —— 换号有意义，受限账号该被停用
+function isAccountRestrictedError(body) {
+  const text = errorText(body)
+  return text.includes('账号存在异常') || text.includes('已被限制使用') || /"code"\s*:\s*11140(?![0-9])/.test(text)
+}
+
+// 返回 { action: 'retry'|'switch'|'fatal', delayMs, rateLimited?, restrict? }
+// attempt：同一账号已尝试次数（0 = 第一次失败后的决策）
+function retryPlan(status, body, attempt = 0, retryAfterSeconds = 0) {
+  const code = Number(status) || 0
+  if (code === 400 && isThinkingSignatureError(body)) {
+    return { action: attempt === 0 ? RETRY.RETRY : RETRY.FATAL, delayMs: 200 }
+  }
+  if (code === 400 && isCreditExhaustedError(body)) return { action: RETRY.SWITCH, delayMs: 0 }
+  if (code === 400 && isAccountRestrictedError(body)) return { action: RETRY.SWITCH, delayMs: 0, restrict: true }
+  if (code === 429) {
+    if (attempt >= 3) return { action: RETRY.SWITCH, delayMs: 0 }
+    const wait = Number(retryAfterSeconds) > 0 ? Number(retryAfterSeconds) * 1000 : 1000 * (attempt + 1)
+    return { action: RETRY.RETRY, delayMs: wait, rateLimited: true }
+  }
+  if (code === 503 || code === 529) {
+    if (attempt >= 3) return { action: RETRY.SWITCH, delayMs: 0 }
+    return { action: RETRY.RETRY, delayMs: 10000 * Math.pow(2, Math.min(attempt, 2)) }
+  }
+  // 502 多半是上游网关瞬时抖动：同号重试一次比立刻换号便宜
+  if (code === 502) return { action: attempt === 0 ? RETRY.RETRY : RETRY.SWITCH, delayMs: 500 }
+  if (code === 401 || code === 403) return { action: RETRY.SWITCH, delayMs: 0 }
+  // 400 其余是请求本身的问题（context 超长等），换号无意义
+  if (code === 400) return { action: RETRY.FATAL, delayMs: 0 }
+  if (code >= 500) return { action: RETRY.SWITCH, delayMs: 0 }
+  return { action: RETRY.FATAL, delayMs: 0 }
+}
+
+// 额度耗尽类的冷却终点：次日 04:00（东八区）。上游按自然日发额度，
+// 用一个固定重置点比「一小时后」可靠 —— 后者会在凌晨反复空转。
+const UTC8_OFFSET_MS = 8 * 3600 * 1000
+
+function nextQuotaReset(nowMs = Date.now()) {
+  const local = nowMs + UTC8_OFFSET_MS
+  const dayStart = Math.floor(local / 86400000) * 86400000
+  const today0400 = dayStart + 4 * 3600 * 1000
+  return (local < today0400 ? today0400 : today0400 + 86400000) - UTC8_OFFSET_MS
+}
+
+// ── 选号策略（纯函数，便于离线回归）──
+//
+// 六个策略里只有 order 是「旧行为」；其余都是为了解决「一直打第一个号」：
+// 先到期的积分先花掉、余额多的先顶上、冷号插队（防热点）、两个里挑更闲的（P2C）。
+function seededRandom(seed) {
+  let t = (Number(seed) >>> 0) + 0x6D2B79F5
+  t = Math.imul(t ^ (t >>> 15), 1 | t)
+  t ^= t + Math.imul(t ^ (t >>> 7), 61 | t)
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+}
+
+function poolScore(entry, totalCredits, now) {
+  const credits = Number(entry.credits)
+  const creditShare = totalCredits > 0 && Number.isFinite(credits) ? credits / totalCredits : 1
+  const idleHours = Math.max(0, (now - (Number(entry.lastUsedAt) || now)) / 3600000)
+  const idleBonus = Math.min(5, idleHours * 0.5)
+  const success = Number.isFinite(entry.successRate) ? entry.successRate : 0.9
+  return creditShare * 10 + idleBonus + success * 3
+}
+
+function pickByStrategy(entries, { strategy = 'order', now = Date.now(), seed = 0 } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) return undefined
+  if (entries.length === 1) return entries[0]
+  if (strategy === 'credit') {
+    return entries.reduce((best, item) => ((Number(item.credits) || 0) > (Number(best.credits) || 0) ? item : best))
+  }
+  if (strategy === 'expire') {
+    // 有到期时间的排前面（先到期先花），没有到期时间的排最后
+    const rank = item => {
+      const exp = Number(item.creditsExpireAt)
+      return exp > 0 ? exp : Number.MAX_SAFE_INTEGER
+    }
+    return entries.reduce((best, item) => (rank(item) < rank(best) ? item : best))
+  }
+  const totalCredits = entries.reduce((sum, item) => sum + Math.max(0, Number(item.credits) || 0), 0)
+  if (strategy === 'weighted') {
+    const top = [...entries]
+      .sort((a, b) => poolScore(b, totalCredits, now) - poolScore(a, totalCredits, now))
+      .slice(0, 5)
+    if (top.length === 1) return top[0]
+    const weights = top.map(item => Math.max(1, poolScore(item, totalCredits, now) * 10))
+    const sum = weights.reduce((a, b) => a + b, 0)
+    let point = seededRandom(seed) * sum
+    for (let i = 0; i < top.length; i++) {
+      point -= weights[i]
+      if (point <= 0) return top[i]
+    }
+    return top[top.length - 1]
+  }
+  if (strategy === 'p2c') {
+    // 随机取两个，先比在途数（空闲者胜）再比得分
+    const a = entries[Math.floor(seededRandom(seed) * entries.length) % entries.length]
+    let b = entries[Math.floor(seededRandom(seed + 1) * entries.length) % entries.length]
+    if (b === a) b = entries[(entries.indexOf(a) + 1) % entries.length]
+    const loadA = Number(a.inflight) || 0
+    const loadB = Number(b.inflight) || 0
+    if (loadA !== loadB) return loadA < loadB ? a : b
+    return poolScore(a, totalCredits, now) >= poolScore(b, totalCredits, now) ? a : b
+  }
+  return entries[0]
+}
+
 // 流内可换号的错误码（额度 / 风控类）
 const ROTATABLE_STREAM_ERROR = 1005
 const ROTATABLE_STREAM_ERRORS = new Set([1005, 4008, 4011])
@@ -838,6 +1128,10 @@ module.exports = {
   oauthHeaders,
   checkinHeaders,
   buildLoginUrl,
+  pkcePair,
+  generateDeviceKeys,
+  buildAuthCodeExchange,
+  LOGIN_CLIENT_ID,
   parseCallback,
   parseExchangeResponse,
   parseUserInfo,
@@ -855,5 +1149,15 @@ module.exports = {
   fallbackModels,
   transformToSolo,
   maxModeFields,
+  wireModelName,
+  buildEnvelope,
   parseSseEvent,
+  RETRY,
+  retryPlan,
+  isThinkingSignatureError,
+  isCreditExhaustedError,
+  isAccountRestrictedError,
+  nextQuotaReset,
+  pickByStrategy,
+  poolScore,
 }

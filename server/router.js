@@ -594,6 +594,10 @@ async function handleRequest(req, res) {
   // 状态码：优先用运行时给出的 status（模型不可用 400、池中无号 503 等），
   // 否则 500。此前一律 500，把「换个模型就行」说成了网关故障。
   const finalStatus = lastError?.status || 500
+  // 上游排队/限流带回来的等待时间：告诉客户端「多久之后再来」，
+  // 缺了它客户端只能立刻重试，正好撞在同一堵墙上
+  const retryAfterMs = Number(lastError?.retryAfterMs) || 0
+  if (retryAfterMs > 0) res.setHeader('Retry-After', String(Math.max(1, Math.round(retryAfterMs / 1000))))
   if (clientIsAnthropic) {
     return res.status(finalStatus).json(wbAnthropic.errorBody(lastError?.message || 'All providers failed', lastError?.gatewayHint))
   }
@@ -744,7 +748,12 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
   }
 
   const isStream = !!req.body?.stream
-  // 三个协议入口在这里收敛成 OpenAI Chat 形态：渠道包的适配器只认这一种。
+  // 渠道运行参数（面板「渠道设置」内页）：按渠道取，改一家不影响另一家
+  const settingsService = channels.getSettings?.()
+  const channelCfg = settingsService?.forProvider?.(entry.provider) || settingsService?.get?.() || {}
+  const firstChunkTimeoutMs = Number(channelCfg.firstChunkTimeoutMs) || CHANNEL_FIRST_CHUNK_TIMEOUT_MS
+  const heartbeatMs = Number(channelCfg.heartbeatMs) || 0
+  const earlyHeadersMs = Number(channelCfg.earlyHeadersMs) || 0  // 三个协议入口在这里收敛成 OpenAI Chat 形态：渠道包的适配器只认这一种。
   // Anthropic 与 Responses 的回程再用 workbuddy 的转换器转回去，避免为渠道
   // 单独维护第二套协议实现。
   const openAi = clientIsAnthropic
@@ -809,14 +818,51 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
+    lastWriteAt = Date.now()
+    startHeartbeat()
+  }
+
+  // 心跳与「早发头」：客户端等不到响应头就会自己超时（常见 60 秒），
+  // 而思考型模型首字实测 40~70 秒。所以超过 earlyHeadersMs 还没有内容时，
+  // 先把 200 与 SSE 头发出去，再用注释帧续命 —— 客户端看到的是「连接活着」。
+  //
+  // 为什么留 3 秒而不是立刻发：401/404/429 这类错误通常 1~2 秒内就有结论，
+  // 早发头会把它们变成「200 + 错误帧」，客户端与兜底逻辑都读不到状态码。
+  let lastWriteAt = Date.now()
+  let heartbeatTimer = null
+  const startHeartbeat = () => {
+    if (heartbeatTimer || heartbeatMs <= 0) return
+    heartbeatTimer = setInterval(() => {
+      if (!started || res.writableEnded) return
+      if (Date.now() - lastWriteAt < heartbeatMs) return
+      try {
+        res.write(': ping\n\n')
+        lastWriteAt = Date.now()
+      } catch {
+        /* 下游已断开 */
+      }
+    }, Math.min(heartbeatMs, 5000))
+    heartbeatTimer.unref?.()
+  }
+  const write = text => {
+    if (!text) return
+    lastWriteAt = Date.now()
+    res.write(text)
+  }
+  let earlyTimer = null
+  if (isStream && earlyHeadersMs > 0) {
+    earlyTimer = setTimeout(() => {
+      if (!started && !res.writableEnded) startSse()
+    }, earlyHeadersMs)
+    earlyTimer.unref?.()
   }
   // 已开始流式后失败：补错误帧 + [DONE] 收尾。不换源 —— 客户端已经收到
   // 这次回答的前缀，再换一家只会把两段不同内容拼在一起
   const failStream = message => {
     try {
-      if (emitter) res.write(emitter.fail(message))
-      else res.write(`data: ${JSON.stringify({ error: { message, type: 'upstream_error', code: 'channel_stream_error' } })}\n\n`)
-      if (!emitter) res.write('data: [DONE]\n\n')
+      if (emitter) write(emitter.fail(message))
+      else write(`data: ${JSON.stringify({ error: { message, type: 'upstream_error', code: 'channel_stream_error' } })}\n\n`)
+      if (!emitter) write('data: [DONE]\n\n')
       res.end()
     } catch {
       /* 下游已断开 */
@@ -829,8 +875,8 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
   // 也不会把它误判成用户取消（旧实现对 AbortError 一律当取消，坏模型永远不失活）。
   stallTimer = setTimeout(() => {
     stalled = true
-    controller.abort(new Error(stallMessage(CHANNEL_FIRST_CHUNK_TIMEOUT_MS)))
-  }, CHANNEL_FIRST_CHUNK_TIMEOUT_MS)
+    controller.abort(new Error(stallMessage(firstChunkTimeoutMs)))
+  }, firstChunkTimeoutMs)
   if (stallTimer.unref) stallTimer.unref()
 
   try {
@@ -856,10 +902,10 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
           for (const frame of frames.split('\n\n')) {
             if (!frame) continue
             const out = emitter.push(frame)
-            if (out) res.write(out)
+            if (out) write(out)
           }
         } else {
-          res.write(frames)
+          write(frames)
         }
       }, controller.signal)
       clearStallTimer()
@@ -868,9 +914,9 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       startSse()
       if (emitter) {
         const tail = emitter.end()
-        if (tail) res.write(tail)
+        if (tail) write(tail)
       } else {
-        res.write(writer.end())
+        write(writer.end())
       }
       res.end()
 
@@ -952,6 +998,9 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       stalled: stalled && !gotChunk,
       clientClosed,
       elapsedMs: Date.now() - startTime,
+      // 超时上限来自渠道设置：判定文案与阈值必须和看门狗同一个数，
+      // 否则「卡住」的提示会说成另一个秒数
+      timeoutMs: firstChunkTimeoutMs,
       error: err
     })
     throw Object.assign(verdict.message ? new Error(verdict.message) : err, {
@@ -961,6 +1010,8 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
     })
   } finally {
     clearStallTimer()
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    if (earlyTimer) clearTimeout(earlyTimer)
     res.removeListener('close', onClose)
   }
 }
@@ -2956,6 +3007,32 @@ app.get('/api/channels/status', async (req, res) => {
   })
 })
 
+// ===== 渠道设置（首帧上限 / 心跳 / 冷却 / 并发 / 选号）=====
+//
+// 放在 channels-data/channel-settings.json，面板「渠道设置」内页读写它。
+// 默认值等于改造前的行为，所以升级后不点任何开关，表现与旧版一致。
+
+app.get('/api/channels/settings', (req, res) => {
+  try {
+    const store = typeof channels.getSettings === 'function' ? channels.getSettings() : null
+    // 渠道模块被测试替身替换时没有设置读口：回空设置比 500 更接近"没配置"
+    res.json({ ok: true, settings: store ? store.get() : {} })
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.put('/api/channels/settings', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {}
+  try {
+    const store = typeof channels.getSettings === 'function' ? channels.getSettings() : null
+    if (!store) return res.status(503).json({ ok: false, error: '渠道运行时未初始化' })
+    res.json({ ok: true, settings: store.update(body) })
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message })
+  }
+})
+
 // ===== 渠道插件管理 =====
 //
 // 插件就是这个目录里的普通包（见 server/channels/plugin-store.js）：
@@ -3121,10 +3198,20 @@ app.post('/api/channels/test', async (req, res) => {
       .map(row => row.id)
       .slice(0, TEST_MODEL_CANDIDATES)
   if (!candidates.length) {
+    // 「没有模型」有两种完全不同的原因：没登录账号，和账号在但模型全被关掉。
+    // 早先两句话合并成一句「先登录该渠道的账号」，账号明明登录了却看到这句，
+    // 只会让人去重登 —— 实际要动的是「模型」页的开关。
+    let accountCount = 0
+    try {
+      const reply = await rt.rpc({ method: 'provider.status', payload: { providers: rt.providers } })
+      accountCount = reply?.ok === true ? (reply.value?.statuses?.[provider]?.accounts?.total || 0) : 0
+    } catch { /* 拿不到计数就按老文案走 */ }
     return res.status(400).json({
       ok: false,
       error: provider
-        ? `渠道 ${provider} 还没有可用模型（先登录该渠道的账号）`
+        ? accountCount > 0
+          ? `渠道 ${provider} 的模型全部处于关闭状态：到「模型」页把要用的模型打开，再回来测试`
+          : `渠道 ${provider} 还没有可用模型（先登录该渠道的账号）`
         : '账号池里还没有可用模型（先登录一个账号）'
     })
   }

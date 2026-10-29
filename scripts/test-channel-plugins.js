@@ -62,7 +62,7 @@ async function main() {
     assert.deepEqual(Trae.checkinProviders, ['trae'], 'Trae 有签到端点')
     const qoder = info.plugins.find(p => p.id === 'qoder')
     assert.deepEqual(qoder.providers.sort(), ['qoder', 'qodercn'], '一个包两个 provider')
-    assert.deepEqual(qoder.checkinProviders, [], 'Qoder 没有签到端点')
+    assert.deepEqual(qoder.checkinProviders, ['qoder', 'qodercn'], 'Qoder 每日领取走活动平台（接口缺失时插件内部回落旧签到）')
     await host.shutdown()
   })
 
@@ -304,6 +304,48 @@ async function main() {
     } finally {
       global.fetch = realFetch
       await host.shutdown()
+    }
+  })
+
+  // 面板传的是展示 id（trae-xxxxxxxx），插件要的是凭据键里的 uid。
+  // 以前直接把 id 当 uid：删除接口回 ok、账号还在（用户看到「删了但没删掉」）
+  await test('按展示 id 删除账号：真能删掉，且启用开关也按 id 生效', async () => {
+    const { createOwnedRuntime } = require(path.join(root, 'server', 'channels', 'owned', 'runtime'))
+    const accounts = require(path.join(root, 'server', 'channels', 'shared', 'accounts'))
+    const dir = freshDir('delete')
+    const rt = createOwnedRuntime({
+      dataDir: dir,
+      logger: silent,
+      settings: { get: () => ({}), forProvider: () => ({}), update: () => ({}) },
+    })
+    try {
+      const uid = '842682332612528'
+      accounts.setCredential(dir, 'trae', uid, {
+        access_token: 'token',
+        refresh_token: 'refresh',
+        uid,
+        machine_id: 'm',
+        device_id: 'd',
+      })
+      const listed = await rt.rpc({ method: 'account.list', payload: { provider: 'trae' } })
+      const row = listed.value.find(item => item.uid === uid)
+      assert.ok(row && row.id, '应能列出刚写入的账号')
+
+      // 按展示 id 改启用状态
+      const updated = await rt.rpc({ method: 'account.update', payload: { provider: 'trae', accountId: row.id, patch: { enabled: false } } })
+      assert.equal(updated.ok, true)
+      const afterUpdate = await rt.rpc({ method: 'account.list', payload: { provider: 'trae' } })
+      assert.equal(afterUpdate.value.find(item => item.uid === uid).enabled, false)
+
+      // 按展示 id 删除
+      const removed = await rt.rpc({ method: 'account.delete', payload: { provider: 'trae', accountId: row.id } })
+      assert.equal(removed.ok, true)
+      const afterDelete = await rt.rpc({ method: 'account.list', payload: { provider: 'trae' } })
+      assert.equal(afterDelete.value.length, 0, '删除后不该还留在清单里')
+      assert.equal(accounts.listCredentials(dir, 'trae').length, 0, '凭据也要一起删掉')
+    } finally {
+      await rt.close()
+      fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 
