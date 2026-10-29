@@ -29,6 +29,12 @@ function count(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0
 }
 
+// 保留小数的计数（credits 可以是 0.5 这种）：解析不出返回 undefined，
+// 不能和「真实为 0」混为一谈
+function decimal(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
 // DSH 的互斥口径 → OpenAI 的含缓存口径。
 // 关键一行是 input = 未命中 + 命中 + 写入：漏掉缓存会让客户端把上下文占用
 // 算小一两个数量级，进而永远不触发自动压缩。
@@ -39,6 +45,7 @@ function toOpenAiUsage(usage) {
   const outputTokens = count(usage?.outputTokens)
   const reported = count(usage?.totalTokens)
   const reasoningTokens = count(usage?.reasoningTokens)
+  const credits = decimal(usage?.credits)
   return {
     prompt_tokens: inputTokens,
     completion_tokens: outputTokens,
@@ -47,6 +54,9 @@ function toOpenAiUsage(usage) {
     ...reasoningTokens > 0
       ? { reasoning_tokens: reasoningTokens, completion_tokens_details: { reasoning_tokens: reasoningTokens } }
       : {},
+    // 上游直接报的积分消耗（Qoder 的 usage.credits）：OpenAI 协议里没有这个字段，
+    // 但多带一个键不会让客户端出错，反而让「这次花了多少积分」不再丢失
+    ...credits === undefined ? {} : { credits },
   }
 }
 
@@ -133,11 +143,15 @@ function createCollector(model) {
   function completion() {
     const toolCalls = [...tools.entries()]
       .sort((a, b) => a[0] - b[0])
+      // 没有名字的调用一律丢掉：客户端会拿 name 去查工具表，空名只会让它卡住等
+      // 一个永远不来的工具结果（上游偶发只发 id 与空 arguments 的残帧）
+      .filter(([, tool]) => typeof tool.name === 'string' && tool.name.length > 0)
       .map(([, tool]) => ({
         id: tool.id || `call_${crypto.randomUUID()}`,
         type: 'function',
-        function: { name: tool.name ?? '', arguments: tool.arguments === '' ? '{}' : tool.arguments },
+        function: { name: tool.name, arguments: tool.arguments === '' ? '{}' : tool.arguments },
       }))
+    const toolCallsWanted = finish === 'tool-calls' && toolCalls.length > 0
     return {
       id,
       object: 'chat.completion',
@@ -151,7 +165,8 @@ function createCollector(model) {
           ...reasoning === '' ? {} : { reasoning_content: reasoning },
           ...toolCalls.length === 0 ? {} : { tool_calls: toolCalls },
         },
-        finish_reason: finish === 'tool-calls' ? 'tool_calls'
+        // 调用被清理光了就降级成 stop：仍报 tool_calls 会让客户端一直等工具结果
+        finish_reason: toolCallsWanted ? 'tool_calls'
           : finish === 'max-tokens' ? 'length'
             : finish === 'error' || finish === 'aborted' ? 'error'
               : 'stop',
@@ -194,11 +209,14 @@ function createStreamWriter(model) {
 function toStatUsage(usage) {
   if (!usage) return null
   const cached = count(usage.prompt_tokens_details?.cached_tokens)
+  const credits = decimal(usage.credits)
   return {
     input: Math.max(0, count(usage.prompt_tokens) - cached),
     output: count(usage.completion_tokens),
     cacheRead: cached,
     cacheWrite: 0,
+    // 积分消耗：Qoder 这类按 credits 计费的渠道唯一能算账的字段
+    ...credits === undefined ? {} : { credits },
   }
 }
 

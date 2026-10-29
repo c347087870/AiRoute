@@ -460,7 +460,8 @@ async function main() {
   test('prompt_cache_key 注入（已有值不覆盖）', () => {
     const a = payload.injectPromptCacheKey(JSON.stringify({ model: 'm', messages: [] }), 'uid12345678', 'conv-1')
     const keyA = JSON.parse(a).prompt_cache_key
-    assert.ok(keyA.startsWith('wb2a-uid12345-'), '前缀应为 uid 前 8 位')
+    assert.match(keyA, /^[0-9a-f]{32}$/, '应为纯 32 hex（不再带项目前缀与 uid 明文）')
+    assert.ok(!keyA.includes('uid12345'), '不得把 uid 明文写进请求体')
 
     const b = payload.injectPromptCacheKey(
       JSON.stringify({ model: 'm', messages: [], prompt_cache_key: 'existing' }),
@@ -3803,6 +3804,74 @@ async function main() {
     assert.strictEqual(errors.isUpstreamBusy('{"code":6021}'), true)
     assert.strictEqual(errors.isUpstreamBusy('{"msg":"Queue is Full"}'), false)
     assert.strictEqual(errors.isUpstreamBusy('{"msg":"queue.full.title"}'), true, 'queue.full 结构文案为外卡')
+  })
+
+  // ---- 22.3b 6020 排队 / 6000·14003 模型级 ----
+
+  test('6020 queue.waiting → upstream_busy（与 6021 同族，不罚号）', () => {
+    assert.strictEqual(errors.classify(429, '{"code":6020,"msg":"queue.waiting.title"}'), K.UPSTREAM_BUSY)
+    assert.strictEqual(errors.isUpstreamBusy('{"msg":"queue.waiting.title"}'), true, '文案为外卡')
+  })
+
+  test('6000 只有带「切换其他模型」才是模型级；14003 恒为模型级', () => {
+    assert.strictEqual(errors.isModelRateLimit('{"code":6004}'), true)
+    assert.strictEqual(errors.isModelRateLimit('{"code":6000,"msg":"您的使用量已超出频率限制，您也可以切换其他模型继续使用"}'), true)
+    assert.strictEqual(errors.isModelRateLimit('{"code":6000,"msg":"其他未知语义"}'), false, '不带文案不误判')
+    assert.strictEqual(errors.isModelRateLimit('{"code":14003,"msg":"too many requests"}'), true)
+    assert.strictEqual(errors.isModelBusy('{"code":14003}'), true)
+    assert.strictEqual(errors.isModelBusy('{"code":6004}'), false)
+  })
+
+  test('14003 模型繁忙：模型级短窗口 60s 起、不缩短已有冷却', () => {
+    const pool = poolMod.createPool({})
+    pool.add({ uid: 'u-busy', nickname: 'busy' })
+    pool.cooldownModelBusy('u-busy', 'm1', '14003')
+    const first = pool.status('u-busy').rateLimitedModels.find(x => x.model === 'm1')
+    assert.ok(first && first.until - Date.now() >= 55000, '首窗约 60s')
+    const before = first.until
+    pool.cooldownModelBusy('u-busy', 'm1', '14003')
+    const after = pool.status('u-busy').rateLimitedModels.find(x => x.model === 'm1').until
+    assert.ok(after >= before, '窗口内不缩短已有冷却')
+  })
+
+  // 走真实 flusher（5 秒周期）验证，而不是手动 saveNow —— 手动存盘测不出
+  // 「clearSessionDead 忘了置脏」，那正是这条缺陷本身。
+  // 关键点：用**新实例** load() 出盘上的 2，此刻 dirty=false，才等价于
+  // 「重启后旧计数复活」的真实场景；在同一实例里接着测会被前面的 noteSessionDead
+  // 留下的 dirty=true 掩盖过去（变异测试验证过）。
+  await testAsync('clearSessionDead 清零会经 flusher 落盘（重启不复活）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-pool-'))
+    const file = path.join(dir, 'state.json')
+    const readPersisted = () => {
+      try {
+        return JSON.parse(fs.readFileSync(file, 'utf8')).accounts?.['u-dead']?.session_dead_fails ?? 0
+      } catch {
+        return -1
+      }
+    }
+    let pool
+    try {
+      const seed = poolMod.createPool({ stateFile: file })
+      seed.add({ uid: 'u-dead' })
+      seed.noteSessionDead('u-dead')
+      seed.noteSessionDead('u-dead')
+      seed.saveNow()
+      assert.strictEqual(readPersisted(), 2, '先把 2 落到盘上作为基线')
+
+      pool = poolMod.createPool({ stateFile: file })
+      pool.load()
+      pool.clearSessionDead('u-dead')
+      pool.startFlusher()
+      // flusher 周期 5 秒，最多等 7 秒
+      const deadline = Date.now() + 7000
+      while (Date.now() < deadline && readPersisted() !== 0) {
+        await new Promise(resolve => setTimeout(resolve, 250))
+      }
+      assert.strictEqual(readPersisted(), 0, '清零必须由 flusher 落盘，否则重启后旧计数复活')
+    } finally {
+      pool?.stopFlusher()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   // ---- 22.4 会话头：X-Conversation-ID 必须在场 ----

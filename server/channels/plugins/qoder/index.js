@@ -24,16 +24,19 @@ module.exports = {
   id: 'qoder',
   name: 'Qoder',
   providers: PROVIDERS,
-  // Qoder 没有每日签到端点：不申报，面板就不会给它画「领取积分」。
-  // 但余额端点（/sash/api/v2/me/usage，纯 Bearer）是有的：provider.balance 已实现，
-  // 面板据此在账号行显示积分余额。
-  checkinProviders: [],
+  // 每日领取走「活动平台」（campaigns → claim）：接口不存在时插件自己回落到旧签到，
+  // 两者都没有才报「本区域未开放」。所以两家都该申报 —— 面板的「签到」按钮由它决定
+  checkinProviders: ['qoder', 'qodercn'],
   create(ctx) {
     const { createQoder } = require('./provider')
     const qoder = createQoder({
       dataDir: ctx.dataDir,
       logger: ctx.logger,
       credentials: ctx.credentials,
+      // 冷却/并发/选号参数（面板「渠道设置」内页可改）
+      settings: ctx.settings,
+      // 官网版本号同步（每天自动拉 qoder.com/changelog 的最新 IDE 版本）
+      versions: ctx.versions,
     })
 
     return {
@@ -49,7 +52,7 @@ module.exports = {
       refreshAccount: (provider, uid) => qoder.refreshAccount(provider, uid),
       startLogin: provider => qoder.startLogin(provider),
       pollLogin: (provider, state) => qoder.pollLogin(provider, state),
-      checkin: provider => qoder.checkin(provider),
+      checkin: (provider, uid) => qoder.checkin(provider, uid),
       balance: (provider, uid) => qoder.balance(provider, uid),
       refresh: () => qoder.refresh(),
       setEvents: handlers => qoder.setEvents(handlers),

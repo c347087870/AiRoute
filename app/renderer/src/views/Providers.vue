@@ -72,24 +72,32 @@
                 <span class="chip-meta">
                   {{ formatLimit(model.maxContext) }} / {{ formatLimit(model.maxOutput) }}
                 </span>
-                <!-- 测试结果直接跟在模型后面，与「渠道账号 → 已开启模型」同一个样子：
-                     状态点 + 响应时间（失败的显示红点 + 「失败」）。悬停给完整那一句。
-                     耗时走 responseMsOf，与服务端实际返回的字段解耦 -->
-                <span
-                  v-if="modelTestOf(name, model.id)"
-                  class="ch-dot"
-                  :class="modelTestOf(name, model.id).ok ? 'ok' : 'bad'"
-                ></span>
-                <span
-                  v-if="modelTestOf(name, model.id)?.ok"
-                  class="chip-latency"
-                  :title="testResultText(name, modelTestOf(name, model.id))"
-                >{{ formatMs(responseMsOf(modelTestOf(name, model.id))) }}</span>
-                <span
-                  v-else-if="modelTestOf(name, model.id)"
-                  class="chip-latency chip-latency-fail"
-                  :title="testResultText(name, modelTestOf(name, model.id))"
-                >失败</span>
+                <!-- 测试结果固定在状态列：有没有结果、有没有失活都占同一格宽度，
+                     右边的「测 / 切换」才不会随内容左右跳 -->
+                <span class="chip-state">
+                  <span
+                    v-if="modelTestOf(name, model.id)"
+                    class="ch-dot"
+                    :class="modelTestOf(name, model.id).ok ? 'ok' : 'bad'"
+                  ></span>
+                  <span
+                    v-if="modelTestOf(name, model.id)?.ok"
+                    class="chip-latency"
+                    :title="testResultText(name, modelTestOf(name, model.id))"
+                  >{{ formatMs(responseMsOf(modelTestOf(name, model.id))) }}</span>
+                  <span
+                    v-else-if="modelTestOf(name, model.id)"
+                    class="chip-latency chip-latency-fail"
+                    :title="testResultText(name, modelTestOf(name, model.id))"
+                  >失败</span>
+                  <!-- 失活：网关不再把请求派给它；点标签恢复（不动配置） -->
+                  <span
+                    v-if="healthOf(name, model)?.offline"
+                    class="chip-offline"
+                    :title="`已失活：${healthOf(name, model).detail || healthOf(name, model).reason || '原因未知'}；点击恢复`"
+                    @click.stop="reviveHealth(name, model)"
+                  >失活</span>
+                </span>
                 <!-- 单模型测试：只打这一个模型，不跑整个源。
                      整源的「测试全部」在行操作区，两者不抢同一个入口 -->
                 <button
@@ -101,13 +109,6 @@
                 >
                   {{ isModelTesting(name, model.id) ? '停止' : '测' }}
                 </button>
-                <!-- 失活：网关不再把请求派给它；点标签恢复（不动配置） -->
-                <span
-                  v-if="healthOf(name, model)?.offline"
-                  class="chip-offline"
-                  :title="`已失活：${healthOf(name, model).detail || healthOf(name, model).reason || '原因未知'}；点击恢复`"
-                  @click.stop="reviveHealth(name, model)"
-                >失活</span>
                 <button
                   class="chip-use"
                   :class="{ 'is-current': currentModel === `${name}/${model.id}` }"
@@ -1202,22 +1203,27 @@ function openForOnboarding() {
 
 /* 模型 chip */
 .row-models {
-  display: flex;
+  display: grid;
+  /* 一行一个模型：定宽列才对得齐。两列会把名字挤成省略号，
+     而这里最需要看清的恰恰是模型名 */
+  grid-template-columns: 1fr;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
 }
 
+/* 每个模型一行定宽网格：名字（伸缩）｜上下文/输出（右对齐）｜状态｜测｜切换。
+   以前是内容撑宽的 inline-flex 芯片，名字长短不同就会一列一列地错开 */
 .model-chip {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px 56px 36px 68px;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
+  width: 100%;
   background: var(--bg-hover);
   border: 1px solid var(--border-2);
   border-radius: var(--radius-sm);
   padding: 2px 4px 2px 10px;
   font-size: var(--fs-xs);
-  max-width: 360px;
 }
 
 .model-chip.current {
@@ -1252,6 +1258,7 @@ function openForOnboarding() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .chip-meta {
@@ -1259,6 +1266,17 @@ function openForOnboarding() {
   font-size: var(--fs-mini);
   white-space: nowrap;
   flex-shrink: 0;
+  text-align: right;
+}
+
+/* 状态格：响应耗时 / 失败 / 失活都放这一格，右对齐，宽度固定不跳动 */
+.chip-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* 嵌在模型标签里的动作按钮：高度仍走全站小号按钮，只把左右内边距收窄，
@@ -1266,6 +1284,8 @@ function openForOnboarding() {
 .chip-use {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 100%;
   height: var(--btn-h);
   padding: 0 8px;
   background: var(--bg-card);
@@ -1291,6 +1311,7 @@ function openForOnboarding() {
 .chip-more {
   display: inline-flex;
   align-items: center;
+  justify-self: start;
   height: var(--btn-h);
   padding: 0 10px;
   background: transparent;
@@ -1351,8 +1372,10 @@ function openForOnboarding() {
   flex: none;
   padding: 0 5px;
   height: 18px;
+  width: 100%;
   font-size: var(--fs-mini);
   line-height: 1;
+  text-align: center;
   color: var(--text-3);
   background: transparent;
   border: 1px solid var(--border-2);

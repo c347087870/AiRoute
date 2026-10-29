@@ -921,7 +921,7 @@ function mapExpert(raw) {
 // 自造 UUID 不计数：expert_actual_use / skill_info 的 requestId 必须是服务端 id
 async function desktopChatWithExpert(client, auth, expertID, opts) {
   const chatBase = headersMod.chatBaseOf(auth, opts)
-  const conversationID = `wb2api-conv-${Date.now()}`
+  const conversationID = crypto.randomUUID()
   const headers = {
     Authorization: `Bearer ${(auth && auth.accessToken) || ''}`,
     'Content-Type': 'application/json',
@@ -999,7 +999,7 @@ function mpEventBase(auth, opts) {
 
 // mp mini 对话事件（chat_request_send；Tasks_1/3/6 判据载体，无 activityId）
 function schoolChatTimesEvent(conversationID) {
-  const rid = `wb2api-${clientToken()}`
+  const rid = crypto.randomUUID()
   return {
     eventCode: 'chat_request_send',
     inputLength: 14,
@@ -1088,7 +1088,7 @@ function miniPlaybookEvents(caseID, caseName, opts) {
       source: 'discover',
       promptLength: 96,
       isOfficial: 1,
-      conversationId: `wb2api-mp-pb-${clientToken()}`,
+      conversationId: crypto.randomUUID(),
       extVersion
     },
     base
@@ -1116,7 +1116,7 @@ async function runChat5(ctx) {
   const need = target - current
   if (need <= 0) return { message: '进度已达标，无需上报' }
   for (let i = 0; i < need; i++) {
-    const conv = `wb2api-chat5-${Date.now()}-${i}`
+    const conv = crypto.randomUUID()
     await reportChatActivity(client, auth, conv, '', opts)
     if (i < need - 1) await sleep(REPORT_GAP)
   }
@@ -1126,7 +1126,7 @@ async function runChat5(ctx) {
 // #2 first_buddy：上报解锁 → 同意协议 → 领取第一只 Buddy
 async function runFirstBuddy(ctx) {
   const { client, auth, opts } = ctx
-  await reportChatActivity(client, auth, `wb2api-adopt-${Date.now()}`, '', opts)
+  await reportChatActivity(client, auth, crypto.randomUUID(), '', opts)
   await sleep(REPORT_GAP)
   await buddyAgreement(client, auth, opts)
   try {
@@ -1154,7 +1154,7 @@ async function runModelChat(ctx) {
   await sleep(REPORT_GAP)
   await deps.chatOnce(auth, 'glm-5.2', 'hi，请回复一句话')
   await sleep(REPORT_GAP)
-  await reportChatActivityModel(client, auth, `wb2api-glm52-${Date.now()}`, '', 'glm-5.2', 'GLM-5.2', opts)
+  await reportChatActivityModel(client, auth, crypto.randomUUID(), '', 'glm-5.2', 'GLM-5.2', opts)
   return { message: '已完成 glm-5.2 真实对话并上报' }
 }
 
@@ -1162,8 +1162,8 @@ async function runModelChat(ctx) {
 async function runRichMeow(ctx) {
   const { client, auth, opts } = ctx
   const ms = Date.now()
-  const conv = `wb2api-rm-${ms}`
-  const req = `wb2api-rm-req-${ms}`
+  const conv = crypto.randomUUID()
+  const req = crypto.randomUUID()
   const msg = `req-${ms}-user`
   await reportDesktop(client, auth, desktopChatSequence(conv, req, msg, 'fast-model', 'fast-model'), opts)
   return { message: '已按桌面指纹上报完整对话事件链' }
@@ -1203,8 +1203,8 @@ async function runTemplateUse(ctx) {
   ]
   for (let i = 0; i < templates.length; i++) {
     const ms = Date.now()
-    const conv = `wb2api-tpl-${ms}-${i}`
-    const req = `wb2api-tpl-req-${ms}-${i}`
+    const conv = crypto.randomUUID()
+    const req = crypto.randomUUID()
     await reportDesktop(client, auth, desktopTemplateUseSequence(conv, req, templates[i][0], templates[i][1]), opts)
     await sleep(TEMPLATE_GAP)
   }
@@ -1215,8 +1215,8 @@ async function runTemplateUse(ctx) {
 async function runPlaybookPrompt(ctx) {
   const { client, auth, opts } = ctx
   const ms = Date.now()
-  const conv = `wb2api-pb-${ms}`
-  const req = `wb2api-pb-req-${ms}`
+  const conv = crypto.randomUUID()
+  const req = crypto.randomUUID()
   const events = desktopPlaybookPromptSequence(conv, req, 'pm-gtm-launch-plan', '新产品上市 GTM 发布计划一页纸')
   await reportDesktop(client, auth, events, opts)
   return { message: '已上报 playbook_cta_click + playbook_prompt_send' }
@@ -1226,8 +1226,8 @@ async function runPlaybookPrompt(ctx) {
 async function runCreateCanvas(ctx) {
   const { client, auth, opts } = ctx
   const ms = Date.now()
-  const conv = `wb2api-canvas-${ms}`
-  const req = `wb2api-canvas-req-${ms}`
+  const conv = crypto.randomUUID()
+  const req = crypto.randomUUID()
   await reportDesktop(client, auth, desktopDesignCanvasSequence(conv, req), opts)
   return { message: '已上报 wbx_design_canvas_task_create/open' }
 }
@@ -1384,7 +1384,7 @@ async function runBlackCat(ctx) {
   }
   for (let i = 0; i < need; i++) {
     await deps.chatOnce(auth, 'glm-5.2', '1+1等于几？直接回答。')
-    await reportChatActivityModel(client, auth, `wb2api-night-${Date.now()}-${i}`, '', 'glm-5.2', 'GLM-5.2', opts)
+    await reportChatActivityModel(client, auth, crypto.randomUUID(), '', 'glm-5.2', 'GLM-5.2', opts)
     if (i < need - 1) await sleep(NIGHT_CHAT_GAP)
   }
   return { message: `已完成 ${need} 次夜间 glm-5.2 对话并上报` }
@@ -1462,7 +1462,7 @@ async function runMPMiniChatTask(ctx, code, withActivityId) {
   for (let i = 0; i < need; i++) {
     // 真人节奏：每条上报前等待 MP_CHAT_EVENT_GAP + 0~10s 抖动（连发会被反作弊回滚）
     await sleep(MP_CHAT_EVENT_GAP + Math.floor(Math.random() * MP_CHAT_EVENT_JITTER))
-    const conv = `wb2api-mp-${Date.now()}-${i}`
+    const conv = crypto.randomUUID()
     const ev = withActivityId ? schoolSeasonChatEvent(conv) : schoolChatTimesEvent(conv)
     try {
       await reportMP(client, auth, ev, opts)
@@ -1599,11 +1599,11 @@ function runSequentialModelChat(ctx) {
       reportMP(
         ctx.client,
         ctx.auth,
-        miniChatModelEvent(`wb2api-mp-glm-${Date.now()}`, 'glm-5.2', 'GLM-5.2'),
+        miniChatModelEvent(crypto.randomUUID(), 'glm-5.2', 'GLM-5.2'),
         ctx.opts
       ),
     () =>
-      reportChatActivityModel(ctx.client, ctx.auth, `wb2api-mp-glm-${Date.now()}`, '', 'glm-5.2', 'GLM-5.2', ctx.opts)
+      reportChatActivityModel(ctx.client, ctx.auth, crypto.randomUUID(), '', 'glm-5.2', 'GLM-5.2', ctx.opts)
   )
 }
 
@@ -1620,7 +1620,7 @@ function runSequentialPlaybook(ctx) {
       reportDesktop(
         ctx.client,
         ctx.auth,
-        desktopPlaybookPromptSequence(`wb2api-pb-${ms}`, `wb2api-pb-req-${ms}`, caseID, caseName),
+        desktopPlaybookPromptSequence(crypto.randomUUID(), crypto.randomUUID(), caseID, caseName),
         ctx.opts
       ),
     () => reportMP(ctx.client, ctx.auth, miniPlaybookEvents(caseID, caseName, ctx.opts), ctx.opts)

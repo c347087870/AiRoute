@@ -477,6 +477,16 @@ export function channelsRefresh() {
   return api.post('/api/channels/refresh', {}, { timeout: 120000 }).then(r => r.data)
 }
 
+// 渠道运行参数（首帧上限 / 心跳 / 冷却 / 并发 / 选号）。面板「渠道设置」内页读写它，
+// 默认值等于旧版行为，所以读不到也不影响账号页。
+export function getChannelSettings() {
+  return api.get('/api/channels/settings').then(r => r.data)
+}
+
+export function updateChannelSettings(patch) {
+  return api.put('/api/channels/settings', patch).then(r => r.data)
+}
+
 // 渠道管理 RPC：方法名与 payload 由渠道包自己的方法表定义（后端原样透传），
 // 这里只负责剥掉两层 { ok, result: { ok, value } }，并把失败变成可 catch 的 Error
 export async function channelsRpc(method, payload = {}, timeout = 120000) {

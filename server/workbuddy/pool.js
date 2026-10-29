@@ -483,7 +483,7 @@ function createPool(opts = {}) {
     const now = Date.now()
     if (resetAtMs) {
       e.modelCooldowns[model] = {
-        until: cappedSoftUntil(now, resetAtMs),
+        until: modelUntil(now, resetAtMs),
         resetAt: resetAtMs,
         reason: reason || ''
       }
@@ -497,6 +497,23 @@ function createPool(opts = {}) {
       e.reason = reason || ''
       clearRoutingModelCooldowns(e)
     }
+    dirty = true
+  }
+
+  // 14003 模型繁忙：模型级短窗口（60s 起、翻倍、封顶 3m）。
+  // 窗口内不延长，已有更晚冷却不缩短 —— 它只停「这个号的这个模型」。
+  function cooldownModelBusy(uid, model, reason) {
+    if (!uid || !model) return
+    const e = byUID.get(uid)
+    if (!e) return
+    const now = Date.now()
+    const old = e.modelCooldowns[model]
+    if (old && old.until > now) return
+    const streak = (e.modelBusyStreak && e.modelBusyStreak[model]) || 0
+    const ttl = Math.min(60000 * 2 ** streak, 3 * 60 * 1000)
+    e.modelBusyStreak = e.modelBusyStreak || {}
+    e.modelBusyStreak[model] = streak + 1
+    e.modelCooldowns[model] = { until: now + ttl, reason: reason || '' }
     dirty = true
   }
 
@@ -548,6 +565,14 @@ function createPool(opts = {}) {
     for (const m of Object.keys(e.modelCooldowns)) {
       if (!e.modelCooldowns[m].auditOnly) delete e.modelCooldowns[m]
     }
+  }
+
+  // 模型级冷却截止：完整对齐上游墙钟，不做 softRateMax 截断。
+  // 封顶的动机是「防账号级冷却被无限拉长」，而模型级只停 (账号, 模型) 一个组合，
+  // 同号换其他模型照常可用，没有拉黑整号的风险。
+  function modelUntil(now, resetAt) {
+    if (resetAt > now) return resetAt
+    return now + 1
   }
 
   // 软冷却封顶：min(resetAt, now + softRateMax)，已过期钳 1ms
@@ -650,7 +675,13 @@ function createPool(opts = {}) {
   // 清 12153 计数（刷新成功等）
   function clearSessionDead(uid) {
     const e = byUID.get(uid)
-    if (e) e.sessionDeadFails = 0
+    if (!e) return
+    // 无变化不置脏：refresh 成功后这里被高频调用，值本来就是 0 时不该制造写盘
+    if (e.sessionDeadFails === 0) return
+    e.sessionDeadFails = 0
+    // 落盘由 flusher 按 dirty 触发：不置位的话重启后旧计数会复活，
+    // 刚被 refresh 证明存活的账号下次失败就直接撞阈值被禁用
+    dirty = true
   }
 
   // 禁用账号（更强终态：清冷却域，保留熔断观测）
@@ -1213,6 +1244,7 @@ function createPool(opts = {}) {
     cooldownUntilTomorrow4AM,
     cooldownSoftRate,
     cooldownSoftForModel,
+    cooldownModelBusy,
     recordModelRateLimitAudit,
     blockModelBackoff,
     blockModelClear,

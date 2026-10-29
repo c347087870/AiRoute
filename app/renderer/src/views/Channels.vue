@@ -189,7 +189,15 @@
             <div class="ch-head-right">
               <!-- 卡头右侧原本还有「N 账号」徽标与渠道级总开关：徽标与账号行重复，
                    总开关做的事与账号行的勾选框一样（批量改同一个 enabled），
-                   两处入口反而让人不确定该点哪个。账号的启停统一在账号行上操作 -->
+                   两处入口反而让人不确定该点哪个。账号的启停统一在账号行上操作。
+                   渠道自己的运行参数（选号策略、冷却、脱敏…）收在这张卡里，不再堆在页面底部 -->
+              <AppButton
+                v-if="channelSettingsFields(group).length"
+                variant="secondary"
+                @click="toggleSettings(group.id)"
+              >
+                {{ openSettings === group.id ? '收起设置' : '设置' }}
+              </AppButton>
             </div>
           </div>
 
@@ -231,7 +239,20 @@
                     :class="{ bad: accountTagMap[acct.id].bad }"
                     :title="accountTagMap[acct.id].title"
                   >{{ accountTagMap[acct.id].text }}</span>
+                  <!-- 上游限流冷却：不写的话用户只看到「请求失败」，以为号坏了 -->
+                  <span
+                    v-if="Number.isFinite(acct.coolingUntil)"
+                    class="ch-tag"
+                    :title="`上游限流中：${formatTime(acct.coolingUntil)} 之后自动恢复，不必手动处理`"
+                  >限流 {{ cooldownText(acct.coolingUntil) }}</span>
                   <span v-if="acct.refreshError" class="ch-tag bad" :title="acct.refreshError">刷新失败</span>
+                  <!-- 官方禁用：Qoder 国际版出现「排队中」（10605）即判定，账号不再参与选号。
+                       勾选左侧启用会一并清掉这个标记（见插件 updateAccount） -->
+                  <span
+                    v-if="acct.officialDisabled"
+                    class="ch-tag bad"
+                    :title="acct.officialDisabledReason || '上游排队（10605）：账号已被官方禁用；勾选启用可清除标记'"
+                  >官方禁用</span>
                 </div>
               </div>
               <div class="ch-account-actions">
@@ -275,10 +296,56 @@
             />
           </div>
 
+          <!-- 本渠道的运行参数：只列这家用得到的字段（Trae 是首字超时/选号/脱敏，
+               Qoder 是冷却/并发/亲和）。存的是同一个 settings 文件，只是入口跟着渠道走 -->
+          <div v-if="openSettings === group.id" class="ch-set-inline">
+            <div class="ch-set-grid">
+              <label v-for="field in channelSettingsFields(group)" :key="field.key" class="ch-set-row" :title="field.hint">
+                <span class="ch-set-label">{{ field.label }}</span>
+                <input
+                  v-if="field.type === 'bool'"
+                  type="checkbox"
+                  class="ch-check"
+                  :checked="settingValue(field, group.id) === true"
+                  @change="setSettingBool(field, group.id, $event)"
+                />
+                <select
+                  v-else-if="field.type === 'select'"
+                  class="ch-set-input"
+                  :value="settingValue(field, group.id)"
+                  @change="setSettingSelect(field, group.id, $event)"
+                >
+                  <option v-for="option in field.options" :key="option.value" :value="option.value">{{ option.label }}</option>
+                </select>
+                <input
+                  v-else
+                  type="number"
+                  class="ch-set-input"
+                  :min="field.min"
+                  :max="field.max"
+                  :step="field.step"
+                  :value="settingsDisplayValue(field, group.id)"
+                  @input="setSettingNumber(field, group.id, $event)"
+                />
+                <span class="ch-set-unit">{{ field.unit }}</span>
+              </label>
+            </div>
+            <div class="ch-set-actions">
+              <span class="text-muted ch-set-tip">{{ settingsTip }}</span>
+              <span class="ch-group-actions">
+                <AppButton :disabled="settingsBusy" @click="saveSettings">{{ settingsBusy ? '保存中…' : '保存' }}</AppButton>
+                <AppButton variant="secondary" :disabled="settingsBusy" @click="resetSettings">恢复默认</AppButton>
+              </span>
+            </div>
+          </div>
+
           <!-- 登录入口已移除：添加账号改从页面右上角的「添加账号」菜单发起，
                合并卡不需要区域下拉（菜单里直接列了每一家） -->
         </div>
       </div>
+
+      <!-- 传输参数也归到每张渠道卡里（首帧 / 响应头 / 心跳），
+            各渠道互不影响；页面底部不再有全局设置卡 -->
     </template>
 
     <!-- ==================== Tab 2：模型 ==================== -->
@@ -475,7 +542,7 @@ import { slotsOf } from '../utils/channel-links.js'
 import { assetUrl } from '../utils/assets.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, auditModelHealth, reviveModel, getAccountHealth, getAutoStrategy, updateAutoStrategy } from '../api.js'
+import { channelsStatus, channelsRefresh, channelsRpc, channelsTest, getModelHealth, auditModelHealth, reviveModel, getAccountHealth, getAutoStrategy, updateAutoStrategy, getChannelSettings, updateChannelSettings } from '../api.js'
 import AppButton from '../components/AppButton.vue'
 import OauthAuthBlock from '../components/OauthAuthBlock.vue'
 // WorkBuddy 走独立的一组端点（/api/workbuddy/*），和渠道包 RPC 是两套账号体系。
@@ -511,9 +578,191 @@ const PROVIDERS = [
 
 // 有「新手任务 / 登录奖励」端点的渠道。当前三家都没有这种端点
 const ONBOARDING_PROVIDERS = []
-// 有签到端点的渠道。只有 Trae 有 checkin_credits；Qoder 没有签到端点，
-// 给它一个必然失败的按钮只会让用户对着报错猜是哪家不支持。
-const CLAIM_PROVIDERS = ['trae']
+// 有签到（每日领取）端点的渠道：Trae 走 checkin_credits；Qoder 两家走活动平台
+// （campaigns → claim），接口不存在时插件内部回落旧签到 —— 所以两家都该画按钮
+const CLAIM_PROVIDERS = ['trae', 'qoder', 'qodercn']
+
+// ── 渠道设置（内页）──
+//
+// **每个渠道一份**：存储里是 settings.providers.<id>，卡片里只改自己那一份，
+// 改 Trae 的首帧上限不会动到 Qoder。数值一律毫秒，界面按 scale 换算；
+// 默认值只由服务端定义一份，前端的 default 只给「恢复默认」用。
+const CHANNEL_SETTINGS_FIELDS = [
+  // 传输层：每家独立，避免「调 Trae 把 Qoder 的首帧也改了」
+  {
+    key: 'firstChunkTimeoutMs', label: '首帧上限', unit: '秒', type: 'number',
+    min: 10, max: 900, step: 10, scale: 1000, default: 120000, scopes: ['trae', 'qoder', 'qodercn'],
+    hint: '上游多久一个字都不回就判卡住。思考型模型首字实测 40~70 秒，别设太小',
+  },
+  {
+    key: 'earlyHeadersMs', label: '先发响应头', unit: '秒（0=关）', type: 'number',
+    min: 0, max: 60, step: 1, scale: 1000, default: 3000, scopes: ['trae', 'qoder', 'qodercn'],
+    hint: '超过这个时间还没有内容，就先发出 200 + 心跳，避免客户端自己等超时。太早会吃掉 401/429 的状态码',
+  },
+  {
+    key: 'heartbeatMs', label: '空闲心跳', unit: '秒（0=关）', type: 'number',
+    min: 0, max: 60, step: 1, scale: 1000, default: 5000, scopes: ['trae', 'qoder', 'qodercn'],
+    hint: '长思考期间每隔多久发一次 SSE 注释帧，防止中间层掐断连接',
+  },
+  {
+    key: 'cooldownMs', label: '限流冷却', unit: '秒', type: 'number',
+    min: 1, max: 21600, step: 10, scale: 1000, default: 60000, scopes: ['qoder', 'qodercn'],
+    hint: '某个账号被上游限流后，多久之内不再优先选它（旧版固定一小时，偏长）',
+  },
+  {
+    key: 'maxConcurrency', label: '单号并发', unit: '个（0=不限）', type: 'number',
+    min: 0, max: 16, step: 1, default: 1, scopes: ['trae', 'qoder', 'qodercn'],
+    hint: '同一个账号同时允许几个在途请求。上游对单号并发敏感，默认 1',
+  },
+  {
+    key: 'minGapMs', label: '同号间隔', unit: '毫秒', type: 'number',
+    min: 0, max: 10000, step: 100, default: 0, scopes: ['qoder', 'qodercn'],
+    hint: '同一账号两次请求之间至少隔多久；0 表示不限制',
+  },
+  {
+    key: 'affinity', label: '会话亲和', unit: '', type: 'bool', default: true, scopes: ['qoder', 'qodercn'],
+    hint: '同一段对话固定在同一个账号上，吃上游前缀缓存（也避免同会话跨设备）',
+  },
+  {
+    key: 'rotation', label: '账号轮转', unit: '', type: 'bool', default: true, scopes: ['qoder', 'qodercn'],
+    hint: '关掉就永远用清单里第一个可用账号（旧版行为）',
+  },
+  // ── Trae 中转 ──
+  {
+    key: 'traeFirstByteMs', label: '首字超时', unit: '秒', type: 'number',
+    min: 3, max: 60, step: 1, scale: 1000, default: 10000, scopes: ['trae'],
+    hint: '建连后这么久还没吐第一个字节就换号。只在本轮还没产出时换，重放安全',
+  },
+  {
+    key: 'traePoolStrategy', label: '选号策略', unit: '', type: 'select', default: 'order', scopes: ['trae'],
+    options: [
+      { value: 'order', label: '清单顺序（旧）' },
+      { value: 'expire', label: '积分先到期先用' },
+      { value: 'credit', label: '余额多的优先' },
+      { value: 'weighted', label: '加权随机' },
+      { value: 'p2c', label: '两个取更闲' },
+    ],
+    hint: '多账号时的挑选顺序；余额与到期时间来自最近一次「查余额」',
+  },
+  {
+    key: 'traeStickyTtlMs', label: '会话粘性', unit: '分钟（0=关）', type: 'number',
+    min: 0, max: 1440, step: 5, scale: 60000, default: 1800000, scopes: ['trae'],
+    hint: '同一段对话固定落同一账号，吃上游前缀缓存；0 表示关掉',
+  },
+  {
+    key: 'traeSanitize', label: '形态清洗', unit: '', type: 'bool', default: true, scopes: ['trae'],
+    hint: '把别家 CLI 的身份句改成中性句、剥掉 cc_* 与 x-anthropic-* 键值，避免被上游按渠道特征拦（11-128）',
+  },
+  {
+    key: 'traeMaxMode', label: 'Max 模式', unit: '', type: 'bool', default: true, scopes: ['trae'],
+    hint: '目录声明了 1M 上下文的模型自动带 is_max_mode；关掉即始终按 dev 档请求',
+  }
+]
+
+// 卡片里要显示哪几项：按 card group 的 provider id 过滤
+function channelSettingsFields(group) {
+  const ids = new Set(group.providers.map(provider => provider.id))
+  return CHANNEL_SETTINGS_FIELDS.filter(field => (field.scopes || []).some(scope => ids.has(scope)))
+}
+
+const openSettings = ref('')
+function toggleSettings(id) {
+  openSettings.value = openSettings.value === id ? '' : id
+}
+const settingsDraft = ref({})
+const settingsBusy = ref(false)
+const settingsLoaded = ref(false)
+const settingsTip = computed(() => (settingsLoaded.value
+  ? '保存后对新请求立刻生效；「恢复默认」只改草稿，仍需保存'
+  : '读取中…或读取失败，展开后可点「恢复默认」重填'))
+
+// 某个渠道自己的那层配置（settings.providers.<id>）
+function providerSettings(pid) {
+  const draft = settingsDraft.value || {}
+  return (draft.providers && draft.providers[pid]) || {}
+}
+
+// 取一个字段的实际值：渠道覆盖优先，没有就用顶层默认（旧文件没有 providers 时的兼容）
+function settingValue(field, pid) {
+  const own = providerSettings(pid)
+  return own[field.key] !== undefined ? own[field.key] : (settingsDraft.value || {})[field.key]
+}
+
+function settingsDisplayValue(field, pid) {
+  const raw = Number(settingValue(field, pid))
+  if (!Number.isFinite(raw)) return ''
+  return Math.round(raw / (field.scale || 1))
+}
+
+// 写回渠道自己那一层，不碰顶层默认值，也不碰别的渠道
+function patchSetting(field, pid, value) {
+  const draft = settingsDraft.value || {}
+  const providers = { ...(draft.providers || {}) }
+  providers[pid] = { ...(providers[pid] || {}), [field.key]: value }
+  settingsDraft.value = { ...draft, providers }
+}
+
+function setSettingNumber(field, pid, event) {
+  const value = Number(event.target.value)
+  if (!Number.isFinite(value)) return
+  patchSetting(field, pid, Math.round(value * (field.scale || 1)))
+}
+
+function setSettingBool(field, pid, event) {
+  patchSetting(field, pid, event.target.checked === true)
+}
+
+function setSettingSelect(field, pid, event) {
+  patchSetting(field, pid, event.target.value)
+}
+
+async function loadSettings() {
+  if (settingsLoaded.value) return
+  try {
+    const data = await getChannelSettings()
+    settingsDraft.value = { ...(data?.settings || {}) }
+    settingsLoaded.value = true
+  } catch (err) {
+    // 设置读不到不该挡住账号页
+    console.warn('[channels] 渠道设置读取失败：', err.message)
+  }
+}
+
+async function saveSettings() {
+  settingsBusy.value = true
+  try {
+    const data = await updateChannelSettings(settingsDraft.value)
+    settingsDraft.value = { ...(data?.settings || {}) }
+    settingsLoaded.value = true
+    showToast('渠道设置已保存', 'success', 4000)
+  } catch (err) {
+    showToast('保存失败：' + err.message, 'error', 6000)
+  } finally {
+    settingsBusy.value = false
+  }
+}
+
+function resetSettings() {
+  const next = { ...(settingsDraft.value || {}) }
+  const providers = { ...(next.providers || {}) }
+  for (const provider of PROVIDERS) {
+    const own = { ...(providers[provider.id] || {}) }
+    for (const field of CHANNEL_SETTINGS_FIELDS) {
+      if (field.default !== undefined && (field.scopes || []).includes(provider.id)) own[field.key] = field.default
+    }
+    providers[provider.id] = own
+  }
+  next.providers = providers
+  settingsDraft.value = next
+  showToast('已填入默认值，点「保存」生效', 'info', 4000)
+}
+
+// 冷却剩余时间的口语写法：超过一分钟按分钟说，避免出现「限流 3598 秒」
+function cooldownText(until) {
+  const left = Math.max(0, Number(until) - Date.now())
+  if (left >= 60000) return `${Math.ceil(left / 60000)} 分钟`
+  return `${Math.max(1, Math.ceil(left / 1000))} 秒`
+}
 
 // 账号页每个 provider 独立成卡，Qoder 国际版 / 国内版分别展示。
 const CARD_GROUPS = PROVIDERS.map(provider => ({
@@ -1034,6 +1283,7 @@ async function loadStatus() {
 async function reload({ silent = false } = {}) {
   try {
     await loadStatus()
+    await loadSettings()
     await auditModelHealth().catch(() => null)
     await loadModelHealth()
     await loadAccountHealth()
@@ -3003,6 +3253,65 @@ body.ch-drag-active * {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* 渠道设置内页：与账号卡同宽，网格排布，窄屏自动落成单列 */
+.ch-set-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px 18px;
+  padding: 12px 16px 4px;
+}
+
+.ch-set-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-small);
+  color: var(--text-1);
+  cursor: help;
+}
+
+.ch-set-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.ch-set-input {
+  width: 84px;
+  padding: 4px 6px;
+  font-size: var(--fs-small);
+  color: var(--text-1);
+  background: var(--bg-chip);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-set-unit {
+  min-width: 56px;
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+}
+
+.ch-set-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px 14px;
+}
+
+.ch-set-tip {
+  font-size: var(--fs-mini);
+  color: var(--text-3);
+}
+
+/* 渠道卡内部的设置区：与账号列表之间用虚线分隔，不另起一张卡 */
+.ch-set-inline {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
 }
 
 </style>

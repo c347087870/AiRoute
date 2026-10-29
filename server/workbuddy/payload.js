@@ -756,13 +756,14 @@ function injectPromptCacheKey(body, uid, conversationID) {
   else if (typeof obj.conversationId === 'string' && obj.conversationId) conversation = obj.conversationId
   else if (conversationID) conversation = conversationID
 
-  const uid8 = uid ? uid.slice(0, 8) : '-'
   const convHex = crypto
     .createHash('sha256')
     .update(`${uid}|${conversation}`)
     .digest('hex')
     .slice(0, 32)
-  obj.prompt_cache_key = `wb2a-${uid8}-${convHex}`
+  // 纯 32 hex，不带项目前缀与 uid 明文：convHex 本身已是 sha256(uid|conversation)，
+  // 唯一性不变，但不会再往上送「这是哪个项目、哪个账号」的画像素材
+  obj.prompt_cache_key = convHex
 
   try {
     return JSON.stringify(obj)

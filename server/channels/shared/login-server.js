@@ -25,7 +25,9 @@ class LoginSession {
   }
 
   get callbackUrl() {
-    return `http://127.0.0.1:${this.port}/authorize?state=${encodeURIComponent(this.state)}`
+    // 与官方客户端一致：不带 query。官方页面按 `http://127.0.0.1:<port>/authorize`
+    // 这个形态匹配回调地址，多一个 ?state= 会让它判成非法地址。
+    return `http://127.0.0.1:${this.port}/authorize`
   }
 
   finish(error, value) {
@@ -37,8 +39,8 @@ class LoginSession {
     if (this.timer) clearTimeout(this.timer)
     if (error) this.reject(error)
     else this.resolve(value)
-    // 回调已经拿到，端口没有保留的必要
-    setTimeout(() => this.server.close(() => {}), 50).unref?.()
+    // ⚠️ 不要关 server：它是所有渠道共用的常驻监听。早期版本在这里 close()，
+    // 表现是「第一次登录成功、之后每次登录都网络错误」——端口缓存着但没人监听。
   }
 }
 
@@ -56,7 +58,17 @@ function createLoginServer({ logger = console } = {}) {
       return
     }
     const state = url.searchParams.get('state') || ''
-    const session = sessions.get(state)
+    // 官方桌面客户端的回调**不带 state**（实测：auth_callback_url=http://127.0.0.1:端口/authorize）。
+    // 只有一个等待中的会话时按它认；多个会话并存在没有 state 就无法判定，直接回 400。
+    let session = sessions.get(state)
+    if (!session && state.length === 0) {
+      if (sessions.size === 1) session = [...sessions.values()][0]
+      else {
+        res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' })
+          .end('<p>有多个登录在进行，无法判断回调属于哪一个，请回到 AiRoute 重新发起。</p>')
+        return
+      }
+    }
     if (!session) {
       res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' })
         .end('<p>这个登录链接已失效，请回到 AiRoute 重新发起登录。</p>')
@@ -76,8 +88,11 @@ function createLoginServer({ logger = console } = {}) {
   }
 
   function ensureServer() {
-    if (server && port > 0) return Promise.resolve(port)
+    // 缓存里的 server 可能已经被 close（旧版本会关）：只看 port 会拿到一个死端口
+    if (server && port > 0 && server.listening) return Promise.resolve(port)
     if (starting) return starting
+    server = null
+    port = 0
     starting = new Promise((resolve, reject) => {
       const created = http.createServer(handle)
       const onError = error => {

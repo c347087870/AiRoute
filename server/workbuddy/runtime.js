@@ -452,6 +452,13 @@ async function refreshTokenFor(r, auth) {
       return { ok: true }
     }
     if (res.kind === errMod.ERR_KIND.SESSION_DEAD) {
+      // refresh 失效但 AT 仍有效：账号还能用，不计死、不罚号。
+      // 顺手把历史计数清零（落盘），否则下次真失败会被旧计数推到阈值。
+      if (authMod.atStillValid(auth)) {
+        r.pool.clearSessionDead(auth.uid)
+        r.log(`workbuddy: keepalive uid=${auth.uid} refresh 失败但 AT 仍有效，保留账号`)
+        return { ok: true, kept: true }
+      }
       if (r.pool.noteSessionDead(auth.uid)) {
         r.pool.disable(auth.uid, '12153 session dead')
         r.log(`workbuddy: keepalive uid=${auth.uid} 连续 3 次 12153 session dead — 已禁用`)
@@ -979,6 +986,13 @@ function applyErrorPolicy(r, uid, err, model) {
       return
     case errMod.ERR_KIND.SOFT_RATE: {
       const resetAt = err.rateResetMs || 0
+      // 14003「模型繁忙」：同号换模型立刻可用，且响应里没有恢复时刻。
+      // 按账号级冷却会把整号冻 600s，实测 4 个号 8 次命中就让整池停 10 分钟。
+      if (errMod.isModelBusy(String(err.body || '')) && model) {
+        if (resetAt) pool.cooldownSoftForModel(uid, softBase, resetAt, model, '14003 model busy')
+        else pool.cooldownModelBusy(uid, model, '14003 model busy')
+        return
+      }
       if (resetAt && err.isModelRateLimit && model) {
         pool.cooldownSoftForModel(uid, softBase, resetAt, model, '6004 model rate limit')
         return

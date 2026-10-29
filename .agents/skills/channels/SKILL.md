@@ -162,6 +162,11 @@ curl -s -XPOST localhost:3000/api/channels/test -H 'content-type: application/js
 - **TRAE 一直「认证中」** → 登录 URL 少参数（必须是 17 个，回调参数名是 `auth_callback_url`）。
 - **Qoder 报排队（10605）** → 正常，服务端限流；本实现按 `retryAfterSeconds` 等待重发。
 - **Qoder 403 Signature invalid** → `prepared.headers` 被覆盖了（必须原样透传 WASM 签的头）。
+- **Qoder 提示「没有可领取的活动」** → 先看是不是机器身份头的问题：活动平台要求只发
+  `UA: Qoder` + `cosy-clienttype: 10` + `cosy-version`，**任何 `cosy-machine*` 派生头都会让
+  CLAIMABLE 活动被整条静默过滤**（HTTP 200 + 只剩 VIEW_DETAILS）。六个头一个都别发。
+- **首字很慢（40~70 秒）但最后成功** → 别急着调小首帧上限：默认 120 秒就是为思考型模型留的，
+  客户端先超时的问题由 `earlyHeadersMs`（先发 200 + `: ping`）解决，见「渠道设置」。
 - **TRAE 工具调用变成两条** → 没按 `index` 合并增量帧（已修，见 `provider.js` 的 `consumeSolo`）。
 
 数据落盘（`<AIROUTE_DATA_DIR>/channels-data/`，dev 模式 = 仓库内 `server/channels-data/`）：
@@ -170,8 +175,15 @@ curl -s -XPOST localhost:3000/api/channels/test -H 'content-type: application/js
 channel-credentials.json      凭据（0600 明文，键 <PROVIDER>_ACCOUNT_<8 位大写 hex>）
 trae-accounts.json            账号清单（展示顺序 / 停用标记 / 昵称）
 qoder-accounts.json           同上（qodercn 是 qodercn-accounts.json）
+qoder-machine.json            Qoder 设备标识的安装盐（machine_id 由 (盐, uid) 派生，换机即换设备）
+qoder-max-output.json         从 400 学到的各模型输出上限（7 天有效）
+channel-settings.json         渠道运行参数（面板「渠道设置」内页读写）
 owned-channels-state.json     模型开关与失效台账
 ```
+
+**渠道设置**（`server/channels/settings.js`，面板「渠道设置」内页，`GET/PUT /api/channels/settings`）：
+首帧上限、先发响应头、空闲心跳、限流冷却、单号并发、同号间隔、会话亲和、账号轮转。
+默认值刻意等于改造前的行为 —— 排查时先看这个文件，别先怀疑代码。
 
 CLI 登录（走**正在运行的服务**，不要自己起运行时）：
 
