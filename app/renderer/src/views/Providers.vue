@@ -1,6 +1,25 @@
 <template>
   <div class="providers">
     <div class="page-toolbar">
+      <!-- 模型搜索：一页多个来源、每家几个到几十个模型，先在顶部筛一遍，
+           再也不用逐行扫。命中的模型自动展开，不命中的来源整块收起 -->
+      <div class="model-search">
+        <input
+          v-model="modelKeyword"
+          type="search"
+          class="model-search-input"
+          :placeholder="`搜索模型（名称 / id / 来源），共 ${totalModelCount} 个`"
+          aria-label="按名称、id 或来源搜索模型"
+          @keydown.esc="modelKeyword = ''"
+        />
+        <button
+          v-if="modelKeyword.trim()"
+          type="button"
+          class="model-search-clear"
+          title="清除搜索（Esc）"
+          @click="modelKeyword = ''"
+        >×</button>
+      </div>
       <div class="header-actions">
         <AppButton variant="primary" @click="openAddModal()">+ 通用 Provider</AppButton>
       </div>
@@ -20,6 +39,7 @@
       <div
         v-for="(provider, name) in providers"
         :key="name"
+        v-show="!modelKeywordActive || (provider.models || []).some(model => matchModelKeyword(model, name))"
         class="provider-row"
         :class="{ active: isCurrentProvider(name) }"
       >
@@ -30,6 +50,20 @@
             <span v-if="provider.type === 'channel'" class="badge-type">渠道</span>
             <span v-if="isCurrentProvider(name)" class="badge-current">当前</span>
             <span class="row-count">{{ provider.models?.length || 0 }} 个模型</span>
+            <!-- 行操作跟标题同一行靠右：以前它是 .row-main 的兄弟节点（flex 第二列），
+                 等于把模型列表挤到左边一条窄柱里，长一点的模型名只能显示成省略号 -->
+            <div class="row-actions">
+              <!-- 这一行有测试在跑（整源或单模型）就显示「停止」，别让用户以为按钮失灵 -->
+              <AppButton variant="secondary" v-if="testingName === name" @click="stopTest">
+                {{ testProgress?.name === name ? `停止（${testProgress.total} 个模型）` : '停止' }}
+              </AppButton>
+              <AppButton variant="secondary" v-else @click="runTest(name)" :disabled="!!testingName">
+                测试全部 {{ provider.models?.length || 0 }} 个模型
+              </AppButton>
+              <AppButton variant="secondary" @click="editProvider(name, provider)">编辑</AppButton>
+              <AppButton variant="primary" @click="setAsCurrent(name)">设为当前</AppButton>
+              <AppButton variant="danger" @click="removeProvider(name)">删除</AppButton>
+            </div>
           </div>
 
           <div class="row-meta">
@@ -134,19 +168,6 @@
             v-if="testResults[name] && !(testResults[name].results || []).length"
             class="row-test test-fail"
           >✗ {{ testResults[name].error || '测试失败' }}</div>
-        </div>
-
-        <div class="row-actions">
-          <!-- 这一行有测试在跑（整源或单模型）就显示「停止」，别让用户以为按钮失灵 -->
-          <AppButton variant="secondary" v-if="testingName === name" @click="stopTest">
-            {{ testProgress?.name === name ? `停止（${testProgress.total} 个模型）` : '停止' }}
-          </AppButton>
-          <AppButton variant="secondary" v-else @click="runTest(name)" :disabled="!!testingName">
-            测试全部 {{ provider.models?.length || 0 }} 个模型
-          </AppButton>
-          <AppButton variant="secondary" @click="editProvider(name, provider)">编辑</AppButton>
-          <AppButton variant="primary" @click="setAsCurrent(name)">设为当前</AppButton>
-          <AppButton variant="danger" @click="removeProvider(name)">删除</AppButton>
         </div>
       </div>
     </div>
@@ -368,6 +389,10 @@ const picker = ref({
 
 const providerCount = computed(() => Object.keys(providers.value).length)
 
+// 全部模型总数（各来源相加）：搜索框的占位文案用它
+const totalModelCount = computed(() =>
+  Object.values(providers.value).reduce((sum, p) => sum + (p.models?.length || 0), 0))
+
 // 选择层当前可见的模型：默认隐藏非对话模型，关键字按 ID 与展示名匹配
 const visiblePickerModels = computed(() => {
   const keyword = picker.value.keyword.trim().toLowerCase()
@@ -445,8 +470,31 @@ function formatLimit(value) {
 }
 
 // 展开状态下显示全部模型，否则只显示前 N 个
-function visibleModels(provider, name) {
+// 模型搜索：按「名称 / id / 来源 id」子串匹配（不区分大小写）。
+// 命中的来源自动展开（搜出来还折叠等于没搜到），不命中的来源整块收起；
+// 清空关键词后恢复原来的折叠状态
+const modelKeyword = ref('')
+
+const modelKeywordActive = computed(() => modelKeyword.value.trim() !== '')
+
+function matchModelKeyword(model, providerId) {
+  const keyword = modelKeyword.value.trim().toLowerCase()
+  if (!keyword) return true
+  return String(model.id || '').toLowerCase().includes(keyword)
+    || String(model.displayName || model.name || '').toLowerCase().includes(keyword)
+    || String(providerId || '').toLowerCase().includes(keyword)
+}
+
+function searchVisibleModels(provider, name) {
   const models = provider.models || []
+  if (!modelKeywordActive.value) return models
+  return models.filter(model => matchModelKeyword(model, name))
+}
+
+function visibleModels(provider, name) {
+  const models = searchVisibleModels(provider, name)
+  // 搜索时这一家的命中全部可见（搜出 5 个还折叠 3 个等于没搜到）
+  if (modelKeywordActive.value) return models
   return expanded.value.has(name) ? models : models.slice(0, MODEL_COLLAPSE_LIMIT)
 }
 
@@ -1038,6 +1086,62 @@ function openForOnboarding() {
 
 <style scoped>
 
+/* 模型搜索：占位用的是 input[type=search]，浏览器自带清除按钮，
+   再叠一个自己的 × 会在角上叠两枚 —— 这里关掉原生那枚 */
+.model-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto;
+}
+
+.model-search-input {
+  width: 280px;
+  height: var(--btn-h);
+  padding: 0 28px 0 10px;
+  font-size: var(--fs-small);
+  background: var(--bg-card);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-1);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.model-search-input:focus {
+  border-color: var(--primary);
+}
+
+.model-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+/* 有关键词时边框提亮：和渠道账号页的过滤框同一信号语言 */
+.model-search-input:not(:placeholder-shown) {
+  border-color: var(--primary);
+}
+
+.model-search-clear {
+  position: absolute;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: var(--bg-hover);
+  color: var(--text-2);
+  border-radius: 50%;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.model-search-clear:hover {
+  color: var(--text-1);
+}
+
 /* 空态里的引导入口：跟说明文字隔开一行，别和正文挤成一段 */
 .empty-actions {
   margin-top: 14px;
@@ -1096,6 +1200,8 @@ function openForOnboarding() {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  /* 行操作按钮在标题行右侧；窗口窄时整组换到下一行，不挤掉标题 */
+  row-gap: 8px;
 }
 
 .row-name {
@@ -1211,18 +1317,22 @@ function openForOnboarding() {
   gap: 6px;
 }
 
-/* 每个模型一行定宽网格：名字（伸缩）｜上下文/输出（右对齐）｜状态｜测｜切换。
+/* 每个模型一行定宽网格：名字（伸缩，可换行）｜上下文/输出（右对齐）｜状态｜测｜切换。
    以前是内容撑宽的 inline-flex 芯片，名字长短不同就会一列一列地错开 */
 .model-chip {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px 56px 36px 68px;
+  /* 定宽四列 + 名字吃掉剩余宽度：所有模型块长得一样，右边缘也对得齐。
+     meta 列给到 128px —— 最长的是「1,000,000 / 131,072」，96px 会被截断 */
+  grid-template-columns: minmax(0, 1fr) 128px 84px 72px 72px;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
+  /* 名字换行时不比单行矮：整列高度一致，宁可高一点也不要省略号 */
+  min-height: 44px;
   background: var(--bg-hover);
   border: 1px solid var(--border-2);
   border-radius: var(--radius-sm);
-  padding: 2px 4px 2px 10px;
+  padding: 5px 6px 5px 12px;
   font-size: var(--fs-xs);
 }
 
@@ -1255,10 +1365,11 @@ function openForOnboarding() {
 .chip-name {
   color: var(--text-1);
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
+  /* 允许换行：模型名宁可占两行，也不要「workbuddy · Deepsee…」这种省略 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .chip-meta {
@@ -1267,6 +1378,8 @@ function openForOnboarding() {
   white-space: nowrap;
   flex-shrink: 0;
   text-align: right;
+  /* 数字等宽：上下文/输出一列的逗号与斜杠对得齐 */
+  font-variant-numeric: tabular-nums;
 }
 
 /* 状态格：响应耗时 / 失败 / 失活都放这一格，右对齐，宽度固定不跳动 */
@@ -1367,21 +1480,26 @@ function openForOnboarding() {
 }
 
 /* 芯片上的单模型测试按钮：与「切换」同一套小按钮观感，
-   默认低调（它比切换低频），悬停才提亮 —— 免得一排「测」抢走注意力 */
+   默认低调（它比切换低频），悬停才提亮 —— 免得一排「测」抢走注意力。
+   尺寸与旁边「切换」完全一致（同高、同宽、同字号、同圆角），只是配色更淡 */
 .chip-test {
   flex: none;
-  padding: 0 5px;
-  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
-  font-size: var(--fs-mini);
+  height: var(--btn-h);
+  padding: 0 8px;
+  font-size: var(--btn-fs);
   line-height: 1;
   text-align: center;
   color: var(--text-3);
   background: transparent;
   border: 1px solid var(--border-2);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
+  transition: all 0.15s;
 }
 
 .chip-test:hover:not(:disabled) {
@@ -1415,6 +1533,8 @@ function openForOnboarding() {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
+  /* 现在它是 .row-head 的最后一个子元素：靠右对齐，标题与按钮同一行 */
+  margin-left: auto;
 }
 
 /* 窄屏时操作按钮换行到下方 */

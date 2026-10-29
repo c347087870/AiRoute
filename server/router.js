@@ -705,17 +705,24 @@ async function channelTestAttempt(model, signal, onFirstChunk) {
   if (realm) {
     if (!workbuddy.getRuntime()) throw new Error('WorkBuddy 运行时未初始化')
     let aggregated = null
-    await workbuddy.forwardChat({
-      // max_tokens 不能太小：带 reasoning 的模型会把几十个 token 全花在思考上，
-      // 正文为空，测试就显示成「回复（空）」
-      body: JSON.stringify({ model: bare, messages: [{ role: 'user', content: 'ping' }], stream: false, max_tokens: 64 }),
-      isStream: false,
-      model: bare,
-      realm,
-      // WorkBuddy 的转发没有独立 signal，中止靠这个回调在换号/重试之间跳出
-      isAborted: () => signal?.aborted === true,
-      onDone: payload => { aggregated = payload }
-    })
+    try {
+      await workbuddy.forwardChat({
+        // max_tokens 不能太小：带 reasoning 的模型会把几十个 token 全花在思考上，
+        // 正文为空，测试就显示成「回复（空）」
+        body: JSON.stringify({ model: bare, messages: [{ role: 'user', content: 'ping' }], stream: false, max_tokens: 64 }),
+        isStream: false,
+        model: bare,
+        realm,
+        // WorkBuddy 的转发没有独立 signal，中止靠这个回调在换号/重试之间跳出
+        isAborted: () => signal?.aborted === true,
+        onDone: payload => { aggregated = payload }
+      })
+    } catch (err) {
+      // 测试链路的错误原本只有 message（latency=1 的那种秒败，用户只看到一句
+      // 「Cannot convert…」没法定位）—— 把堆栈打到服务日志，响应里仍给 message
+      console.error('[channels-test] WorkBuddy forwardChat 抛错：', err?.stack || err)
+      throw err
+    }
     if (!aggregated) throw new Error('WorkBuddy 未返回有效响应')
     // 非流式聚合没有逐帧回调，首字节时间无从测量，按整次耗时回报
     markFirst()
