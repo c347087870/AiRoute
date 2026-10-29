@@ -159,7 +159,12 @@ curl -s -XPOST localhost:3000/api/channels/test -H 'content-type: application/js
 - **`channels` 源里没有这个模型** → 目录同步问题；**未登录任何账号时目录为空是设计**。
 - **404「渠道未提供模型」** → `rt.handles()` 按 `provider/` 前缀判定失败。
 - **503** → 运行时还没起来，看日志 `[aiRoute] 渠道初始化失败:`。
-- **TRAE 一直「认证中」** → 登录 URL 少参数（必须是 17 个，回调参数名是 `auth_callback_url`）。
+- **TRAE 登录页报「网络错误」/ 一直「认证中」** → 三件事按顺序查：① 登录链接必须是**桌面客户端形态**
+  （`auth_from=trae`、`client_id=ono9krqynydwx5`、`plugin_version`=`tronBuildVersion`、
+  `x_app_version`=`appVersion`、PKCE 的 `code_challenge`）—— 版本号由 `version-sync` 同步，
+  写死旧值会被判成「非官方客户端」；② `auth_callback_url` 必须**原样不编码**且不带 `?state=`
+  （官方页面对它做正则匹配）；③ 回调端口还在不在：`curl` 一下登录链接里的 `127.0.0.1:端口/authorize`
+  能回 200 才算活着（共用监听在第一次登录后**不会**被关掉，历史缺陷见 login-server 的注释）
 - **Qoder 报排队（10605）** → 正常，服务端限流；本实现按 `retryAfterSeconds` 等待重发。
 - **Qoder 403 Signature invalid** → `prepared.headers` 被覆盖了（必须原样透传 WASM 签的头）。
 - **Qoder 提示「没有可领取的活动」** → 先看是不是机器身份头的问题：活动平台要求只发
@@ -177,13 +182,23 @@ trae-accounts.json            账号清单（展示顺序 / 停用标记 / 昵�
 qoder-accounts.json           同上（qodercn 是 qodercn-accounts.json）
 qoder-machine.json            Qoder 设备标识的安装盐（machine_id 由 (盐, uid) 派生，换机即换设备）
 qoder-max-output.json         从 400 学到的各模型输出上限（7 天有效）
-channel-settings.json         渠道运行参数（面板「渠道设置」内页读写）
+channel-settings.json         渠道运行参数（每张渠道卡的「设置」内页读写，见下）
+channel-versions.json         Trae / Qoder 的官网最新版本号快照（version-sync 每天刷新）
 owned-channels-state.json     模型开关与失效台账
 ```
 
-**渠道设置**（`server/channels/settings.js`，面板「渠道设置」内页，`GET/PUT /api/channels/settings`）：
-首帧上限、先发响应头、空闲心跳、限流冷却、单号并发、同号间隔、会话亲和、账号轮转。
-默认值刻意等于改造前的行为 —— 排查时先看这个文件，别先怀疑代码。
+**渠道设置**（`server/channels/settings.js`，入口在每张渠道卡的「设置」，`GET/PUT /api/channels/settings`）：
+**每家一份** —— 顶层是默认值，`providers.<id>` 是该渠道的覆盖值，取实际参数用
+`settings.forProvider(id)`（改 Trae 不再影响 Qoder）。可配项：首帧上限、先发响应头、空闲心跳、
+限流冷却、单号并发、同号间隔、会话亲和、账号轮转，以及 Trae 的首字超时 / 选号策略 /
+会话粘性 / 形态清洗 / Max 模式。默认值刻意等于改造前的行为 —— 排查时先看这个文件。
+
+**版本号自动同步**（`server/channels/version-sync.js`）：启动即拉、之后每 24 小时一次，
+双源取最大 —— Trae 用 `docs.trae.cn/ide_changelog` + 本机安装的 `product.json`
+（`appVersion` / `tronBuildVersion`），Qoder 用 `qoder.com/changelog` 里 `type=ide` 的最新
+`tag_name` + 本机 Launcher `state.ini`。结果写 `channel-versions.json`，插件经
+`ctx.versions.get()` 读，拉取失败沿用旧值。Trae 登录链接的 `plugin_version` / `x_app_version`、
+换证请求的 `IDEVersion`、Qoder 活动头的 `cosy-version` 全部跟随它 —— **上游发版后不用改代码**。
 
 CLI 登录（走**正在运行的服务**，不要自己起运行时）：
 
