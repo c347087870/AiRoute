@@ -175,6 +175,27 @@ async function main() {
     }
   })
 
+  await test('桌面头补齐：X-Machine-Id / X-Version / X-Machine-Code 与签名版本一致', async () => {
+    // 官方桌面端除 Cosy-* 外还发一组 X-*；WASM 只产 Cosy-*，宿主必须补齐。
+    // 版本号必须与签名用的版本同源，否则两处自相矛盾。
+    const wasm = require('../server/channels/plugins/qoder/wasm')
+    const machineId = '11111111-2222-3333-4444-555555555555'
+    const client = await wasm.QoderEncryptedInfer.create({
+      user: { uid: 'u-test', securityOauthToken: 'Bearer x' },
+      machineId,
+      metadata: {},
+      host: 'https://api2.qoder.sh',
+      clientVersion: '0.5.2',
+    })
+    const out = client.prepareInfer({ modelKey: 'dmodel', source: 'system', body: {} })
+    assert.equal(out.headers['X-Machine-Id'], machineId, 'X-Machine-Id 应与传入的 machineId 一致')
+    assert.equal(out.headers['X-Version'], '0.5.2', 'X-Version 应跟随 clientVersion')
+    assert.equal(out.headers['Cosy-Version'], '0.5.2', 'Cosy-Version 应跟随 clientVersion')
+    assert.equal(out.headers['X-Machine-Code'], '', '官方无值时发空串')
+    // 平台类字段在官方靠混淆常量表，还原不出确切字面量 —— 宁可缺失也不猜
+    assert.ok(!('X-IDE-Platform' in out.headers), '未确认的 X-IDE-Platform 不应臆造')
+  })
+
   console.log('')
   if (failed > 0) {
     console.log(`${passed} 项通过，${failed} 项失败`)

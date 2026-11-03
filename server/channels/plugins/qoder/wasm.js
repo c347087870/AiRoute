@@ -294,10 +294,15 @@ function buildInferPayload(ask, requestId) {
 
 // 一个账号一个实例：持有 WASM 里的 QoderContext（有状态，不跨账号复用）
 class QoderEncryptedInfer {
-  constructor(glue, context, host) {
+  constructor(glue, context, host, machineId, version) {
     this.glue = glue
     this.context = context
     this.host = host
+    // 官方桌面端除 Cosy-* 之外还会发一组 X-Machine-* / X-Version 头
+    // （见官方 electronMain 的请求构造）。WASM 只产出 Cosy-*，
+    // 这组必须由宿主补齐，否则请求形态与官方不一致。
+    this.machineId = machineId
+    this.version = version
   }
 
   static async create({ user, machineId, metadata, host, clientVersion }) {
@@ -324,7 +329,7 @@ class QoderEncryptedInfer {
       // 参数顺序：(sp, machineId, len, version, len, userInfo, len, clientMeta, len)
       g.exports.qodercontext_new(stack, machine, machineLen, ver, verLen, info, infoLen, meta, metaLen)
     })
-    return new QoderEncryptedInfer(g, context, host)
+    return new QoderEncryptedInfer(g, context, host, machineId, version)
   }
 
   // 构造一次加密请求（url / headers / body）。
@@ -369,9 +374,31 @@ class QoderEncryptedInfer {
     return {
       // ⚠️ 参数顺序是 (栈指针, ptr)，与直觉相反
       url: readResultString((stack, ptr) => g.exports.requestresult_url(stack, ptr)),
-      headers,
+      headers: this.fillDesktopHeaders(headers),
       body: readResultString((stack, ptr) => g.exports.requestresult_body(stack, ptr)),
     }
+  }
+
+  // 补齐官方桌面端那组 X-* 头。
+  //
+  // 官方 electronMain 的构造（W70 函数）：
+  //   X-Request-Id / X-IDE-Platform / X-Version / X-Machine-OS /
+  //   X-Machine-Id / X-Machine-Type / X-Machine-Code / Cosy-*
+  // WASM 只产出 Cosy-*，这组缺了会让请求形态与官方不同。
+  //
+  // 只补「能从本进程确定」的值，平台类字段（X-IDE-Platform / X-Machine-OS /
+  // X-Machine-Type）在官方是 D5 常量表 + 系统采集，混淆后静态还原不出确切字面量，
+  // **不猜**——猜错比缺失更容易被判定异常。等抓包拿到真实值再补。
+  fillDesktopHeaders(headers) {
+    const out = { ...headers }
+    const has = name => Object.prototype.hasOwnProperty.call(out, name)
+
+    // machineId 与版本号都是本地确定的，可以安全补
+    if (!has('X-Machine-Id') && this.machineId) out['X-Machine-Id'] = this.machineId
+    if (!has('X-Version')) out['X-Version'] = this.version || COSY_VERSION
+    // 官方对无值的 X-Machine-Code 就是发空串，这个可以照做
+    if (!has('X-Machine-Code')) out['X-Machine-Code'] = ''
+    return out
   }
 }
 

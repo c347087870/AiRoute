@@ -632,9 +632,12 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       machineId: credential.machine_id,
       metadata: { ...product.clientMetadata },
       host: product.inferBase,
-      // 官方客户端版本号：写死会在官方抬版本后被判版本过低（430），
-      // 这里允许用环境变量临时改，不必发版
-      clientVersion: process.env.AIROUTE_QODER_CLIENT_VERSION || undefined,
+      // 官方客户端版本号：签名载荷里带它，写死会被判「非官方客户端」（430）。
+      // 优先级：环境变量（临时覆盖，不必发版）> version-sync 自动同步 > 内置兜底
+      clientVersion:
+        process.env.AIROUTE_QODER_CLIENT_VERSION
+        || versions?.get?.().qoder?.appVersion
+        || undefined,
     })
     clients.set(key, client)
     return client
