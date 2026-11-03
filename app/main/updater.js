@@ -3,16 +3,18 @@
 //
 // 两种一键升级形态：
 //   macOS   ：.app 就地原子替换，失败自动回滚（updater-core.applyUpdate）
-//   Windows ：仅安装版（NSIS）支持，exe 交给独立助手进程静默安装，本进程退出后由助手重启应用
+//   Windows ：仅安装版（NSIS）支持，exe 交给独立 PowerShell 启动器静默安装，本进程退出后由它重启应用
 //             （updater-core.applyWindowsUpdate；便携版不支持，界面提示手动下载）
 const { app } = require('electron')
 const fs = require('fs-extra')
 const path = require('path')
 const core = require('./updater-core')
 const installKind = require('./install-kind')
+const winLauncher = require('./win-update-launcher')
 
 const UPDATE_DIR = process.env.AIROUTE_UPDATE_DIR || path.join(app.getPath('userData'), 'updates')
 const JOURNAL = path.join(UPDATE_DIR, 'journal.json')
+const INSTALL_EXIT = path.join(UPDATE_DIR, winLauncher.EXIT_FILE)
 const BACKUP_DIR = path.join(UPDATE_DIR, 'backup')
 const IS_WIN = process.platform === 'win32'
 
@@ -95,6 +97,16 @@ function writeJournal(data) {
   }
 }
 
+// 读启动器留下的安装器退出码；没有这个文件说明上次没走到安装那一步
+function readInstallExit() {
+  try {
+    const code = Number(String(fs.readFileSync(INSTALL_EXIT, 'utf8')).trim())
+    return Number.isFinite(code) ? code : null
+  } catch {
+    return null
+  }
+}
+
 // 启动时读取上次升级结果：
 //   目标版本 == 当前版本 → 升级成功；否则看 journal 状态判断是失败回滚还是中途被中断
 function readLastResult() {
@@ -107,9 +119,18 @@ function readLastResult() {
     return { ...base, ok: true }
   }
   if (journal.status === 'error') {
-    return { ...base, ok: false, error: journal.error || '升级失败', rolledBack: journal.rolledBack !== false }
+    // Windows 没有备份/回滚，别谎称「已回滚到 vX」（界面会照搬这句话）
+    return { ...base, ok: false, error: journal.error || '升级失败', rolledBack: !IS_WIN && journal.rolledBack !== false }
   }
-  // Windows：助手已经跑完安装包，但版本没变（安装被取消 / 装到了别处），此时旧版本仍在运行
+  // Windows：启动器跑完安装后只写退出码、不改 journal。版本没变就是没装成，
+  // 用退出码给出具体原因，比笼统的「未完成」有用
+  if (IS_WIN && journal.status === 'installing') {
+    const code = readInstallExit()
+    if (code !== null) {
+      return { ...base, ok: false, error: core.describeInstallExit(code, app.getVersion()), rolledBack: false }
+    }
+  }
+  // Windows：旧版本助手把 journal 写成 installed 后被杀（2.0.1 及更早留下的记录）
   if (IS_WIN && journal.status === 'installed') {
     return { ...base, ok: false, error: `安装程序已执行，但当前版本仍为 v${app.getVersion()}，请手动下载安装包重试`, rolledBack: false }
   }
@@ -211,18 +232,17 @@ async function installAsync({ target, artifactPath, sha256, version, from }) {
     writeJournal({ status: 'installing', stage, from, to: version, artifactPath, sha256 })
   }
   try {
-    // Windows：交给助手进程静默安装，本进程退出后由助手重启应用（没有备份 / 回读 / 回滚）
+    // Windows：交给 PowerShell 启动器静默安装，本进程退出后由它重启应用（没有备份 / 回读 / 回滚）
     if (IS_WIN) {
       const result = await core.applyWindowsUpdate({
         target,
         artifactPath,
         sha256,
         updateDir: UPDATE_DIR,
-        journalPath: JOURNAL,
         onStage,
         log: line => console.log('[aiRoute] 更新:', line)
       })
-      writeJournal({ status: 'installing', stage: 'restarting', from, to: version, artifactPath, sha256, helperPid: result.helperPid })
+      writeJournal({ status: 'installing', stage: 'restarting', from, to: version, artifactPath, sha256, launcherPid: result.launcherPid })
       setState({ stage: 'restarting', message: STAGE_TEXT.restarting })
       running = false
       quitForInstall()

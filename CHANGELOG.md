@@ -2,6 +2,26 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.3] - 2026-11-03
+
+Windows 安装版一键升级修到可用：换成不落在安装目录里的启动器，半升级与退出码 2 都消掉。
+
+### 修复
+
+- **一键升级在 Windows 上必然失败（`安装程序退出码 2`）**：旧实现用 `AiRoute.exe` 以 `ELECTRON_RUN_AS_NODE` 跑「安装助手」，而 electron-builder 的 NSIS 安装器启动时会 kill 掉 `$INSTDIR` 下所有 `AiRoute.exe`（`allowOnlyOneInstallerInstance.nsh` 的 `CHECK_APP_RUNNING` 按安装目录路径前缀匹配）——助手既写不成 journal，也让安装器的卸载旧版本一步拿不到结果，最终以退出码 2 收场。实测还会留下「`AiRoute.exe` 仍是旧版本、其余文件已是新版」的半升级状态。现改为 `powershell.exe` 启动器（系统目录，不在 `$INSTDIR` 内）：等主进程 PID 消失后再跑 `安装包 /S --updated`，并把安装器退出码写进 `updates/install-exit.txt`
+- **升级失败后应用不会自动回来**：助手拉起应用时把 `ELECTRON_RUN_AS_NODE=1` 一起继承了，主进程启动即 `process.exit(1)`（`app/main/main.js` 的纯 Node 模式兜底），用户面前一个窗口都没有。新启动器不写这个变量，安装成功/失败都会拉起应用（静默安装不执行 `runAfterFinish`，不拉就是升级完窗口没了）
+- **失败提示谎称「已回滚到 vX」**：Windows 没有备份与回滚，但 `journal.rolledBack` 未定义被当成 `true`，界面照搬成回滚文案。现在 Windows 一律按「未回滚」处理，并在有退出码时直接给出 `安装程序退出码 N，请手动下载安装包重试`
+- **等待超时不应继续安装**：应用 60 秒内没退出就只写 `-1` 并放弃安装包，避免安装器把还在写盘的应用杀掉（表现为数据文件半写）
+
+### 变更
+
+- 删除 `app/main/win-update-helper.js`，新增 `app/main/win-update-launcher.js`（`psQuote` / `powershellPath` / `buildScript` / `writeScript` / `spawnLauncher`），退出码到文案的映射抽成 `updater-core.describeInstallExit` 便于离线断言。启动脚本落到 `updates/install-update.ps1`（UTF-8 BOM）再 `-File` 执行：长命令行经 spawn 传参会被 Windows 转义吃掉，`-Command` 传整段脚本实测 PowerShell 直接退 0、一句都没执行；`detached` 也会让 PowerShell 5.1 无控制台时不执行，故改为普通子进程 + `unref()`
+- 主进程退出后启动器再等 2 秒才开始装：给渲染/GPU 子进程收句柄留时间。卸载器要逐文件把 `$INSTDIR` 搬进 `%TEMP%`，任一文件被占用就整轮 `Abort`
+
+### 测试
+
+- `test-update` 重写 Windows 段：启动器脚本内容（等 PID → `/S --updated` → 写退出码 → 拉起应用）、超时守卫顺序、`spawnLauncher` 的 detached/windowsHide、退出码文案三态，共 32 项
+
 ## [2.0.2] - 2026-11-03
 
 Qoder 请求形态与官方桌面端对齐：签名版本号不再写死，补齐官方那组 `X-*` 请求头。

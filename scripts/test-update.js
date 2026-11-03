@@ -4,7 +4,6 @@
 // 全部使用临时目录与假命令 / 假 spawn，不触碰真实应用包，也不会真的运行安装包
 const assert = require('assert')
 const crypto = require('crypto')
-const { EventEmitter } = require('events')
 const fs = require('fs-extra')
 const os = require('os')
 const path = require('path')
@@ -12,7 +11,7 @@ const path = require('path')
 const updateServer = require(path.join(__dirname, '..', 'server', 'update.js'))
 const core = require(path.join(__dirname, '..', 'app', 'main', 'updater-core.js'))
 const installKind = require(path.join(__dirname, '..', 'app', 'main', 'install-kind.js'))
-const helper = require(path.join(__dirname, '..', 'app', 'main', 'win-update-helper.js'))
+const helper = require(path.join(__dirname, '..', 'app', 'main', 'win-update-launcher.js'))
 
 // ===== 迷你测试框架 =====
 // 同步与异步用例统一排队串行执行：分组标题、用例输出、汇总严格按源码顺序出现
@@ -484,47 +483,45 @@ function makeWinTarget(root, { artifactName = 'AiRoute-1.8.2-x64-setup.exe', art
   fs.ensureDirSync(updateDir)
   const artifactPath = path.join(updateDir, artifactName)
   fs.writeFileSync(artifactPath, artifact)
-  return { target, updateDir, artifactPath, journalPath: path.join(updateDir, 'journal.json') }
+  return { target, updateDir, artifactPath }
 }
 
-testAsync('成功路径：校验通过后以助手参数拉起独立进程', async () => {
+testAsync('成功路径：校验通过后以启动器脚本拉起独立进程', async () => {
   const { root, cleanup } = tempDir()
   try {
-    const { target, updateDir, artifactPath, journalPath } = makeWinTarget(root)
+    const { target, updateDir, artifactPath } = makeWinTarget(root)
     const expected = sha256(fs.readFileSync(artifactPath))
-    let spawnedArgs = null
     const stages = []
     const result = await core.applyWindowsUpdate({
       target,
       artifactPath,
       sha256: expected,
       updateDir,
-      journalPath,
       onStage: stage => stages.push(stage),
-      spawnHelper: args => {
-        spawnedArgs = args
-        return { pid: 4242, unref() {} }
-      }
+      spawnLauncher: () => ({ pid: 4242, unref() {} })
     })
 
     assert.deepStrictEqual(stages, ['verifying', 'replacing'])
-    assert.strictEqual(result.helperPid, 4242)
-    assert.ok(spawnedArgs[0].endsWith('win-update-helper.js'))
-    assert.deepStrictEqual(spawnedArgs.slice(1), [
-      '--pid', String(process.pid),
-      '--installer', artifactPath,
-      '--exe', target,
-      '--journal', journalPath
-    ])
+    assert.strictEqual(result.launcherPid, 4242)
+    assert.strictEqual(result.exitFile, path.join(updateDir, helper.EXIT_FILE))
+    assert.strictEqual(result.scriptPath, path.join(updateDir, helper.SCRIPT_FILE))
+    // 启动器脚本必须带齐：安装包、应用 exe、退出码文件、静默参数
+    const script = fs.readFileSync(result.scriptPath, 'utf8')
+    assert.ok(script.includes(artifactPath))
+    assert.ok(script.includes(target))
+    assert.ok(script.includes(result.exitFile))
+    assert.ok(script.includes("'/S','--updated'"))
+    // 上一轮遗留的退出码要先清掉，否则失败会被读成上次的 0
+    assert.strictEqual(fs.existsSync(result.exitFile), false)
   } finally {
     cleanup()
   }
 })
 
-testAsync('SHA-256 不匹配：不拉起助手进程', async () => {
+testAsync('SHA-256 不匹配：不拉起启动器', async () => {
   const { root, cleanup } = tempDir()
   try {
-    const { target, updateDir, artifactPath, journalPath } = makeWinTarget(root)
+    const { target, updateDir, artifactPath } = makeWinTarget(root)
     let spawned = false
     await assert.rejects(
       () => core.applyWindowsUpdate({
@@ -532,8 +529,7 @@ testAsync('SHA-256 不匹配：不拉起助手进程', async () => {
         artifactPath,
         sha256: 'a'.repeat(64),
         updateDir,
-        journalPath,
-        spawnHelper: () => { spawned = true; return { pid: 1 } }
+        spawnLauncher: () => { spawned = true; return { pid: 1 } }
       }),
       /SHA-256 校验失败/
     )
@@ -546,15 +542,14 @@ testAsync('SHA-256 不匹配：不拉起助手进程', async () => {
 testAsync('便携版安装包：拒绝一键升级（它不会覆盖已安装的文件）', async () => {
   const { root, cleanup } = tempDir()
   try {
-    const { target, updateDir, artifactPath, journalPath } = makeWinTarget(root, { artifactName: 'AiRoute-1.8.2-x64.exe' })
+    const { target, updateDir, artifactPath } = makeWinTarget(root, { artifactName: 'AiRoute-1.8.2-x64.exe' })
     await assert.rejects(
       () => core.applyWindowsUpdate({
         target,
         artifactPath,
         sha256: sha256(fs.readFileSync(artifactPath)),
         updateDir,
-        journalPath,
-        spawnHelper: () => ({ pid: 1 })
+        spawnLauncher: () => ({ pid: 1 })
       }),
       /安装包不是安装版/
     )
@@ -566,7 +561,7 @@ testAsync('便携版安装包：拒绝一键升级（它不会覆盖已安装的
 testAsync('安装包不在托管目录内时直接拒绝', async () => {
   const { root, cleanup } = tempDir()
   try {
-    const { target, updateDir, journalPath } = makeWinTarget(root)
+    const { target, updateDir } = makeWinTarget(root)
     const outside = path.join(root, 'AiRoute-1.8.2-x64-setup.exe')
     fs.writeFileSync(outside, 'setup-content')
     await assert.rejects(
@@ -575,8 +570,7 @@ testAsync('安装包不在托管目录内时直接拒绝', async () => {
         artifactPath: outside,
         sha256: sha256(Buffer.from('setup-content')),
         updateDir,
-        journalPath,
-        spawnHelper: () => ({ pid: 1 })
+        spawnLauncher: () => ({ pid: 1 })
       }),
       /安装包路径非法/
     )
@@ -585,118 +579,82 @@ testAsync('安装包不在托管目录内时直接拒绝', async () => {
   }
 })
 
-group('安装助手（win-update-helper）')
+group('安装启动器（win-update-launcher）')
 
-test('parseArgs 解析 --key value 参数', () => {
-  assert.deepStrictEqual(helper.parseArgs(['--pid', '12', '--installer', 'C:\\a.exe']), { pid: '12', installer: 'C:\\a.exe' })
+test('psQuote 把单引号转义成两个，路径不会被截断', () => {
+  assert.strictEqual(helper.psQuote("C:\\a'b\\c"), "'C:\\a''b\\c'")
 })
 
-testAsync('waitForExit 轮询到进程消失为止，超时返回 false', async () => {
-  let calls = 0
-  const aliveSeq = [true, true, false]
-  const exited = await helper.waitForExit(1, {
-    aliveFn: () => aliveSeq[calls++],
-    sleepFn: async () => {}
-  })
-  assert.strictEqual(exited, true)
-  assert.strictEqual(calls, 3)
-
-  let now = 0
-  const timedOut = await helper.waitForExit(1, {
-    aliveFn: () => true,
-    sleepFn: async () => { now += helper.POLL_MS },
-    now: () => now
-  })
-  assert.strictEqual(timedOut, false)
+test('powershellPath 走 SystemRoot 下的 WindowsPowerShell，不依赖 PATH', () => {
+  assert.strictEqual(
+    helper.powershellPath({ SystemRoot: 'C:\\Windows' }),
+    path.join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  )
 })
 
-testAsync('runInstaller 以 /S --updated 静默执行安装包', async () => {
+test('buildScript：等 PID 退出 → /S --updated → 写退出码 → 拉起应用', () => {
+  const script = helper.buildScript({
+    pid: 1234,
+    installer: 'C:\\u\\AiRoute-2.0.2-x64-setup.exe',
+    exe: 'C:\\p\\AiRoute.exe',
+    exitFile: 'C:\\u\\install-exit.txt',
+    waitSeconds: 30
+  })
+  assert.match(script, /\$appPid = 1234/)
+  assert.match(script, /AddSeconds\(30\)/)
+  assert.match(script, /Get-Process -Id \$appPid/)
+  assert.match(script, /Start-Process -FilePath 'C:\\u\\AiRoute-2\.0\.2-x64-setup\.exe' -ArgumentList '\/S','--updated' -Wait -PassThru/)
+  assert.match(script, /Set-Content -LiteralPath 'C:\\u\\install-exit\.txt' -Value \$code -Encoding ascii/)
+  assert.match(script, /Start-Process -FilePath 'C:\\p\\AiRoute\.exe'/)
+})
+
+test('buildScript：等待超时先写 -1 并退出，不运行安装包', () => {
+  const script = helper.buildScript({ pid: 7, installer: 'i.exe', exe: 'e.exe', exitFile: 'x.txt' })
+  assert.ok(/\{ Set-Content -LiteralPath 'x\.txt' -Value -1 -Encoding ascii; exit \}/.test(script), '缺少超时守卫')
+  // 守卫必须在启动安装包之前，否则会把还在写盘的应用杀掉
+  assert.ok(script.indexOf('exit }') < script.indexOf('--updated'))
+})
+
+test('buildScript：等应用退出后多留 2 秒收句柄', () => {
+  const script = helper.buildScript({ pid: 1, installer: 'i.exe', exe: 'e.exe', exitFile: 'x.txt' })
+  const guard = script.indexOf('-Value -1')
+  assert.ok(script.indexOf('Start-Sleep -Seconds 2') > guard)
+  assert.ok(script.indexOf('Start-Sleep -Seconds 2') < script.indexOf('--updated'))
+})
+
+test('writeScript 写成 UTF-8 BOM，PowerShell 5.1 才不会把中文路径读成乱码', () => {
+  const file = path.join(os.tmpdir(), `airoute-ps-${process.pid}.ps1`)
+  helper.writeScript(file, "# 中文注释\r\necho 1\r\n")
+  const raw = fs.readFileSync(file)
+  assert.deepStrictEqual([...raw.slice(0, 3)], [0xef, 0xbb, 0xbf])
+  assert.ok(raw.toString('utf8').includes('中文注释'))
+  fs.removeSync(file)
+})
+
+test('spawnLauncher：不 detach（detach 会让 PowerShell 直接退出），用 -File 跑脚本', () => {
   let seen = null
-  const result = await helper.runInstaller('C:\\AiRoute-1.8.2-x64-setup.exe', {
-    spawnFn: (file, args) => {
-      seen = [file, ...args]
-      const child = new EventEmitter()
-      child.kill = () => {}
-      process.nextTick(() => child.emit('exit', 0))
-      return child
+  const result = helper.spawnLauncher({
+    scriptPath: 'C:\\u\\install-update.ps1',
+    psPath: 'C:\\PS\\powershell.exe',
+    env: {},
+    spawnFn: (file, args, opts) => {
+      seen = { file, args, opts }
+      return { pid: 1, unref() { seen.unrefed = true } }
     }
   })
-  assert.strictEqual(result.code, 0)
-  assert.deepStrictEqual(seen, ['C:\\AiRoute-1.8.2-x64-setup.exe', '/S', '--updated'])
+  assert.strictEqual(result.pid, 1)
+  assert.strictEqual(seen.unrefed, true)
+  assert.strictEqual(seen.file, 'C:\\PS\\powershell.exe')
+  assert.deepStrictEqual(seen.args, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\u\\install-update.ps1'])
+  assert.strictEqual(seen.opts.detached, undefined)
+  assert.strictEqual(seen.opts.windowsHide, true)
+  assert.strictEqual(seen.opts.stdio, 'ignore')
 })
 
-testAsync('助手成功路径：等应用退出 → 安装 → 拉起新版本并回写 journal', async () => {
-  const { root, cleanup } = tempDir()
-  try {
-    const { target, artifactPath, journalPath } = makeWinTarget(root)
-    fs.writeJsonSync(journalPath, { status: 'installing', from: '1.8.1', to: '1.8.2', artifactPath })
-    const calls = []
-    const code = await helper.main(['--pid', '9999', '--installer', artifactPath, '--exe', target, '--journal', journalPath], {
-      waitForExitFn: async pid => { calls.push(['wait', String(pid)]); return true },
-      runInstallerFn: async installer => { calls.push(['install', installer]); return { code: 0 } },
-      launchFn: exe => { calls.push(['launch', exe]); return true },
-      log: () => {}
-    })
-    assert.strictEqual(code, 0)
-    assert.deepStrictEqual(calls, [['wait', '9999'], ['install', artifactPath], ['launch', target]])
-    const journal = fs.readJsonSync(journalPath)
-    assert.strictEqual(journal.status, 'installed')
-    // 主进程写入的字段不能被助手覆盖
-    assert.strictEqual(journal.to, '1.8.2')
-  } finally {
-    cleanup()
-  }
-})
-
-testAsync('助手安装失败：记录原因并拉起旧版本', async () => {
-  const { root, cleanup } = tempDir()
-  try {
-    const { target, artifactPath, journalPath } = makeWinTarget(root)
-    fs.writeJsonSync(journalPath, { status: 'installing', from: '1.8.1', to: '1.8.2' })
-    const calls = []
-    const code = await helper.main(['--pid', '9999', '--installer', artifactPath, '--exe', target, '--journal', journalPath], {
-      waitForExitFn: async () => true,
-      runInstallerFn: async () => ({ code: 5 }),
-      launchFn: exe => { calls.push(exe); return true },
-      log: () => {}
-    })
-    assert.strictEqual(code, 1)
-    assert.deepStrictEqual(calls, [target])
-    const journal = fs.readJsonSync(journalPath)
-    assert.strictEqual(journal.status, 'error')
-    assert.match(journal.error, /退出码 5/)
-  } finally {
-    cleanup()
-  }
-})
-
-testAsync('助手等待退出超时：不运行安装包，仍然拉起当前版本', async () => {
-  const { root, cleanup } = tempDir()
-  try {
-    const { target, artifactPath, journalPath } = makeWinTarget(root)
-    fs.writeJsonSync(journalPath, { status: 'installing', from: '1.8.1', to: '1.8.2' })
-    let installed = false
-    const code = await helper.main(['--pid', '9999', '--installer', artifactPath, '--exe', target, '--journal', journalPath], {
-      waitForExitFn: async () => false,
-      runInstallerFn: async () => { installed = true; return { code: 0 } },
-      launchFn: () => true,
-      log: () => {}
-    })
-    assert.strictEqual(code, 1)
-    assert.strictEqual(installed, false)
-    assert.strictEqual(fs.readJsonSync(journalPath).status, 'error')
-  } finally {
-    cleanup()
-  }
-})
-
-testAsync('助手缺少安装包：直接放弃（退出码 2）', async () => {
-  const code = await helper.main(['--pid', '9999', '--installer', path.join(os.tmpdir(), 'no-such-setup.exe')], {
-    runInstallerFn: async () => { throw new Error('不该运行安装包') },
-    launchFn: () => true,
-    log: () => {}
-  })
-  assert.strictEqual(code, 2)
+test('describeInstallExit：0 / -1 / 其它退出码各有明确文案', () => {
+  assert.match(core.describeInstallExit(0, '2.0.1'), /安装程序已执行，但当前版本仍为 v2\.0\.1/)
+  assert.match(core.describeInstallExit(-1, '2.0.1'), /等待应用退出超时/)
+  assert.match(core.describeInstallExit(2, '2.0.1'), /安装程序退出码 2/)
 })
 
 // ===== 汇总 =====
