@@ -8,7 +8,8 @@
 const fs = require('fs-extra')
 const path = require('path')
 const crypto = require('crypto')
-const { execFile, spawn } = require('child_process')
+const { execFile } = require('child_process')
+const launcher = require('./win-update-launcher')
 
 // 安装阶段（与渲染进程的阶段文案一一对应）
 const STAGE = {
@@ -288,39 +289,17 @@ function isWindowsSetupArtifact(name) {
   return /-setup\.exe$/i.test(base)
 }
 
-// 助手进程参数（单独导出便于离线测试断言「传给助手的安装包 / 日志路径」）
-function helperArgs({ pid, artifactPath, exePath, journalPath }) {
-  return [
-    path.join(__dirname, 'win-update-helper.js'),
-    '--pid', String(pid),
-    '--installer', artifactPath,
-    '--exe', exePath,
-    '--journal', journalPath
-  ]
-}
-
-// 默认 spawn：以 ELECTRON_RUN_AS_NODE 方式拉起打包后的 Electron 可执行文件跑助手脚本。
-// detached + unref：本进程随后退出，助手继续运行（这是替换 exe 的前提）
-function defaultSpawnHelper(args) {
-  return spawn(process.execPath, args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
-  })
-}
-
-// 一键升级（Windows）：校验安装包 SHA-256 → 拉起助手进程，由助手等本进程退出后静默安装并重启应用。
-// 返回 { helperPid }；调用方拿到结果后负责退出应用。
+// 一键升级（Windows）：校验安装包 SHA-256 → 拉起 PowerShell 启动器，由它等本进程退出后
+// 静默安装并重启应用。返回 { launcherPid, exitFile }；调用方拿到结果后负责退出应用。
+// 启动器脚本与「为什么不用 Electron 助手」见 ./win-update-launcher.js
 async function applyWindowsUpdate(options) {
   const {
     target,
     artifactPath,
     sha256,
     updateDir,
-    journalPath,
     pid = process.pid,
-    spawnHelper = defaultSpawnHelper,
+    spawnLauncher = launcher.spawnLauncher,
     onStage = () => {},
     log = () => {}
   } = options
@@ -338,15 +317,29 @@ async function applyWindowsUpdate(options) {
   if (actual !== expected) throw new Error('安装包 SHA-256 校验失败')
   log(`安装包校验通过 ${expected.slice(0, 12)}…`)
 
-  // ② 拉起助手：助手会等本进程 PID 消失后再运行安装包，避免安装时 exe 被占用
+  // ② 拉起启动器：它会等本进程 PID 消失后再运行安装包，避免安装时 exe 被占用。
+  // 上次遗留的退出码先清掉，免得失败后读到旧的「0」被当成成功
   onStage(STAGE.REPLACE)
-  const args = helperArgs({ pid, artifactPath, exePath: target, journalPath })
-  const child = spawnHelper(args)
-  if (!child || typeof child.pid !== 'number') throw new Error('无法启动安装助手进程')
+  const exitFile = path.join(updateDir, launcher.EXIT_FILE)
+  try { fs.removeSync(exitFile) } catch {}
+  const scriptPath = path.join(updateDir, launcher.SCRIPT_FILE)
+  launcher.writeScript(scriptPath, launcher.buildScript({ pid, installer: artifactPath, exe: target, exitFile }))
+  const child = spawnLauncher({ scriptPath })
+  if (!child || typeof child.pid !== 'number') throw new Error('无法启动安装启动器')
   if (typeof child.unref === 'function') child.unref()
-  log(`已启动安装助手 pid=${child.pid}`)
+  log(`已启动安装启动器 pid=${child.pid}`)
 
-  return { helperPid: child.pid, artifactPath }
+  return { launcherPid: child.pid, exitFile, scriptPath, artifactPath }
+}
+
+// 安装器退出码 → 界面提示：
+//   0  安装程序跑完了但版本没变（半途跳过 / 装到了别处）
+//   -1 启动器自己没跑成（等待应用退出超时或安装包无法启动）
+//   其他 NSIS 退出码，2 最常见：卸载旧版本失败（旧卸载器搬不动文件）
+function describeInstallExit(code, currentVersion) {
+  if (code === 0) return `安装程序已执行，但当前版本仍为 v${currentVersion}，请手动下载安装包重试`
+  if (code === -1) return '安装程序未执行（等待应用退出超时），请手动下载安装包重试'
+  return `安装程序退出码 ${code}，请手动下载安装包重试`
 }
 
 module.exports = {
@@ -365,6 +358,6 @@ module.exports = {
   applyUpdate,
   rollbackToBackup,
   isWindowsSetupArtifact,
-  helperArgs,
+  describeInstallExit,
   applyWindowsUpdate
 }
