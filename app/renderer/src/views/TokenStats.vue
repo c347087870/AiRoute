@@ -585,7 +585,7 @@ onMounted(() => {
 }
 
 .period-btn {
-  background: var(--bg-page);
+  background: var(--bg-control);
   border: 1px solid var(--border-3);
   color: var(--text-2);
   padding: 10px 20px;
@@ -599,7 +599,7 @@ onMounted(() => {
 .period-btn:hover {
   border-color: var(--primary);
   color: var(--primary);
-  background: #F0F7FF;
+  background: rgba(0, 122, 255, 0.08);
 }
 
 .period-btn.active {
@@ -634,17 +634,17 @@ onMounted(() => {
 }
 
 .summary-icon.purple {
-  background: #F3E5F5;
+  background: rgba(175, 82, 222, 0.12);
   color: var(--purple);
 }
 
 .summary-icon.blue {
-  background: #E3F2FD;
+  background: rgba(0, 122, 255, 0.12);
   color: var(--primary);
 }
 
 .summary-icon.orange {
-  background: #FFF3E0;
+  background: rgba(255, 159, 10, 0.14);
   color: var(--warning);
 }
 
@@ -801,7 +801,7 @@ onMounted(() => {
 }
 
 .model-table tbody tr:hover {
-  background: var(--bg-page);
+  background: var(--bg-hover);
 }
 
 .percentage-bar {

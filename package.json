@@ -1,17 +1,28 @@
 {
   "name": "aiRoute",
-  "version": "1.6.1",
+  "version": "1.6.4",
   "description": "本地 LLM 多模型调度网关",
   "private": true,
   "main": "app/main/main.js",
   "scripts": {
     "dev": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development npx electron .\"",
     "dev:web": "concurrently \"node server/router.js\" \"cd app/renderer && npx vite --port 5173\"",
+    "icons": "node scripts/make-icons.js",
     "build": "node scripts/build.js",
+    "build:mac": "node scripts/build.js --mac",
+    "build:win": "node scripts/build.js --win",
+    "install:mac": "node scripts/install-mac.js",
     "test": "cross-env ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe scripts/test-workbuddy.js",
     "test:e2e": "node scripts/smoke-e2e.js"
   },
-  "keywords": ["llm", "router", "gateway", "anthropic", "openai", "electron"],
+  "keywords": [
+    "llm",
+    "router",
+    "gateway",
+    "anthropic",
+    "openai",
+    "electron"
+  ],
   "author": "c",
   "license": "MIT",
   "repository": {
@@ -26,10 +37,13 @@
     "axios": "^1.16.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "fs-extra": "^11.3.5"
+    "fs-extra": "^11.3.5",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "concurrently": "^8.2.0",
     "cross-env": "^7.0.3",
     "electron": "^42.3.0",
@@ -40,6 +54,8 @@
     "wait-on": "^7.2.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron"]
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
   }
 }

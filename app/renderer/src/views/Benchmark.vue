@@ -1065,7 +1065,7 @@ onUnmounted(stopPolling)
 .tab-btn.active {
   color: var(--primary);
   border-bottom-color: var(--primary);
-  background: #F0F7FF;
+  background: rgba(0, 122, 255, 0.08);
 }
 
 .tab-panel {
@@ -1284,17 +1284,17 @@ onUnmounted(stopPolling)
 }
 
 .badge-ok {
-  background: #E6F7F0;
+  background: rgba(52, 199, 89, 0.12);
   color: var(--success);
 }
 
 .badge-running {
-  background: #E3F2FD;
+  background: rgba(0, 122, 255, 0.12);
   color: var(--primary);
 }
 
 .badge-fail {
-  background: #FFEBEA;
+  background: rgba(255, 59, 48, 0.12);
   color: var(--danger);
 }
 
@@ -1321,11 +1321,11 @@ onUnmounted(stopPolling)
 }
 
 .data-table tbody tr:hover {
-  background: var(--bg-page);
+  background: var(--bg-hover);
 }
 
 .rank-first {
-  background: #F0F7FF;
+  background: rgba(0, 122, 255, 0.07);
 }
 
 .rank-first td {
@@ -1381,7 +1381,7 @@ onUnmounted(stopPolling)
 .cat-table .sticky-col {
   position: sticky;
   left: 0;
-  background: #FFFFFF;
+  background: var(--bg-solid);
   z-index: 1;
 }
 
@@ -1390,7 +1390,7 @@ onUnmounted(stopPolling)
 }
 
 .cat-table tbody tr:hover .sticky-col {
-  background: var(--bg-page);
+  background: var(--bg-hover);
 }
 
 /* 每题明细 */
@@ -1431,7 +1431,7 @@ onUnmounted(stopPolling)
 
 .answer-item {
   padding: 12px 0;
-  border-bottom: 1px solid var(--bg-page);
+  border-bottom: 1px solid var(--border-2);
 }
 
 .answer-item:last-child {
@@ -1514,7 +1514,7 @@ onUnmounted(stopPolling)
   margin-top: 8px;
   font-size: 12px;
   color: var(--purple);
-  background: #F3E5F5;
+  background: rgba(175, 82, 222, 0.1);
   border-radius: 8px;
   padding: 8px 10px;
 }

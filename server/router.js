@@ -3,6 +3,7 @@ const cors = require('cors')
 const axios = require('axios')
 const fs = require('fs-extra')
 const os = require('os')
+const path = require('path')
 const { StringDecoder } = require('string_decoder')
 const logger = require('./logger')
 const engine = require('./router-engine')
@@ -811,10 +812,10 @@ app.get('/api/update/check', async (req, res) => {
 
 // 启动应用内下载（服务端流式写盘，前端轮询进度）
 app.post('/api/update/download', (req, res) => {
-  const { tag, savePath } = req.body || {}
+  const { tag, savePath, assetName } = req.body || {}
   if (!tag || !savePath) return res.status(400).json({ error: '缺少版本号或保存路径' })
   try {
-    res.json(update.startDownload(tag, savePath))
+    res.json(update.startDownload(tag, savePath, assetName))
   } catch (e) {
     res.status(409).json({ error: e.message || '无法开始下载' })
   }
@@ -1968,6 +1969,18 @@ function normalizeWorkbuddyProviders() {
 
 normalizeWorkbuddyProviders()
 
+// 打包版：由网关同源托管前端（Electron 窗口加载 http://localhost:<port>），
+// 避免 file:// 页面带 Origin: null 被上面的 CORS 白名单拦截。
+// 必须在所有 API 路由之后、错误中间件之前注册；/api 与 /v1 未命中时保持原 404 语义，
+// 不能回落到 index.html（否则客户端会把 HTML 当 JSON 解析）
+const RENDERER_DIR = process.env.AIROUTE_RENDERER_DIR
+if (RENDERER_DIR && fs.existsSync(RENDERER_DIR)) {
+  app.use(express.static(RENDERER_DIR, { index: false, maxAge: 0 }))
+  app.get(/^\/(?!api(?:\/|$)|v1(?:\/|$)).*/, (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next()
+    res.sendFile(path.join(RENDERER_DIR, 'index.html'))
+  })
+}
 
 // 兜底错误处理中间件（必须放在所有路由之后）：
 //  1. 未捕获异常不再走 Express 默认处理器——它会回吐完整堆栈与绝对路径

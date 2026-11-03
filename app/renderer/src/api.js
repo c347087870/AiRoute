@@ -1,5 +1,12 @@
 import axios from 'axios'
 
+// 打包版窗口由主进程加载 http://localhost:<port>/?port=<port>：
+// 端口以 URL 参数为准写回 localStorage，避免用户改过端口后界面仍连 3000
+const urlPort = Number(new URLSearchParams(window.location.search).get('port'))
+if (Number.isInteger(urlPort) && urlPort >= 1 && urlPort <= 65535) {
+  localStorage.setItem('airoute-server-port', String(urlPort))
+}
+
 const storedPort = localStorage.getItem('airoute-server-port') || '3000'
 
 const api = axios.create({
@@ -413,8 +420,8 @@ export function checkUpdate(force = false) {
 }
 
 // 启动应用内下载（tag + 保存路径），返回初始下载状态
-export function startUpdateDownload(tag, savePath) {
-  return api.post('/api/update/download', { tag, savePath }).then(r => r.data)
+export function startUpdateDownload(tag, savePath, assetName) {
+  return api.post('/api/update/download', { tag, savePath, assetName }).then(r => r.data)
 }
 
 // 下载进度快照（前端轮询）

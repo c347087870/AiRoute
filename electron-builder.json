@@ -1,9 +1,9 @@
 {
   "appId": "com.airoute.app",
   "productName": "AiRoute",
-  "artifactName": "AiRoute.exe",
   "directories": {
-    "output": "app/dist-electron"
+    "output": "app/dist-electron",
+    "buildResources": "build"
   },
   "files": [
     "app/main/**/*",
@@ -15,8 +15,45 @@
       "to": "node_modules"
     }
   ],
+  "asarUnpack": [
+    "node_modules/node-pty/**"
+  ],
+  "npmRebuild": false,
   "win": {
     "target": "portable",
-    "icon": "app/renderer/public/icon.ico"
+    "icon": "app/renderer/public/icon.ico",
+    "artifactName": "AiRoute.exe"
+  },
+  "afterPack": "scripts/after-pack.js",
+  "mac": {
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["x64"]
+      }
+    ],
+    "category": "public.app-category.developer-tools",
+    "icon": "build/icon.icns",
+    "artifactName": "AiRoute-${version}-${arch}.dmg",
+    "hardenedRuntime": false,
+    "gatekeeperAssess": false,
+    "identity": null,
+    "extendInfo": {
+      "LSUIElement": false,
+      "NSHighResolutionCapable": true
+    }
+  },
+  "dmg": {
+    "title": "AiRoute ${version}",
+    "backgroundColor": "#F5F5F7",
+    "window": {
+      "width": 560,
+      "height": 360
+    },
+    "icon": "build/icon.icns",
+    "contents": [
+      { "x": 150, "y": 190 },
+      { "x": 410, "y": 190, "type": "link", "path": "/Applications" }
+    ]
   }
 }

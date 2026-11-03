@@ -26,7 +26,7 @@
           <span class="info-value">http://{{ ip }}:{{ serverPort }}</span>
         </div>
         <p class="note" v-if="!lanIPs.length">未检测到可用的局域网 IP：当前设备可能未连接网络，或所有网卡均为虚拟网卡。</p>
-        <p class="note">「本机」地址仅本机程序可用；局域网内其他设备（另一台电脑 / 手机）请使用「局域网」地址，两者端口相同。首次从其他设备连接失败时，请检查 Windows 防火墙是否允许 AiRoute 通过（专用网络）。端口可在「设置」页面修改，点击「重启 Server」后生效，本页展示的是当前生效端口。</p>
+        <p class="note">「本机」地址仅本机程序可用；局域网内其他设备（另一台电脑 / 手机）请使用「局域网」地址，两者端口相同。首次从其他设备连接失败时，请检查{{ isMac ? '「系统设置 → 网络 → 防火墙」中是否允许 AiRoute 接收传入连接' : 'Windows 防火墙是否允许 AiRoute 通过（专用网络）' }}。端口可在「设置」页面修改，点击「重启 Server」后生效，本页展示的是当前生效端口。</p>
 
         <h3>2. 完整路径（少数客户端需要）</h3>
         <div class="info-row">
@@ -87,7 +87,7 @@
         <ul>
           <li>左侧导航栏底部的「当前模型」下拉框</li>
           <li>状态面板「快速切换」区的模型芯片</li>
-          <li>系统托盘图标右键菜单（按 Provider 分组的二级菜单）</li>
+          <li>{{ isMac ? '菜单栏图标菜单' : '系统托盘图标右键菜单' }}（按 Provider 分组的二级菜单）</li>
           <li>Provider 管理页每个模型芯片上的「切换」按钮</li>
         </ul>
 
@@ -161,10 +161,11 @@
           <li><strong>系统状态</strong>：服务端版本与端口、应用内存占用、日志缓存占用与「清空缓存」（清空后日志页历史一并清空）</li>
         </ul>
 
-        <h3>系统托盘</h3>
+        <h3>{{ isMac ? '菜单栏图标' : '系统托盘' }}</h3>
         <ul>
-          <li>托盘图标右键菜单：顶部显示当前模型；每个 Provider 一个子菜单（模型单选切换）；独立项「Auto (智能路由)」、「打开面板」、「退出」</li>
-          <li>双击托盘图标可显示主窗口</li>
+          <li>{{ isMac ? '菜单栏图标菜单' : '托盘图标右键菜单' }}：顶部显示当前模型；每个 Provider 一个子菜单（模型单选切换）；独立项「Auto (智能路由)」、「打开面板」、「退出」</li>
+          <li v-if="isMac">关闭窗口后 AiRoute 仍在菜单栏运行，服务保持可用；要彻底退出请按 <code>Cmd+Q</code> 或选择菜单中的「退出 AiRoute」</li>
+          <li v-else>双击托盘图标可显示主窗口</li>
         </ul>
 
       </section>
@@ -173,7 +174,7 @@
       <section class="section">
         <h2>四、常见问题</h2>
 
-        <p><strong>Q：局域网内其他设备连不上？</strong><br>A：确认使用「局域网」地址且与主机处于同一网段；检查 Windows 防火墙是否放行 AiRoute；修改端口后需在「设置」页点「重启 Server」。</p>
+        <p><strong>Q：局域网内其他设备连不上？</strong><br>A：确认使用「局域网」地址且与主机处于同一网段；检查{{ isMac ? '「系统设置 → 网络 → 防火墙」是否放行 AiRoute' : 'Windows 防火墙是否放行 AiRoute' }}；修改端口后需在「设置」页点「重启 Server」。</p>
         <p><strong>Q：API Key 需要填真实的吗？</strong><br>A：不需要。AiRoute 不校验 API Key，任意非空字符串即可，推荐 <code>sk-airoute</code>。</p>
         <p><strong>Q：Auto 模式下没有配置任何路由规则会怎样？</strong><br>A：会自动兜底第一个可用 Provider，不会报错；建议至少配置一条「默认」规则。</p>
         <p><strong>Q：修改端口后为什么没生效？</strong><br>A：保存端口后需要点击「重启 Server」，之后使用新端口接入，本页地址会同步更新。</p>
@@ -191,6 +192,7 @@ import donateImg from '../assets/donate.jpg' // 打赏二维码图片，构建�
 
 const serverPort = ref(3000) // 当前服务端口，从服务端配置读取，失败时保持默认 3000
 const lanIPs = ref([]) // 本机局域网 IPv4 列表（服务端动态检测，物理网卡优先）
+const isMac = window.electronAPI?.platform === 'darwin' // 文案按运行平台切换
 
 // 本机接入地址（localhost），随端口配置动态变化
 const localhostUrl = computed(() => `http://localhost:${serverPort.value}`)
@@ -237,8 +239,21 @@ onMounted(loadConfig)
   color: var(--text-3);
 }
 
+/* 教程正文是一整块卡片：之前内容直接压在页面底色上，换成自定义背景后
+   文字与图片互相干扰、几乎看不清。收进卡片后与其它页面观感一致 */
 .tutorial-content {
-  max-width: 800px;
+  max-width: 860px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  padding: 22px 26px;
+  box-shadow: var(--shadow-card);
+}
+
+:global(.has-app-bg) .tutorial-content {
+  backdrop-filter: blur(20px) saturate(1.7);
+  -webkit-backdrop-filter: blur(20px) saturate(1.7);
+  border-color: rgba(255, 255, 255, 0.55);
 }
 
 /* 区域差异提示块（国内版 / 国际版） */
@@ -321,7 +336,7 @@ onMounted(loadConfig)
 }
 
 .section code {
-  background: #F0F4F8;
+  background: var(--bg-control);
   padding: 2px 6px;
   border-radius: 4px;
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -330,7 +345,7 @@ onMounted(loadConfig)
 }
 
 .section pre {
-  background: #F8F8F8;
+  background: var(--bg-control);
   border: 1px solid var(--border-1);
   border-radius: 10px;
   padding: 12px 16px;
@@ -347,11 +362,11 @@ onMounted(loadConfig)
 }
 
 .section .note {
-  background: #EEF6FF;
+  background: rgba(0, 122, 255, 0.08);
   border-left: 3px solid var(--primary);
   padding: 8px 12px;
   border-radius: 0 8px 8px 0;
-  color: #444444;
+  color: var(--text-2);
   font-size: 13px;
 }
 

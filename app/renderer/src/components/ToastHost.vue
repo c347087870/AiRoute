@@ -45,7 +45,7 @@ function iconOf(type) {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: #FFFFFF;
+  background: var(--bg-solid);
   border: 1px solid var(--border-3);
   border-left: 4px solid var(--success);
   border-radius: 10px;

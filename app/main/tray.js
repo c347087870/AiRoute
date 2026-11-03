@@ -1,6 +1,9 @@
-const { Tray, Menu, nativeImage, app } = require('electron')
+const { Tray, Menu, nativeImage, app, shell } = require('electron')
 const path = require('path')
+const fs = require('fs')
 const axios = require('axios')
+
+const isMac = process.platform === 'darwin'
 
 // 生产环境 server 与 main 同级（app/main、app/server）；开发环境 server 在项目根目录
 let getServerPort
@@ -10,9 +13,11 @@ try {
   getServerPort = require('../../server/paths').getServerPort
 }
 
-// 端口从统一配置读取，兼容用户修改端口后托盘功能仍然正常
+// 端口从统一配置读取，兼容用户修改端口后托盘功能仍然正常；
+// attach 模式下主进程会把实际端口写进环境变量，优先级最高
 function getApiBase() {
-  return `http://localhost:${getServerPort()}`
+  const port = process.env.AIROUTE_SERVER_PORT || getServerPort()
+  return `http://localhost:${port}`
 }
 
 // 把模型引用转成可读名称：Provider 显示名 / 模型显示名
@@ -41,16 +46,41 @@ function refLabel(providers, ref) {
 let trayRef = null
 let mainWindowRef = null
 
-function createTray(mainWindow) {
-  const iconPath = path.join(__dirname, '..', 'renderer', app.isPackaged ? 'dist' : 'public', 'icon.png')
-  let icon
-  try {
-    icon = nativeImage.createFromPath(iconPath)
-    if (icon.isEmpty()) throw new Error('empty')
-  } catch {
-    icon = nativeImage.createEmpty()
+// macOS 菜单栏图标必须是模板图（纯黑 + alpha，由系统随菜单栏明暗自动反色），
+// 彩色应用图标直接缩小会变成一团看不清的色块。
+// 1x / 2x 必须分别作为 representation 加入同一个 nativeImage：
+// createFromPath 只会加载第一个命中的文件，Retina 屏上 @2x 就永远用不到，图标会糊
+function getTrayIcon() {
+  const dir = path.join(__dirname, '..', 'renderer', app.isPackaged ? 'dist' : 'public')
+  if (!isMac) {
+    const image = nativeImage.createFromPath(path.join(dir, 'icon.png'))
+    return image.isEmpty() ? nativeImage.createEmpty() : image
   }
 
+  const image = nativeImage.createEmpty()
+  const representations = [
+    { scaleFactor: 1, name: 'trayTemplate.png' },
+    { scaleFactor: 2, name: 'trayTemplate@2x.png' }
+  ]
+  for (const { scaleFactor, name } of representations) {
+    try {
+      const buffer = fs.readFileSync(path.join(dir, name))
+      if (buffer.length) image.addRepresentation({ scaleFactor, buffer })
+    } catch {}
+  }
+  if (image.isEmpty()) return nativeImage.createEmpty()
+  image.setTemplateImage(true)
+  return image
+}
+
+function createTray(mainWindow) {
+  // 已存在托盘时只更新窗口引用，避免 macOS 菜单栏出现多个图标
+  if (trayRef) {
+    mainWindowRef = mainWindow
+    return
+  }
+
+  const icon = getTrayIcon()
   const tray = new Tray(icon)
   tray.setToolTip('AiRoute')
   trayRef = tray
@@ -63,8 +93,13 @@ function createTray(mainWindow) {
     updateMenu(tray, mainWindow)
   })
 
+  // macOS 菜单栏应用习惯：双击显示主窗口（单击默认展开菜单）
   tray.on('double-click', () => {
-    mainWindow.show()
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
   })
 }
 
@@ -75,13 +110,19 @@ function refreshTrayMenu() {
   }
 }
 
-// 托盘退出：先移除托盘图标再优雅退出，并带强制兜底，确保进程不残留、无托盘幽灵图标
-function quitApp() {
+// 退出应用前移除托盘图标，避免应用已退出、菜单栏还残留幽灵图标
+function destroyTray() {
+  if (!trayRef) return
   try {
-    if (trayRef) trayRef.destroy()
+    trayRef.destroy()
   } catch {}
   trayRef = null
+}
+
+// 托盘退出：先移除托盘图标再优雅退出，并带强制兜底，确保进程不残留
+function quitApp() {
   app.isQuitting = true
+  destroyTray()
   app.quit()
   setTimeout(() => app.exit(0), 800)
 }
@@ -92,8 +133,8 @@ async function updateMenu(tray, mainWindow) {
 
   try {
     const [stateRes, provRes] = await Promise.all([
-      axios.get(`${getApiBase()}/api/state`),
-      axios.get(`${getApiBase()}/api/providers`)
+      axios.get(`${getApiBase()}/api/state`, { timeout: 4000 }),
+      axios.get(`${getApiBase()}/api/providers`, { timeout: 4000 })
     ])
     currentModel = stateRes.data.current
     providers = provRes.data
@@ -104,7 +145,7 @@ async function updateMenu(tray, mainWindow) {
   // 切换模型：写入服务端后重建菜单，保证所有勾选项状态一致
   const switchTo = (ref) => async () => {
     try {
-      await axios.post(`${getApiBase()}/api/state`, { current: ref })
+      await axios.post(`${getApiBase()}/api/state`, { current: ref }, { timeout: 4000 })
       mainWindow.webContents.send('tray-switch-model', ref)
       updateMenu(tray, mainWindow)
     } catch {}
@@ -132,6 +173,13 @@ async function updateMenu(tray, mainWindow) {
     })
   }))
 
+  const showWindow = () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+
   const contextMenu = Menu.buildFromTemplate([
     { label: `AiRoute - 当前: ${refLabel(providers, currentModel)}`, enabled: false },
     { type: 'separator' },
@@ -143,11 +191,19 @@ async function updateMenu(tray, mainWindow) {
       click: switchTo('auto')
     },
     { type: 'separator' },
-    { label: '打开面板', click: () => mainWindow.show() },
-    { label: '退出', click: quitApp }
+    { label: isMac ? '打开主窗口' : '打开面板', click: showWindow },
+    {
+      label: isMac ? '在 Finder 中打开数据目录' : '打开数据目录',
+      click: () => {
+        const dir = process.env.AIROUTE_DATA_DIR
+        if (dir) shell.openPath(dir)
+      }
+    },
+    { type: 'separator' },
+    { label: isMac ? '退出 AiRoute' : '退出', click: quitApp }
   ])
 
   tray.setContextMenu(contextMenu)
 }
 
-module.exports = { createTray, refreshTrayMenu }
+module.exports = { createTray, refreshTrayMenu, destroyTray }

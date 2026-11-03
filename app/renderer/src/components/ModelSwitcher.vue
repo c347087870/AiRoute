@@ -67,12 +67,19 @@ onMounted(() => {
 
 .model-select {
   width: 100%;
-  background: var(--bg-page);
+  /* 用控件表面色而不是 --bg-page：开启背景图后 --bg-page 是透明的，
+     用它会变成「下拉框直接压在图片上」，完全看不清 */
+  background: var(--bg-control);
   border: 1px solid var(--border-3);
   color: var(--text-1);
   padding: 8px 10px;
   border-radius: 10px;
   font-size: 13px;
   cursor: pointer;
+}
+
+.has-app-bg .model-select {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 </style>

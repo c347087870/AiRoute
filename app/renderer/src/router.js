@@ -7,6 +7,7 @@ import Logs from './views/Logs.vue'
 import TokenStats from './views/TokenStats.vue'
 import Benchmark from './views/Benchmark.vue'
 import Settings from './views/Settings.vue'
+import Developer from './views/Developer.vue'
 import Tutorial from './views/Tutorial.vue'
 
 const routes = [
@@ -19,6 +20,7 @@ const routes = [
   { path: '/token-stats', name: 'TokenStats', component: TokenStats },
   { path: '/benchmark', name: 'Benchmark', component: Benchmark },
   { path: '/settings', name: 'Settings', component: Settings },
+  { path: '/developer', name: 'Developer', component: Developer },
   { path: '/tutorial', name: 'Tutorial', component: Tutorial }
 ]
 

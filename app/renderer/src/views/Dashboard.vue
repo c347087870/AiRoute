@@ -381,7 +381,7 @@ onMounted(async () => {
 /* 失败数提示，鼠标悬停显示完整口径说明 */
 .stat-failed {
   font-size: 11px;
-  color: #B0B0B0;
+  color: var(--text-3);
   margin-top: 4px;
   cursor: help;
 }
@@ -428,11 +428,13 @@ onMounted(async () => {
 }
 
 .chip {
-  background: var(--bg-page);
+  background: var(--bg-control);
   border: 1px solid var(--border-3);
   color: var(--text-2);
   padding: 8px 16px;
   border-radius: 20px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   font-size: 13px;
   cursor: pointer;
   transition: all 0.15s;
@@ -516,12 +518,12 @@ onMounted(async () => {
 }
 
 .token-badge.today {
-  background: #E3F2FD;
+  background: rgba(25, 118, 210, 0.1);
   color: #1976D2;
 }
 
 .token-badge.month {
-  background: #F3E5F5;
+  background: rgba(123, 31, 162, 0.1);
   color: #7B1FA2;
 }
 

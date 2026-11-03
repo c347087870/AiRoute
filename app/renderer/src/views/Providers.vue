@@ -770,12 +770,19 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   gap: 16px;
-  background: #FFFFFF;
+  /* 与 .card 同一表面色：开启背景后一起变成白色玻璃，不会孤零零一块纯白 */
+  background: var(--bg-card);
   border: 1px solid var(--border-1);
   border-left: 3px solid transparent;
   border-radius: 12px;
   padding: 14px 18px;
   transition: box-shadow 0.15s, border-color 0.15s, background 0.15s;
+}
+
+:global(.has-app-bg) .provider-row {
+  backdrop-filter: blur(20px) saturate(1.7);
+  -webkit-backdrop-filter: blur(20px) saturate(1.7);
+  border-color: rgba(255, 255, 255, 0.55);
 }
 
 .provider-row:hover {
@@ -785,7 +792,7 @@ onMounted(() => {
 
 .provider-row.active {
   border-left-color: var(--primary);
-  background: #FAFCFF;
+  background: rgba(0, 122, 255, 0.06);
 }
 
 .row-main {
@@ -812,7 +819,7 @@ onMounted(() => {
 .row-id {
   font-size: 11px;
   color: var(--text-3);
-  background: var(--bg-page);
+  background: var(--bg-control);
   border-radius: 6px;
   padding: 2px 7px;
   font-family: 'Courier New', Consolas, monospace;
@@ -921,7 +928,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: #FAFCFF;
+  background: var(--bg-control);
 }
 
 /* 区块标题行（标题 + 右侧跳转链接） */
@@ -1029,7 +1036,7 @@ onMounted(() => {
   padding: 3px 4px;
   border: 1px solid var(--border-1);
   border-radius: 6px;
-  background: #FFFFFF;
+  background: var(--bg-control);
   color: var(--text-1);
   cursor: pointer;
 }
@@ -1046,7 +1053,7 @@ onMounted(() => {
   padding: 3px 6px;
   border: 1px solid var(--border-1);
   border-radius: 6px;
-  background: #FFFFFF;
+  background: var(--bg-control);
   color: var(--text-1);
 }
 
@@ -1059,14 +1066,14 @@ onMounted(() => {
   font-size: 11px;
   font-family: 'Courier New', Consolas, monospace;
   color: var(--text-2);
-  background: #EEF3FA;
+  background: var(--bg-control);
   border-radius: 4px;
   padding: 2px 6px;
 }
 
 .row-count {
   font-size: 12px;
-  color: #B0B0B0;
+  color: var(--text-4);
 }
 
 /* 端点信息：等宽字体 + 超长截断，避免撑破行 */
@@ -1085,13 +1092,13 @@ onMounted(() => {
 
 .meta-label {
   font-size: 11px;
-  color: #B0B0B0;
+  color: var(--text-4);
   flex-shrink: 0;
 }
 
 .meta-value {
   font-size: 12px;
-  color: #555555;
+  color: var(--text-2);
   font-family: 'Courier New', Consolas, monospace;
   max-width: 320px;
   overflow: hidden;
@@ -1121,7 +1128,7 @@ onMounted(() => {
 
 .model-chip.current {
   border-color: var(--success);
-  background: #F3FDF8;
+  background: rgba(52, 199, 89, 0.1);
 }
 
 .chip-name {
@@ -1133,16 +1140,16 @@ onMounted(() => {
 }
 
 .chip-meta {
-  color: #B0B0B0;
+  color: var(--text-4);
   font-size: 11px;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .chip-use {
-  background: #FFFFFF;
+  background: var(--bg-control);
   border: 1px solid var(--border-3);
-  color: #888888;
+  color: var(--text-3);
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 12px;
@@ -1177,7 +1184,7 @@ onMounted(() => {
 
 .model-empty {
   font-size: 12px;
-  color: #C0C0C0;
+  color: var(--text-4);
 }
 
 /* 测试结果内联展示 */
@@ -1216,7 +1223,7 @@ onMounted(() => {
     width: 100%;
     justify-content: flex-end;
     padding-top: 4px;
-    border-top: 1px solid var(--bg-page);
+    border-top: 1px solid var(--border-2);
   }
 
   .meta-value {
@@ -1310,7 +1317,7 @@ onMounted(() => {
 
 .key-eye-btn:hover,
 .key-copy-btn:hover {
-  background: var(--bg-page);
+  background: var(--bg-hover);
   border-color: var(--primary);
 }
 
@@ -1346,7 +1353,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: #FFFFFF;
+  background: var(--bg-control);
   border: 1px solid var(--border-1);
   border-radius: 10px;
   padding: 10px;
@@ -1423,7 +1430,7 @@ onMounted(() => {
 
 .model-editor-empty {
   font-size: 12px;
-  color: #B0B0B0;
+  color: var(--text-4);
 }
 
 .form-actions {
