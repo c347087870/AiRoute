@@ -2,6 +2,21 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.2] - 2026-11-03
+
+Qoder 请求形态与官方桌面端对齐：签名版本号不再写死，补齐官方那组 `X-*` 请求头。
+
+### 修复
+
+- **Qoder 签名版本号写死 `1.0.0`（P0）**：签名载荷里带客户端版本，原实现只在环境变量 `AIROUTE_QODER_CLIENT_VERSION` 存在时才用它，否则一律回落到常量 `1.0.0`。官方抬版本后这个值会被判成「非官方客户端」而返回 430 —— 项目里 `version-sync.js` 的注释与 `desktopHeaders` 早就按「版本过旧会被判非官方」处理，只有签名这条路径没接上。现改为「环境变量 > `version-sync` 每日同步的官网版本 > 内置兜底」三级取值，与 `desktopHeaders` 同源。实测未传时 `Cosy-Version=1.0.0`，传 `0.5.2` 后与官方一致
+- **Qoder 缺官方桌面端的 `X-*` 请求头（P0）**：官方客户端（`electronMain` 的 `W70`）在 `Cosy-*` 之外还会发 `X-Request-Id` / `X-IDE-Platform` / `X-Version` / `X-Machine-OS` / `X-Machine-Id` / `X-Machine-Type` / `X-Machine-Code`，而 WASM 只产出 `Cosy-*`，这组全缺 → 请求形态与官方不一致。现补齐其中**能确定性获取**的三项：`X-Machine-Id`（同 `credential.machine_id`）、`X-Version`（同 `Cosy-Version`）、`X-Machine-Code`（官方无值时就是空串）
+- **平台类字段刻意不补**：`X-IDE-Platform` / `X-Machine-OS` / `X-Machine-Type` 在官方取自混淆常量表 + 系统采集，静态还原不出确切字面量。宁可缺失也不臆造 —— 猜错（如官方发 `win32` 而这里发 `windows`）比缺失更容易触发异常判定。等抓包拿到真实值再补
+
+### 测试
+
+- `test-qoder-optimizations` 新增 1 条用例（9 → 10 项）：断言 `X-Version` 必须跟随 `clientVersion`、`X-Machine-Id` 必须与传入一致、且未确认的 `X-IDE-Platform` 不得出现
+- 全量回归：`test-workbuddy` 280 项、`test-channels` 11/11、`test-channel-plugins` 11 项，全部通过
+
 ## [2.0.1] - 2026-10-29
 
 渠道插件与上游对齐的一轮：Trae 登录按客户端实测参数重写、渠道设置拆到每家、WorkBuddy 错误分诊与状态落盘修完，另加官网版本号自动同步。
