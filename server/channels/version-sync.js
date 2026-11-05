@@ -25,7 +25,8 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // 内置默认值：上游拉不到时的底线。随代码更新，新版本以同步结果为准。
 const FALLBACK = {
   trae: { appVersion: '3.4.9', pluginVersion: '2.3.97430' },
-  qoder: { appVersion: '0.4.11' },
+  // Qoder 客户端版本（0.x 体系）。不要填 changelog 里的 1.x，那是 IDE 内核线。
+  qoder: { appVersion: '0.5.3' },
 }
 const REFRESH_INTERVAL_MS = 24 * 3600 * 1000
 
@@ -100,8 +101,26 @@ function readTraeLocalVersion() {
 
 // ── Qoder 数据源 ──
 
-// qoder.com/changelog 是 Next.js RSC：payload 里 \uXXXX 转义的 JSON，
-// 每条发布记录有 tag_name / published_at / type。type=ide 是桌面 IDE。
+// Qoder 桌面客户端的版本**只能**从官方 updater 元数据取。
+//
+// 为什么不能用 qoder.com/changelog：那里的 type='ide' 是 **IDE 内核线（1.x）**，
+// 与桌面客户端（0.x）不是同一套版本体系。拿 1.38.0 当客户端版本会让
+// Cosy-Version 头与签名载荷都发错值 —— 比写死一个偏低的版本更容易被判异常。
+//
+// latest.yml 是 electron-updater 的官方元数据，客户端自己就用它判断要不要更新，
+// 它里面的 version 字段就是产品版本。
+async function fetchQoderLatestYmlVersion() {
+  const response = await fetchWithTimeout('https://static.qoder.com.cn/qoder-app/releases/latest.yml')
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const text = await response.text()
+  // 形如 `version: 0.5.3`，取第一处即可（后面 files[] 里没有同名顶层字段）
+  const m = /^version:\s*(\d+\.\d+\.\d+)\s*$/m.exec(text)
+  if (!m) throw new Error('latest.yml 里没有 version 字段')
+  return m[1]
+}
+
+// 保留旧实现：万一 latest.yml 不可用，changelog 仍能提供「有新版发布」这个信号。
+// 但它的值**不可**当客户端版本用，只作最后兜底。
 async function fetchQoderChangelogVersion() {
   const response = await fetchWithTimeout('https://qoder.com/changelog')
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -168,19 +187,33 @@ async function refreshVersions() {
     result.trae.pluginVersion = (traeLocal && traeLocal.pluginVersion) || FALLBACK.trae.pluginVersion
   }
 
-  // Qoder：changelog vs 本机 launcher，取最大
+  // Qoder：官方 updater 元数据优先，取不到才回落 changelog / 本机 launcher。
+  //
+  // ⚠️ 不能把 changelog 与本机版本「取最大」：changelog 是 IDE 内核线（1.x），
+  // 与客户端版本（0.x）不同体系，取最大必然选中 1.x 的错误值。
+  // 正确顺序：latest.yml（权威）→ 本机 launcher → 内置兜底。
   try {
-    result.sources.qoderDocs = await fetchQoderChangelogVersion()
+    result.sources.qoderLatestYml = await fetchQoderLatestYmlVersion()
   } catch (error) {
-    result.sources.qoderDocs = `失败：${error.message}`
+    result.sources.qoderLatestYml = `失败：${error.message}`
   }
+  const qoderYml = versionOrNull(result.sources.qoderLatestYml)
   const qoderLocal = readQoderLocalVersion()
   if (qoderLocal) result.sources.qoderLocal = qoderLocal
-  const qoderMax = maxVersion([
-    versionOrNull(result.sources.qoderDocs),
-    versionOrNull(qoderLocal),
-  ])
-  if (qoderMax) result.qoder.appVersion = qoderMax.raw
+
+  if (qoderYml) {
+    result.qoder.appVersion = qoderYml.raw
+  } else {
+    // latest.yml 不可用：本机 launcher 版本（同体系、只是可能过期）> 内置兜底
+    const localVer = versionOrNull(qoderLocal)
+    if (localVer) result.qoder.appVersion = localVer.raw
+    // changelog 只记录，不参与取值 —— 它的体系与客户端版本不同
+    try {
+      result.sources.qoderChangelog = await fetchQoderChangelogVersion()
+    } catch (error) {
+      result.sources.qoderChangelog = `失败：${error.message}`
+    }
+  }
 
   return result
 }

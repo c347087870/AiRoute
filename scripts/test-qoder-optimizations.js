@@ -196,6 +196,17 @@ async function main() {
     assert.ok(!('X-IDE-Platform' in out.headers), '未确认的 X-IDE-Platform 不应臆造')
   })
 
+  await test('版本体系：Qoder 客户端版本必须是 0.x，不能混入 changelog 的 1.x 内核线', async () => {
+    // 2026-11-03 的教训：把 qoder.com/changelog 里 type='ide' 的 1.38.0 当成客户端版本，
+    // 导致 Cosy-Version 比官方高两个数量级。客户端版本是 0.x 体系。
+    const vs = require('../server/channels/version-sync')
+    const p = require('../server/channels/plugins/qoder/protocol')
+
+    const fallback = vs.FALLBACK.qoder.appVersion
+    assert.ok(/^0\./.test(fallback), `FALLBACK.qoder 应是 0.x 客户端版本，实际 ${fallback}`)
+    assert.ok(/^0\./.test(p.DESKTOP_CLIENT_VERSION), `DESKTOP_CLIENT_VERSION 应是 0.x，实际 ${p.DESKTOP_CLIENT_VERSION}`)
+  })
+
   console.log('')
   if (failed > 0) {
     console.log(`${passed} 项通过，${failed} 项失败`)

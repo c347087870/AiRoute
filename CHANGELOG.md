@@ -2,6 +2,21 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.4] - 2026-11-05
+
+修复 2.0.2 引入的回归：Qoder 客户端版本取错了数据源。
+
+### 修复
+
+- **Qoder 签名版本号取自错误的版本体系（2.0.2 回归，P0）**：2.0.2 把签名版本从写死 `1.0.0` 改为读 `version-sync`，方向对但**数据源错了**。`version-sync` 从 `qoder.com/changelog` 筛 `type:'ide'` 拿到的是 **IDE 内核线 `1.38.0`**，而桌面客户端是 **`0.5.3`** —— 两个完全不同的版本体系。生产环境实测 `channel-versions.json` 里 `qoder.appVersion = 1.38.0`，即实际发送 `Cosy-Version: 1.38.0`，比修之前的 `1.0.0` 更容易被判异常。现改用官方 updater 元数据 `https://static.qoder.com.cn/qoder-app/releases/latest.yml` 的 `version` 字段（客户端自己就用它判断更新，是产品版本的权威来源）。实测 `Cosy-Version` 与 `X-Version` 均回到 `0.5.3`
+- **Qoder 版本取值不再「取最大」**：原逻辑把 `changelog` 值与本机 launcher 版本取最大值，跨体系比较必然选中错误的 1.x。现改为固定优先级：`latest.yml`（权威）> 本机 launcher > 内置兜底。`changelog` 降级为仅记录、不参与取值
+- **兜底常量同步更新**：`version-sync.FALLBACK.qoder` `0.4.11` → `0.5.3`，`protocol.DESKTOP_CLIENT_VERSION` `0.4.8` → `0.5.3`。两处都是「所有网络源都失败」时的最后防线，此前落后 3 个版本
+
+### 测试
+
+- `test-qoder-optimizations` 新增 1 条用例（10 → 11 项）：断言 `FALLBACK.qoder` 与 `DESKTOP_CLIENT_VERSION` 必须落在 `0.x` 客户端体系，防止再次混入 changelog 的 1.x 内核线
+- 全量回归：`test-workbuddy` 280 项、`test-channels` 11/11、`test-channel-plugins` 11 项，全部通过
+
 ## [2.0.3] - 2026-11-03
 
 Windows 安装版一键升级修到可用：换成不落在安装目录里的启动器，半升级与退出码 2 都消掉。

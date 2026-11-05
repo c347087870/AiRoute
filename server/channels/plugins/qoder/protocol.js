@@ -41,7 +41,9 @@ const CHECKIN_STATUS_PATH = '/sash/api/v1/me/daily-check-in/status'
 const CHECKIN_CLAIM_PATH = '/sash/api/v1/me/daily-check-in/claim'
 // 桌面端身份：活动平台缺任一都会「200 + 空列表」
 const DESKTOP_CLIENT_TYPE = '10'
-const DESKTOP_CLIENT_VERSION = '0.4.8'
+// 兜底客户端版本：仅在 version-sync 完全拿不到值时才用（正常走 latest.yml 同步）。
+// 注意这是 **0.x 客户端体系**，不要填 changelog 里 type='ide' 的 1.x 内核版本。
+const DESKTOP_CLIENT_VERSION = '0.5.3'
 
 // PKCE 字符集：RFC 7636 的 unreserved（66 个），与官方实现同一集合
 const PKCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
