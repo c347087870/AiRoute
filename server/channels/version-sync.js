@@ -187,16 +187,28 @@ async function refreshVersions() {
     result.trae.pluginVersion = (traeLocal && traeLocal.pluginVersion) || FALLBACK.trae.pluginVersion
   }
 
-  // Qoder：官方 updater 元数据优先，取不到才回落 changelog / 本机 launcher。
+  // Qoder 版本有两条独立数据源，职责不同：
   //
-  // ⚠️ 不能把 changelog 与本机版本「取最大」：changelog 是 IDE 内核线（1.x），
-  // 与客户端版本（0.x）不同体系，取最大必然选中 1.x 的错误值。
-  // 正确顺序：latest.yml（权威）→ 本机 launcher → 内置兜底。
+  //   sources.qoderDocs  = changelog 的 type:'ide' 版本 → **IDE 内核线（1.x）**，
+  //                        只作「上游有没有发新版」的信号，**不可当客户端版本用**
+  //   sources.qoderLatestYml = 官方 updater 的 version → **客户端版本（0.x）**，权威
+  //
+  // ⚠️ 绝不能把两者「取最大」：跨体系比较必然选中 1.x 的错误值。
+  // 那是 2.0.2~2.0.3 的 bug（签名发 Cosy-Version: 1.38.0，官方是 0.5.3）。
+  // 现在的取值顺序固定为：latest.yml > 本机 launcher > 内置兜底。
+  //
+  // changelog 仍然无条件拉取并记录（观测用，也让「上游发布节奏」可见）。
+  try {
+    result.sources.qoderDocs = await fetchQoderChangelogVersion()
+  } catch (error) {
+    result.sources.qoderDocs = `失败：${error.message}`
+  }
   try {
     result.sources.qoderLatestYml = await fetchQoderLatestYmlVersion()
   } catch (error) {
     result.sources.qoderLatestYml = `失败：${error.message}`
   }
+
   const qoderYml = versionOrNull(result.sources.qoderLatestYml)
   const qoderLocal = readQoderLocalVersion()
   if (qoderLocal) result.sources.qoderLocal = qoderLocal
@@ -204,15 +216,10 @@ async function refreshVersions() {
   if (qoderYml) {
     result.qoder.appVersion = qoderYml.raw
   } else {
-    // latest.yml 不可用：本机 launcher 版本（同体系、只是可能过期）> 内置兜底
+    // latest.yml 不可用：本机 launcher 版本（同体系、只是可能过期）> 内置兜底。
+    // 注意**不**回落到 qoderDocs（1.x 体系）。
     const localVer = versionOrNull(qoderLocal)
     if (localVer) result.qoder.appVersion = localVer.raw
-    // changelog 只记录，不参与取值 —— 它的体系与客户端版本不同
-    try {
-      result.sources.qoderChangelog = await fetchQoderChangelogVersion()
-    } catch (error) {
-      result.sources.qoderChangelog = `失败：${error.message}`
-    }
   }
 
   return result
