@@ -72,7 +72,12 @@ jobs:
         include:
           # electron-builder.json 里 mac / win 都配了 x64 + arm64，一个 job 出全部架构：
           # macOS runner 是 arm64，交叉打 x64 dmg 没问题；Windows runner 是 x64，同样能交叉打 arm64
-          - os: macos-14
+          #
+          # macOS 用 macos-latest 而不是钉死 macos-14：2026-11-06 起 macos-14 的
+          # arm64 规格出现「配置不受支持 / 0 秒 cancelled / 未分配 runner」，
+          # 2.0.5 连续三次重跑都卡在这里（2.0.4 同样配置还是好的，属平台侧波动）。
+          # macos-latest 会跟随 GitHub 的稳定镜像，避免钉死某一代被下线。
+          - os: macos-latest
             platform: mac
             buildArg: --mac
           - os: windows-latest
