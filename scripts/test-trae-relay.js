@@ -337,6 +337,28 @@ async function main() {
     }
   })
 
+  await test('设备画像：与真实运行环境一致，且两处平台口径不打架', async () => {
+    // 曾经写死 macOS + Apple，在 Windows 上 soloHeaders 自称 macos、
+    // checkinHeaders 又发 windows —— 同一份代码两个身份，是最容易被判异常的特征。
+    const os = require('os')
+    const platformMap = { win32: 'windows', darwin: 'macos', linux: 'linux' }
+    const expected = platformMap[os.platform()] || 'linux'
+
+    const solo = protocol.soloHeaders({ access_token: 't', uid: 'u' }, true)
+    const checkin = protocol.checkinHeaders({ access_token: 't', uid: 'u' })
+
+    assert.equal(solo['X-Device-Type'], expected, `X-Device-Type 应与真实平台一致（期望 ${expected}）`)
+    assert.equal(checkin['X-Lscbd-Platform'], expected, `X-Lscbd-Platform 应与真实平台一致（期望 ${expected}）`)
+    assert.equal(solo['X-Device-Type'], checkin['X-Lscbd-Platform'], '两个头的平台口径必须一致')
+    assert.ok(solo['X-OS-Version'], 'X-OS-Version 不能为空')
+    assert.ok(solo['X-Device-Brand'], 'X-Device-Brand 不能为空')
+    // 回归防线：不得再出现写死的 macOS 指纹
+    if (os.platform() !== 'darwin') {
+      assert.notEqual(solo['X-Device-Type'], 'macos', '非 macOS 机器不得自称 macos')
+      assert.ok(!/macOS/i.test(solo['X-OS-Version']), '非 macOS 机器不得发 macOS 版本号')
+    }
+  })
+
   console.log(`\n${passed} passed, ${failed} failed`)
   if (failed > 0) process.exitCode = 1
 }

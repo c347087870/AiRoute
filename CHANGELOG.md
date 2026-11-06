@@ -2,6 +2,23 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.5] - 2026-11-06
+
+Trae 设备画像改为跟随真实运行环境，消除「Windows 上自称 macOS」的自相矛盾。
+
+### 修复
+
+- **Trae 请求固定发送 macOS 设备指纹（P0）**：`soloHeaders` 里把 `X-Device-Type` / `X-OS-Version` / `X-Device-Brand` 写死成 `macos` / `macOS 15.7.4` / `Apple`，而同一份代码的 `checkinHeaders` 又发 `X-Lscbd-Platform: windows` —— 一次请求里出现两个互相矛盾的身份声明。官方客户端是从 `systeminformation` 采集真实值（`osName` / `osVersion` / `deviceModel`）后逐项填进这三个头的。现新增 `deviceProfile()`，按真实平台返回：Windows → `windows` + 系统版本 + `Microsoft`；macOS → `macos` + 系统版本 + `Apple`；其余 → `linux`。实测本机（Windows 11 Home China）现在发 `X-Device-Type: windows`、`X-OS-Version: Windows 11 Home China`、`X-Device-Brand: Microsoft`
+- **两处平台口径统一**：`checkinHeaders` 的 `X-Lscbd-Platform` 原来写死 `windows`，现与 `soloHeaders` 共用同一个 `deviceProfile()`，不再可能打架
+
+> 说明：写死成「另一台机器」比缺失更糟 —— 真实用户不会在 Windows 上发 macOS 指纹。
+> 登录页那几个 `LOGIN_*` 常量本来取自真实 Windows 机器，与当前环境一致，未改动。
+
+### 测试
+
+- `test-trae-relay` 新增 1 条用例（19 → 20 项）：断言 `X-Device-Type` 与 `X-Lscbd-Platform` 都必须等于真实平台、两者必须一致；非 macOS 机器上出现 `macos` 或 `macOS` 字样即失败
+- 全量回归：`test-workbuddy` 280 项、`test-channels` 11/11、`test-channel-plugins` 11 项、`test-qoder-optimizations` 11 项、`test-version-sync` 6/6、`test-trae-credits` 18/18，全部通过
+
 ## [2.0.4] - 2026-11-05
 
 修复 2.0.2 引入的回归：Qoder 客户端版本取错了数据源。

@@ -22,6 +22,32 @@
 // `done`），不是 OpenAI 标准帧，必须解析后重映射（见 sse.js）。
 
 const crypto = require('crypto')
+const os = require('os')
+
+// 设备画像：必须反映**真实运行环境**。
+//
+// 官方客户端从 systeminformation 采集真实值（osName / osVersion / deviceModel），
+// 逐项写进 x-device-type / x-os-version / x-device-brand。之前这里写死成
+// macOS + Apple，在 Windows 上会自相矛盾：soloHeaders 自称 macOS，
+// checkinHeaders 又发 X-Lscbd-Platform: windows —— 同一份代码两个身份，
+// 是最容易被上游判定「非官方客户端」的特征之一。
+//
+// 注意：写死成「另一台机器」比缺失更糟。真实用户不会在 Windows 上发 macOS 指纹。
+function deviceProfile() {
+  const platform = os.platform()
+  if (platform === 'win32') {
+    return {
+      type: 'windows',
+      // os.version() 返回形如「Windows 11 Home China」；取不到时退回数字版本
+      osVersion: os.version() || `Windows ${os.release()}`,
+      brand: 'Microsoft',
+    }
+  }
+  if (platform === 'darwin') {
+    return { type: 'macos', osVersion: `macOS ${os.release()}`, brand: 'Apple' }
+  }
+  return { type: 'linux', osVersion: os.release(), brand: 'Generic' }
+}
 
 const AGENT_HOST = 'https://trae-api-cn.mchost.guru'
 const UG_HOST = 'https://api.trae.cn'
@@ -189,6 +215,7 @@ function displayName(credential, fallbackId) {
 // 同一个 token 要挂在三个头上（Authorization / X-Cloudide-Token / X-Ide-Token），
 // 实测缺任一个都可能被拒
 function soloHeaders(credential, stream) {
+  const device = deviceProfile()
   const headers = {
     'Content-Type': 'application/json',
     Accept: stream ? 'text/event-stream' : 'application/json',
@@ -203,9 +230,9 @@ function soloHeaders(credential, stream) {
     'X-Ide-Version-Code': IDE_VERSION_CODE,
     'X-App-Version-Code': IDE_VERSION_CODE,
     'X-Ide-Version-Type': 'stable',
-    'X-Device-Type': 'macos',
-    'X-OS-Version': 'macOS 15.7.4',
-    'X-Device-Brand': 'Apple',
+    'X-Device-Type': device.type,
+    'X-OS-Version': device.osVersion,
+    'X-Device-Brand': device.brand,
     'Request-Traffic-Type': 'prod',
   }
   if (credential.machine_id) headers['X-Machine-Id'] = credential.machine_id
@@ -226,6 +253,7 @@ function oauthHeaders() {
 // 设备身份按 user_id 确定性派生，每个账号独享，避免「每设备每天一次」互斥。
 function checkinHeaders(credential) {
   const userId = credential.uid
+  const device = deviceProfile()
   return {
     'Content-Type': 'application/json',
     Accept: '*/*',
@@ -240,7 +268,8 @@ function checkinHeaders(credential) {
     'X-Lgw-Req-Sdk-Type': '3',
     'Package-Type': 'stable_cn',
     'X-Lscbd-Aid': '787976',
-    'X-Lscbd-Platform': 'windows',
+    // 与 soloHeaders 用同一份 deviceProfile，避免两处平台口径打架
+    'X-Lscbd-Platform': device.type,
     'App-Version': IDE_VERSION,
     'X-Tt-Trace-Id': `00-${crypto.randomBytes(8).toString('hex')}-01`,
     'Vscode-Sessionid': derivedHex(32, userId, 'sess'),
