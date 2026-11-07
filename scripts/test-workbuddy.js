@@ -3694,10 +3694,11 @@ async function main() {
     assert.strictEqual(portable[0], `AiRoute-1.7.0-beta.2-${arch}-portable.exe`, '便携版首选便携包')
     assert.strictEqual(portable[1], `AiRoute-1.7.0-beta.2-${arch}-setup.exe`, '便携包缺失时回退到安装包')
 
-    // 一键升级只认安装版安装包：便携包跑起来只会解包并启动一个新实例，不能拿来「升级」
+    // 一键升级优先 zip 覆盖包（应用自己解压覆盖安装目录），旧版本回落 -setup.exe；
+    // 便携包跑起来只会解包并启动一个新实例，不能拿来「升级」
     assert.deepStrictEqual(
       update.installAssetCandidates('v1.7.0-beta.2', 'installer'),
-      [`AiRoute-1.7.0-beta.2-${arch}-setup.exe`]
+      [`AiRoute-1.7.0-beta.2-${arch}.zip`, `AiRoute-1.7.0-beta.2-${arch}-setup.exe`]
     )
   })
 
@@ -3719,10 +3720,15 @@ async function main() {
       return
     }
 
-    // Windows 每个架构两类产物：安装版（-setup.exe，支持一键升级）+ 便携版（-portable.exe）
+    // Windows 每个架构三类产物：安装版（-setup.exe）、便携版（-portable.exe）、
+    // 覆盖安装包（.zip，应用内一键升级用的载荷）
     for (const arch of ['x64', 'arm64']) {
       const names = builds.filter(b => b.arch === arch).map(b => b.name).sort()
-      assert.deepStrictEqual(names, [`AiRoute-1.7.0-beta.2-${arch}-setup.exe`, `AiRoute-1.7.0-beta.2-${arch}-portable.exe`].sort())
+      assert.deepStrictEqual(names, [
+        `AiRoute-1.7.0-beta.2-${arch}.zip`,
+        `AiRoute-1.7.0-beta.2-${arch}-portable.exe`,
+        `AiRoute-1.7.0-beta.2-${arch}-setup.exe`
+      ].sort())
     }
     assert.strictEqual(section.artifactName, 'AiRoute-${version}-${arch}.${ext}', 'win 段的默认模板（安装版 / 便携版各自覆盖）')
     assert.strictEqual(config.portable.artifactName, 'AiRoute-${version}-${arch}-portable.${ext}', '便携版用 -portable 后缀，两类产物一眼可辨')
@@ -3736,6 +3742,10 @@ async function main() {
     const portable = builds.find(b => b.target === 'portable' && b.arch === arch)
     assert.ok(setup, `应存在 nsis 产物（${arch}）`)
     assert.ok(portable, `应存在 portable 产物（${arch}）`)
+    // zip 必须是一键升级的首选载荷，否则下载名与产物体对不上
+    const zip = builds.find(b => b.target === 'zip' && b.arch === arch)
+    assert.ok(zip, `应存在 zip 产物（${arch}）`)
+    assert.strictEqual(update.installAssetCandidates('v1.7.0-beta.2', 'installer')[0], zip.name)
     assert.ok(update.installAssetCandidates('v1.7.0-beta.2', 'installer').includes(setup.name))
     assert.strictEqual(update.assetCandidates('v1.7.0-beta.2', 'portable')[0], portable.name)
     assert.strictEqual(update.assetCandidates('v1.7.0-beta.2', 'installer')[1], portable.name)

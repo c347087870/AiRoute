@@ -289,14 +289,22 @@ function isWindowsSetupArtifact(name) {
   return /-setup\.exe$/i.test(base)
 }
 
-// 一键升级（Windows）：校验安装包 SHA-256 → 拉起 PowerShell 启动器，由它等本进程退出后
-// 静默安装并重启应用。返回 { launcherPid, exitFile }；调用方拿到结果后负责退出应用。
-// 启动器脚本与「为什么不用 Electron 助手」见 ./win-update-launcher.js
+// 一键升级可用的载荷：zip（覆盖安装，主路径）或 -setup.exe（旧版本没有 zip 资产时回落）。
+// 两者都不是便携包：便携包跑起来只会解包启动自己，覆盖不了已安装的文件
+function isWindowsUpdateArtifact(name) {
+  const base = path.basename(String(name || ''))
+  return /\.zip$/i.test(base) || isWindowsSetupArtifact(base)
+}
+
+// 一键升级（Windows）：校验载荷 SHA-256 → 拉起 PowerShell 启动器，由它等本进程退出后
+// 把新版本覆盖到安装目录并重启应用。返回 { launcherPid, exitFile }；调用方拿到结果后负责退出应用。
+// 启动器脚本与「为什么不用 NSIS 安装包」见 ./win-update-launcher.js
 async function applyWindowsUpdate(options) {
   const {
     target,
     artifactPath,
     sha256,
+    version,
     updateDir,
     pid = process.pid,
     spawnLauncher = launcher.spawnLauncher,
@@ -308,22 +316,30 @@ async function applyWindowsUpdate(options) {
   if (!expected) throw new Error('缺少 SHA-256 校验值，已停止升级')
   if (!isInside(updateDir, artifactPath)) throw new Error('安装包路径非法')
   if (!fs.existsSync(artifactPath)) throw new Error('安装包不存在，请重新下载')
-  if (!isWindowsSetupArtifact(artifactPath)) throw new Error('安装包不是安装版（-setup.exe），无法一键升级')
+  if (!isWindowsUpdateArtifact(artifactPath)) throw new Error('更新包格式不正确（需要 .zip 或 -setup.exe）')
   if (!target || !fs.existsSync(target)) throw new Error('未找到当前程序文件：' + (target || ''))
+  if (!version) throw new Error('缺少目标版本号，已停止升级')
 
-  // ① 安装包 SHA-256 校验：下载阶段已校验一次，交给安装程序前再读盘校验，防止落盘后被改动
+  // ① 载荷 SHA-256 校验：下载阶段已校验一次，覆盖前再读盘校验，防止落盘后被改动
   onStage(STAGE.VERIFY)
   const actual = await sha256File(artifactPath)
   if (actual !== expected) throw new Error('安装包 SHA-256 校验失败')
-  log(`安装包校验通过 ${expected.slice(0, 12)}…`)
+  log(`更新包校验通过 ${expected.slice(0, 12)}…`)
 
-  // ② 拉起启动器：它会等本进程 PID 消失后再运行安装包，避免安装时 exe 被占用。
+  // ② 拉起启动器：它会等本进程 PID 消失后再动安装目录，避免覆盖到正在运行的 exe。
   // 上次遗留的退出码先清掉，免得失败后读到旧的「0」被当成成功
   onStage(STAGE.REPLACE)
   const exitFile = path.join(updateDir, launcher.EXIT_FILE)
   try { fs.removeSync(exitFile) } catch {}
   const scriptPath = path.join(updateDir, launcher.SCRIPT_FILE)
-  launcher.writeScript(scriptPath, launcher.buildScript({ pid, installer: artifactPath, exe: target, exitFile }))
+  launcher.writeScript(scriptPath, launcher.buildScript({
+    pid,
+    artifact: artifactPath,
+    installDir: path.dirname(target),
+    exe: target,
+    exitFile,
+    version
+  }))
   const child = spawnLauncher({ scriptPath })
   if (!child || typeof child.pid !== 'number') throw new Error('无法启动安装启动器')
   if (typeof child.unref === 'function') child.unref()
@@ -332,14 +348,18 @@ async function applyWindowsUpdate(options) {
   return { launcherPid: child.pid, exitFile, scriptPath, artifactPath }
 }
 
-// 安装器退出码 → 界面提示：
-//   0  安装程序跑完了但版本没变（半途跳过 / 装到了别处）
-//   -1 启动器自己没跑成（等待应用退出超时或安装包无法启动）
-//   其他 NSIS 退出码，2 最常见：卸载旧版本失败（旧卸载器搬不动文件）
+// 覆盖安装结果 → 界面提示：
+//   0  覆盖完了但版本没变（极少数：读到的还是旧 exe）
+//   -1 启动器没跑成（等待应用退出超时）
+//   8  解压后找不到 AiRoute.exe（载荷不对 / 下载损坏）
+//   9  覆盖完回读版本不匹配（架构不对或解压不完整）
+//   其他：robocopy 的失败码
 function describeInstallExit(code, currentVersion) {
-  if (code === 0) return `安装程序已执行，但当前版本仍为 v${currentVersion}，请手动下载安装包重试`
-  if (code === -1) return '安装程序未执行（等待应用退出超时），请手动下载安装包重试'
-  return `安装程序退出码 ${code}，请手动下载安装包重试`
+  if (code === 0) return `更新包已应用，但当前版本仍为 v${currentVersion}，请手动下载安装包重试`
+  if (code === -1) return '更新未执行（等待应用退出超时），请手动下载安装包重试'
+  if (code === 8) return '更新包解压失败，请手动下载安装包重试'
+  if (code === 9) return '更新包已解压，但版本校验未通过，请手动下载安装包重试'
+  return `覆盖安装失败（退出码 ${code}），请手动下载安装包重试`
 }
 
 module.exports = {
@@ -358,6 +378,7 @@ module.exports = {
   applyUpdate,
   rollbackToBackup,
   isWindowsSetupArtifact,
+  isWindowsUpdateArtifact,
   describeInstallExit,
   applyWindowsUpdate
 }

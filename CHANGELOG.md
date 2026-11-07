@@ -2,6 +2,27 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.6] - 2026-11-07
+
+Windows 一键升级改走「下载更新包 → 覆盖安装目录」：不再调用 NSIS 安装器，装不上、装一半、装完不重启三类问题一起消掉。
+
+### 修复
+
+- **一键升级提示成功、应用关闭后再没起来**：上一版把 `-setup.exe` 交给 NSIS 安装器静默执行，安装器在升级路径上要先跑旧卸载器（逐文件把 `$INSTDIR` 搬进 `%TEMP%` 再删），用户机上实测出现过「退出码 2」和「安装器跑完但安装目录一个文件都没换」两种结果；后一种情况下启动器紧接着去拉应用，路径上已经没有可执行文件，于是窗口再也不出现
+- **改成本地覆盖安装**：CI 额外产出 `AiRoute-<版本>-<架构>.zip`（win-unpacked 整目录），应用下载校验 SHA-256 后由 PowerShell 启动器解压 → `robocopy /E` 覆盖安装目录 → **回读 `AiRoute.exe` 的 FileVersion 必须等于目标版本** → 拉起应用。全程不跑 NSIS、不写注册表、不需要 UAC，失败点只剩「解压」和「覆盖」两处且都可回读验证
+- **旧版本仍能升级**：目标版本没有 zip 资产时回落到 `-setup.exe`，这次补上 `/D=<安装目录>`——注册表没有 `InstallLocation` 时（本机就是空的）安装器会装到默认目录，表现为「升级成功但版本没变」
+- **失败文案对应到具体原因**：`-1` 等待应用退出超时、`8` 解压后找不到 `AiRoute.exe`（载荷损坏/架构不对）、`9` 覆盖完回读版本不符、其它为 `robocopy` 失败码
+
+### 变更
+
+- `electron-builder.json` 的 `win.target` 增加 `zip`（`AiRoute-${version}-${arch}.zip`），CI 收集产物与 `SHA256SUMS.txt` 自动带上
+- `server/update.js` 的一键升级候选改为 `zip → -setup.exe`（便携包仍不参与）
+- `scripts/verify-release.js` 跳过 zip 的 exe 元数据校验（只查存在性/大小/SHA）
+
+### 测试
+
+- `test-update` 覆盖：zip 覆盖脚本内容（tar 解压、robocopy 参数、版本回读）、setup 回落的 `/D=`、超时守卫顺序、载荷类型判定、退出码文案四态，共 38 项
+
 ## [2.0.5] - 2026-11-06
 
 Trae 设备画像改为跟随真实运行环境，消除「Windows 上自称 macOS」的自相矛盾。

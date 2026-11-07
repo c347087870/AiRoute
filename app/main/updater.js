@@ -22,9 +22,9 @@ const IS_WIN = process.platform === 'win32'
 const STAGE_TEXT = {
   [core.STAGE.VERIFY]: '校验安装包 SHA-256…',
   [core.STAGE.BACKUP]: '备份当前版本…',
-  [core.STAGE.REPLACE]: IS_WIN ? '启动安装程序…' : '替换应用（原子改名）…',
+  [core.STAGE.REPLACE]: IS_WIN ? '准备覆盖安装…' : '替换应用（原子改名）…',
   [core.STAGE.READBACK]: '校验新版本（版本 / 签名 / 哈希）…',
-  restarting: IS_WIN ? '安装程序已接管，应用即将退出并自动重启…' : '升级完成，正在重启应用…'
+  restarting: IS_WIN ? '更新包已就绪，应用即将退出并自动覆盖安装…' : '升级完成，正在重启应用…'
 }
 
 let state = {
@@ -205,10 +205,11 @@ function startInstall(payload) {
   const { artifactPath, sha256, version } = payload || {}
   if (!artifactPath || !sha256 || !version) throw new Error('缺少安装包信息')
   if (!core.isInside(UPDATE_DIR, artifactPath)) throw new Error('安装包路径非法')
-  const expectedExt = IS_WIN ? '.exe' : '.dmg'
-  if (path.extname(artifactPath).toLowerCase() !== expectedExt) throw new Error('安装包格式不正确')
-  // Windows 只接受安装版安装包：便携版 exe 跑起来只会解包启动自己，不会覆盖已安装的文件
-  if (IS_WIN && !core.isWindowsSetupArtifact(artifactPath)) throw new Error('安装包不是安装版（-setup.exe），无法一键升级')
+  const ext = path.extname(artifactPath).toLowerCase()
+  // Windows 收 .zip（覆盖安装的主路径）与 -setup.exe（旧版本回落）；便携版 exe 不会覆盖已安装文件
+  if (IS_WIN ? !core.isWindowsUpdateArtifact(artifactPath) : ext !== '.dmg') {
+    throw new Error(IS_WIN ? '更新包格式不正确（需要 .zip 或 -setup.exe）' : '安装包格式不正确')
+  }
   if (!fs.existsSync(artifactPath)) throw new Error('安装包不存在，请重新下载')
 
   running = true
@@ -232,12 +233,13 @@ async function installAsync({ target, artifactPath, sha256, version, from }) {
     writeJournal({ status: 'installing', stage, from, to: version, artifactPath, sha256 })
   }
   try {
-    // Windows：交给 PowerShell 启动器静默安装，本进程退出后由它重启应用（没有备份 / 回读 / 回滚）
+    // Windows：交给 PowerShell 启动器把新版本覆盖到安装目录，本进程退出后由它重启应用
     if (IS_WIN) {
       const result = await core.applyWindowsUpdate({
         target,
         artifactPath,
         sha256,
+        version,
         updateDir: UPDATE_DIR,
         onStage,
         log: line => console.log('[aiRoute] 更新:', line)

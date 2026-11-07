@@ -224,6 +224,16 @@ function verifyBuild(version) {
   } else {
     for (const { name } of builds) {
       const exe = path.join(buildOutputDir, name)
+      // zip 是应用内覆盖安装的载荷，没有 exe 元数据可读；只查存在性与体积
+      if (/\.zip$/i.test(name)) {
+        try {
+          const size = fs.statSync(exe).size
+          if (size < 10 * 1024 * 1024) errors.push(`${name} 体积异常: ${(size / 1024 / 1024).toFixed(1)} MB`)
+        } catch (err) {
+          errors.push(`未找到产物 ${name}: ${err.message.split('\n')[0]}`)
+        }
+        continue
+      }
       try {
         const meta = execSync(`powershell -NoProfile -Command "(Get-Item '${exe}').VersionInfo.ProductVersion"`, { encoding: 'utf8' }).trim()
         if (meta !== version) errors.push(`${name}: exe 元数据版本 ${meta} != package.json 的 ${version}`)
