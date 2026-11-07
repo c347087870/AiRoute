@@ -157,14 +157,19 @@ test('assetCandidates 按运行形态选择产物名', () => {
   assert.ok(portable.includes('AiRoute.exe'))
 })
 
-test('installAssetCandidates 让一键升级只认安装版安装包', () => {
+test('installAssetCandidates：一键升级优先 zip 覆盖包，便携包永不参与', () => {
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   if (process.platform === 'darwin') {
     assert.deepStrictEqual(updateServer.installAssetCandidates('v1.7.2', 'mac'), [`AiRoute-1.7.2-${arch}.dmg`])
     return
   }
-  // 安装版：便携包不参与（拿便携包「升级」只会解包并启动一个新实例）
-  assert.deepStrictEqual(updateServer.installAssetCandidates('v1.7.2', 'installer'), [`AiRoute-1.7.2-${arch}-setup.exe`])
+  // 安装版：zip（应用自己解压覆盖）在前，-setup.exe 作为没有 zip 资产的旧版本回落
+  assert.deepStrictEqual(updateServer.installAssetCandidates('v1.7.2', 'installer'), [
+    `AiRoute-1.7.2-${arch}.zip`,
+    `AiRoute-1.7.2-${arch}-setup.exe`
+  ])
+  // 便携包不参与（拿便携包「升级」只会解包并启动一个新实例）
+  assert.strictEqual(updateServer.installAssetCandidates('v1.7.2', 'installer').some(n => n.includes('-portable')), false)
 })
 
 test('normalizeInstallKind / canOneClick：只有安装版与 macOS 支持一键升级', () => {
@@ -473,8 +478,8 @@ testAsync('安装包路径不在托管目录内时直接拒绝', async () => {
 
 group('安装版一键升级（Windows）')
 
-// 造一个「已安装」的目录：程序 exe + 托管目录里的安装包
-function makeWinTarget(root, { artifactName = 'AiRoute-1.8.2-x64-setup.exe', artifact = 'setup-content' } = {}) {
+// 造一个「已安装」的目录：程序 exe + 托管目录里的载荷（默认 zip 覆盖包）
+function makeWinTarget(root, { artifactName = 'AiRoute-1.8.2-x64.zip', artifact = 'zip-content' } = {}) {
   const installDir = path.join(root, 'Programs', 'AiRoute')
   fs.ensureDirSync(installDir)
   const target = path.join(installDir, 'AiRoute.exe')
@@ -486,7 +491,7 @@ function makeWinTarget(root, { artifactName = 'AiRoute-1.8.2-x64-setup.exe', art
   return { target, updateDir, artifactPath }
 }
 
-testAsync('成功路径：校验通过后以启动器脚本拉起独立进程', async () => {
+testAsync('成功路径（zip 覆盖）：写出解压+覆盖脚本并拉起启动器', async () => {
   const { root, cleanup } = tempDir()
   try {
     const { target, updateDir, artifactPath } = makeWinTarget(root)
@@ -496,6 +501,7 @@ testAsync('成功路径：校验通过后以启动器脚本拉起独立进程', 
       target,
       artifactPath,
       sha256: expected,
+      version: '1.8.2',
       updateDir,
       onStage: stage => stages.push(stage),
       spawnLauncher: () => ({ pid: 4242, unref() {} })
@@ -505,14 +511,56 @@ testAsync('成功路径：校验通过后以启动器脚本拉起独立进程', 
     assert.strictEqual(result.launcherPid, 4242)
     assert.strictEqual(result.exitFile, path.join(updateDir, helper.EXIT_FILE))
     assert.strictEqual(result.scriptPath, path.join(updateDir, helper.SCRIPT_FILE))
-    // 启动器脚本必须带齐：安装包、应用 exe、退出码文件、静默参数
     const script = fs.readFileSync(result.scriptPath, 'utf8')
-    assert.ok(script.includes(artifactPath))
+    // 覆盖安装：解压 → robocopy 覆盖安装目录 → 回读版本；全程不跑 NSIS
+    assert.ok(script.includes(`tar.exe -xf '${artifactPath}'`))
+    assert.ok(script.includes(`robocopy $stage '${path.dirname(target)}'`))
+    assert.ok(script.includes("VersionInfo.FileVersion"))
+    assert.ok(script.includes("'1.8.2'"))
     assert.ok(script.includes(target))
     assert.ok(script.includes(result.exitFile))
-    assert.ok(script.includes("'/S','--updated'"))
+    assert.strictEqual(script.includes("'/S','--updated'"), false)
     // 上一轮遗留的退出码要先清掉，否则失败会被读成上次的 0
     assert.strictEqual(fs.existsSync(result.exitFile), false)
+  } finally {
+    cleanup()
+  }
+})
+
+testAsync('旧版本回落（-setup.exe）：脚本补 /D=安装目录，避免装到默认目录', async () => {
+  const { root, cleanup } = tempDir()
+  try {
+    const { target, updateDir, artifactPath } = makeWinTarget(root, { artifactName: 'AiRoute-1.8.2-x64-setup.exe' })
+    const result = await core.applyWindowsUpdate({
+      target,
+      artifactPath,
+      sha256: sha256(fs.readFileSync(artifactPath)),
+      version: '1.8.2',
+      updateDir,
+      spawnLauncher: () => ({ pid: 4243, unref() {} })
+    })
+    const script = fs.readFileSync(result.scriptPath, 'utf8')
+    assert.ok(script.includes("'/S','--updated'"))
+    assert.ok(script.includes(`'/D=${path.dirname(target)}'`))
+  } finally {
+    cleanup()
+  }
+})
+
+testAsync('缺少目标版本号时拒绝（覆盖后无法回读校验）', async () => {
+  const { root, cleanup } = tempDir()
+  try {
+    const { target, updateDir, artifactPath } = makeWinTarget(root)
+    await assert.rejects(
+      () => core.applyWindowsUpdate({
+        target,
+        artifactPath,
+        sha256: sha256(fs.readFileSync(artifactPath)),
+        updateDir,
+        spawnLauncher: () => ({ pid: 1 })
+      }),
+      /缺少目标版本号/
+    )
   } finally {
     cleanup()
   }
@@ -528,6 +576,7 @@ testAsync('SHA-256 不匹配：不拉起启动器', async () => {
         target,
         artifactPath,
         sha256: 'a'.repeat(64),
+        version: '1.8.2',
         updateDir,
         spawnLauncher: () => { spawned = true; return { pid: 1 } }
       }),
@@ -548,10 +597,11 @@ testAsync('便携版安装包：拒绝一键升级（它不会覆盖已安装的
         target,
         artifactPath,
         sha256: sha256(fs.readFileSync(artifactPath)),
+        version: '1.8.2',
         updateDir,
         spawnLauncher: () => ({ pid: 1 })
       }),
-      /安装包不是安装版/
+      /更新包格式不正确/
     )
   } finally {
     cleanup()
@@ -592,34 +642,59 @@ test('powershellPath 走 SystemRoot 下的 WindowsPowerShell，不依赖 PATH', 
   )
 })
 
-test('buildScript：等 PID 退出 → /S --updated → 写退出码 → 拉起应用', () => {
+test('payloadKind：.zip 走覆盖安装，-setup.exe 走回落安装', () => {
+  assert.strictEqual(helper.payloadKind('C:\\u\\AiRoute-2.0.6-x64.zip'), 'zip')
+  assert.strictEqual(helper.payloadKind('C:\\u\\AiRoute-2.0.6-x64-setup.exe'), 'setup')
+})
+
+test('buildScript（zip）：等 PID 退出 → 解压 → robocopy 覆盖 → 回读版本 → 拉起应用', () => {
   const script = helper.buildScript({
     pid: 1234,
-    installer: 'C:\\u\\AiRoute-2.0.2-x64-setup.exe',
+    artifact: 'C:\\u\\AiRoute-2.0.6-x64.zip',
+    installDir: 'C:\\p',
     exe: 'C:\\p\\AiRoute.exe',
     exitFile: 'C:\\u\\install-exit.txt',
+    version: '2.0.6',
     waitSeconds: 30
   })
   assert.match(script, /\$appPid = 1234/)
   assert.match(script, /AddSeconds\(30\)/)
   assert.match(script, /Get-Process -Id \$appPid/)
-  assert.match(script, /Start-Process -FilePath 'C:\\u\\AiRoute-2\.0\.2-x64-setup\.exe' -ArgumentList '\/S','--updated' -Wait -PassThru/)
-  assert.match(script, /Set-Content -LiteralPath 'C:\\u\\install-exit\.txt' -Value \$code -Encoding ascii/)
+  assert.match(script, /tar\.exe -xf 'C:\\u\\AiRoute-2\.0\.6-x64\.zip' -C \$stage/)
+  assert.match(script, /Expand-Archive -LiteralPath 'C:\\u\\AiRoute-2\.0\.6-x64\.zip'/)
+  assert.match(script, /robocopy \$stage 'C:\\p' \/E \/R:3/)
+  assert.match(script, /VersionInfo\.FileVersion/)
+  assert.match(script, /-ne '2\.0\.6'/)
+  assert.match(script, /Set-Content -LiteralPath 'C:\\u\\install-exit\.txt' -Value 0 -Encoding ascii/)
   assert.match(script, /Start-Process -FilePath 'C:\\p\\AiRoute\.exe'/)
+  // 覆盖安装不该再碰 NSIS
+  assert.strictEqual(script.includes('--updated'), false)
 })
 
-test('buildScript：等待超时先写 -1 并退出，不运行安装包', () => {
-  const script = helper.buildScript({ pid: 7, installer: 'i.exe', exe: 'e.exe', exitFile: 'x.txt' })
+test('buildScript（setup 回落）：/S --updated 且带上 /D=安装目录', () => {
+  const script = helper.buildScript({
+    pid: 1,
+    artifact: 'C:\\u\\AiRoute-2.0.6-x64-setup.exe',
+    installDir: 'C:\\p',
+    exe: 'C:\\p\\AiRoute.exe',
+    exitFile: 'x.txt'
+  })
+  assert.match(script, /-ArgumentList '\/S','--updated','\/D=C:\\p' -Wait -PassThru/)
+  assert.match(script, /Set-Content -LiteralPath 'x\.txt' -Value \$code -Encoding ascii/)
+})
+
+test('buildScript：等待超时先写 -1 并退出，不动安装目录', () => {
+  const script = helper.buildScript({ pid: 7, artifact: 'u.zip', installDir: 'C:\\p', exe: 'e.exe', exitFile: 'x.txt', version: '1.0.0' })
   assert.ok(/\{ Set-Content -LiteralPath 'x\.txt' -Value -1 -Encoding ascii; exit \}/.test(script), '缺少超时守卫')
-  // 守卫必须在启动安装包之前，否则会把还在写盘的应用杀掉
-  assert.ok(script.indexOf('exit }') < script.indexOf('--updated'))
+  // 守卫必须在解压/安装之前，否则会把还在写盘的应用杀掉
+  assert.ok(script.indexOf('exit }') < script.indexOf('tar.exe'))
 })
 
 test('buildScript：等应用退出后多留 2 秒收句柄', () => {
-  const script = helper.buildScript({ pid: 1, installer: 'i.exe', exe: 'e.exe', exitFile: 'x.txt' })
+  const script = helper.buildScript({ pid: 1, artifact: 'u.zip', installDir: 'C:\\p', exe: 'e.exe', exitFile: 'x.txt', version: '1.0.0' })
   const guard = script.indexOf('-Value -1')
   assert.ok(script.indexOf('Start-Sleep -Seconds 2') > guard)
-  assert.ok(script.indexOf('Start-Sleep -Seconds 2') < script.indexOf('--updated'))
+  assert.ok(script.indexOf('Start-Sleep -Seconds 2') < script.indexOf('tar.exe'))
 })
 
 test('writeScript 写成 UTF-8 BOM，PowerShell 5.1 才不会把中文路径读成乱码', () => {
@@ -651,10 +726,12 @@ test('spawnLauncher：不 detach（detach 会让 PowerShell 直接退出），�
   assert.strictEqual(seen.opts.stdio, 'ignore')
 })
 
-test('describeInstallExit：0 / -1 / 其它退出码各有明确文案', () => {
-  assert.match(core.describeInstallExit(0, '2.0.1'), /安装程序已执行，但当前版本仍为 v2\.0\.1/)
+test('describeInstallExit：0 / -1 / 8 / 9 / 其它退出码各有明确文案', () => {
+  assert.match(core.describeInstallExit(0, '2.0.1'), /更新包已应用，但当前版本仍为 v2\.0\.1/)
   assert.match(core.describeInstallExit(-1, '2.0.1'), /等待应用退出超时/)
-  assert.match(core.describeInstallExit(2, '2.0.1'), /安装程序退出码 2/)
+  assert.match(core.describeInstallExit(8, '2.0.1'), /解压失败/)
+  assert.match(core.describeInstallExit(9, '2.0.1'), /版本校验未通过/)
+  assert.match(core.describeInstallExit(16, '2.0.1'), /覆盖安装失败（退出码 16）/)
 })
 
 // ===== 汇总 =====

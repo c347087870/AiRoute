@@ -65,20 +65,25 @@ function artifactPattern(target) {
 
 // electron-builder 支持 ${version} / ${arch} / ${ext} 等宏；这里只需要用到这三个，
 // 出现其他宏说明命名规则变了，直接报错而不是静默产出错名字
-function expandTemplate(template, version, arch) {
+function expandTemplate(template, version, arch, extOverride) {
   const v = String(version).replace(/^v/i, '')
-  const values = { version: v, arch, ext }
+  const values = { version: v, arch, ext: extOverride || ext }
   const name = String(template).replace(/\$\{(\w+)\}/g, (matched, key) => (key in values ? values[key] : matched))
   if (/\$\{\w+\}/.test(name)) throw new Error(`artifactName 模板里有未支持的宏：${template}`)
   return name
 }
 
-// 全部产物：Windows 为每个架构的安装版 + 便携版，macOS 为每个架构的 dmg
+// 目标对应的扩展名：zip 目标产出 `.zip`，其余 Windows 目标是 exe、macOS 是 dmg
+function extForTarget(target) {
+  return target === 'zip' ? 'zip' : ext
+}
+
+// 全部产物：Windows 为每个架构的安装版 + 便携版 + 覆盖安装包，macOS 为每个架构的 dmg
 function artifacts(version) {
   return targetArchs().map(({ target, arch }) => ({
     target,
     arch,
-    name: expandTemplate(artifactPattern(target), version, arch)
+    name: expandTemplate(artifactPattern(target), version, arch, extForTarget(target))
   }))
 }
 

@@ -22,9 +22,10 @@ const RELEASES_PAGE = 60
 const IS_MAC = process.platform === 'darwin'
 const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
 const EXT = IS_MAC ? 'dmg' : 'exe'
-// Windows 两类产物的后缀（见 electron-builder.json 的 nsis.artifactName / portable.artifactName）
+// Windows 两类产物 + 覆盖安装载荷的后缀（见 electron-builder.json 的 nsis / portable / zip 段）
 const SETUP_SUFFIX = '-setup'
 const PORTABLE_SUFFIX = '-portable'
+const ZIP_SUFFIX = '.zip'
 
 // 运行形态决定下载哪个资产：安装版优先取 -setup.exe（可一键升级），便携版优先取 -portable.exe。
 // 由主进程启动时注入 AIROUTE_INSTALL_KIND（判定逻辑见 app/main/install-kind.js）；
@@ -56,12 +57,14 @@ function assetCandidates(version, kind = INSTALL_KIND) {
   return names
 }
 
-// 一键升级的候选资产：Windows 只接受安装版安装包。便携包跑起来只会解包并启动自己，
-// 拿来「升级」等于开了第二个实例，所以即便安装版资产缺失也不回落到它
+// 一键升级的候选载荷：
+// - Windows 安装版：先取 zip（应用自己解压覆盖安装目录，不跑 NSIS 安装器），
+//   早期版本没有 zip 资产时回落到 -setup.exe（启动器补 /D= 安装目录后静默跑）
+// - 便携包不参与一键升级：跑起来只会解包启动自己，覆盖不了已安装的文件
 function installAssetCandidates(version, kind = INSTALL_KIND) {
-  const names = assetCandidates(version, kind)
-  if (kind !== 'installer') return names
-  return names.filter(name => name.endsWith(`${SETUP_SUFFIX}.exe`))
+  if (kind !== 'installer') return assetCandidates(version, kind)
+  const v = String(version).replace(/^v/i, '')
+  return [`AiRoute-${v}-${ARCH}${ZIP_SUFFIX}`, `AiRoute-${v}-${ARCH}${SETUP_SUFFIX}.exe`]
 }
 
 // 一键升级的托管下载目录：生产模式由主进程注入 AIROUTE_UPDATE_DIR（userData/updates），
@@ -542,6 +545,7 @@ module.exports = {
   normalizeSha,
   SETUP_SUFFIX,
   PORTABLE_SUFFIX,
+  ZIP_SUFFIX,
   INSTALL_KIND,
   UPDATE_DIR
 }

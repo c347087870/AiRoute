@@ -129,7 +129,9 @@ jobs:
           if [ "${{ matrix.platform }}" = "mac" ]; then
             cp "app/release/AiRoute-${version}-"*.dmg dist-assets/
           else
+            # zip 是一键升级的覆盖安装载荷（应用自己解压覆盖安装目录），必须一起发
             cp "app/release/AiRoute-${version}-"*.exe dist-assets/
+            cp "app/release/AiRoute-${version}-"*.zip dist-assets/
           fi
           ls -lh dist-assets
 

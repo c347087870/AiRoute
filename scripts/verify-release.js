@@ -78,6 +78,8 @@ if (isMac) {
   }
 } else {
   for (const { name } of builds) {
+    // zip 是给应用内覆盖安装用的载荷，没有 exe 元数据可读；只做存在性/大小/SHA 校验（见 ④）
+    if (!/\.exe$/i.test(name)) continue
     for (const outDir of ['app/dist-electron', 'app/release']) {
       readMeta(path.join(outDir, name))
     }
