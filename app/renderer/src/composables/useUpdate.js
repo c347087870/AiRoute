@@ -70,7 +70,8 @@ function isMacPlatform() {
   return info.value?.platform === 'mac'
 }
 
-// Windows 安装版（NSIS）：唯一能在 Windows 上一键升级的形态；便携版只能手动下载替换
+// Windows 安装版（NSIS）：使用「下载覆盖包 + install-update.cmd」的稳定路径；
+// 便携版只能手动下载替换
 function isWinInstaller() {
   return info.value?.platform === 'win' && info.value?.installKind !== 'portable'
 }
@@ -184,7 +185,7 @@ function pollInstall() {
 async function refreshInstallStatus() {
   if (!window.electronAPI?.getInstallStatus) {
     supported.value = false
-    unsupportedReason.value = '浏览器模式不支持一键升级，请使用「手动下载安装包」'
+    unsupportedReason.value = '浏览器模式不支持覆盖安装，请使用「手动下载安装包」'
     return null
   }
   try {
@@ -217,6 +218,47 @@ async function refreshInstallStatus() {
   }
 }
 
+// Windows 稳定路径：下载并校验 zip 覆盖包 → 生成用户可双击的 install-update.cmd。
+// 不再依赖「应用退出后自动启动器还活着」；用户退出应用后再双击脚本，失败信息也留在窗口里。
+async function prepareWindowsOverlay() {
+  const target = `v${info.value.latest}`
+  const steps = '将下载更新包 → SHA-256 校验 → 生成 install-update.cmd。\n' +
+    '下载完成后请退出 AiRoute（托盘图标右键 → 退出；关窗口只会最小化），' +
+    '再双击更新文件夹里的 install-update.cmd 覆盖安装并重启。\n' +
+    '不运行安装器、不需要 UAC；如果应用内下载失败，可点「Release 页面」用浏览器下载 zip，' +
+    '再把 zip 拖到 install-update.cmd 上。'
+  if (!window.confirm(`下载覆盖更新包 ${target}：\n\n${steps}\n\n继续？`)) return false
+
+  installError.value = ''
+  savedPath.value = ''
+  stage.value = 'downloading'
+  percent.value = 0
+  try {
+    await startUpdateDownload(info.value.tag)
+  } catch (e) {
+    failInstall(e?.response?.data?.error || e?.message || '下载失败')
+    return false
+  }
+  const download = await pollDownload()
+  if (!download) return false
+  stage.value = 'verifying'
+  try {
+    const result = await window.electronAPI.prepareManualUpdate({
+      version: info.value.latest,
+      artifactPath: download.artifactPath,
+      sha256: download.sha256
+    })
+    savedPath.value = result.cmdPath || ''
+    stage.value = 'idle'
+    showToast(`更新包已就绪：退出 AiRoute 后双击 install-update.cmd（${result.folder}）`, 'success', 12000)
+    try { window.electronAPI.showItemInFolder(result.cmdPath) } catch {}
+    return true
+  } catch (e) {
+    failInstall(e?.message || '无法生成覆盖安装脚本')
+    return false
+  }
+}
+
 // 一键升级：下载 → 校验 → 备份 → 替换 → 回读 → 重启（失败由主进程回滚）
 async function oneClickUpdate() {
   if (busy.value) return false
@@ -227,7 +269,7 @@ async function oneClickUpdate() {
     return false
   }
   if (!supported.value) {
-    showToast(unsupportedReason.value || '当前环境不支持一键升级，请手动下载安装包', 'error', 5000)
+    showToast(unsupportedReason.value || '当前环境不支持覆盖安装，请手动下载安装包', 'error', 5000)
     return false
   }
   if (!info.value) {
@@ -241,13 +283,12 @@ async function oneClickUpdate() {
     showToast(`已是最新版本 v${info.value?.current || ''}`)
     return false
   }
+  // Windows 安装版不再走自动安装：下载 zip 后生成用户可双击的覆盖安装脚本。
+  // macOS 仍走原有的原子替换 + 自动回滚。
+  if (isWinInstaller()) return prepareWindowsOverlay()
   const target = `v${info.value.latest}`
-  const steps = isWinInstaller()
-    ? '自动下载安装包 → SHA-256 校验 → 退出应用 → 静默安装 → 自动重启。\n' +
-      '安装失败时会重新启动当前版本（Windows 不做自动回滚），可再用手动下载安装包重试。\n' +
-      '升级期间请勿手动关闭安装程序，进行中的请求会中断。'
-    : '自动下载 → SHA-256 校验 → 备份当前版本 → 原子替换 → 回读校验 → 重启应用。\n' +
-      '任一步失败会自动回滚到当前版本。升级期间请勿退出应用，进行中的请求会中断。'
+  const steps = '自动下载 → SHA-256 校验 → 备份当前版本 → 原子替换 → 回读校验 → 重启应用。\n' +
+    '任一步失败会自动回滚到当前版本。升级期间请勿退出应用，进行中的请求会中断。'
   const confirmed = window.confirm(`一键升级到 ${target}：\n\n${steps}\n\n继续？`)
   if (!confirmed) return false
 
@@ -312,8 +353,8 @@ async function manualDownload() {
   savedPath.value = state.savePath || savePath
   stage.value = 'idle'
   if (isMacPlatform()) showToast('安装包已下载完成，可双击 dmg 手动安装')
-  else if (isWinInstaller()) showToast('安装包已下载完成，双击安装即可（安装版支持一键升级）')
-  else showToast('安装包已下载完成，可退出 AiRoute 后替换程序（安装版支持一键升级）')
+  else if (isWinInstaller()) showToast('安装包已下载完成，可手动运行安装包（会走 NSIS 安装器）')
+  else showToast('安装包已下载完成，可退出 AiRoute 后手动替换程序')
   return true
 }
 
@@ -393,6 +434,7 @@ export function useUpdate() {
     lastResult,
     runCheck,
     oneClickUpdate,
+    prepareWindowsOverlay,
     manualDownload,
     rollback,
     openFolder,
