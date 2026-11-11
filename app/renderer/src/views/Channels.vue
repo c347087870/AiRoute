@@ -42,6 +42,10 @@
             </button>
           </div>
         </div>
+        <!-- 积分余额手动刷新：后台按设置每 30 分钟也会刷一次，这里给「刚充完值 / 刚签完」时立刻看结果 -->
+        <AppButton variant="secondary" :disabled="balancesBusy" title="立即刷新所有渠道账号的积分余额（后台也会按「积分刷新」设置定期刷新）" @click="refreshBalances">
+          {{ balancesBusy ? '刷新中…' : '刷新积分' }}
+        </AppButton>
         <!-- 已签后与账号行的「已签」同款描边样式（都置灰禁用），不再保持实心主按钮 -->
         <AppButton :variant="allChecked ? 'secondary' : 'primary'" :disabled="checkinAll.running || checkinPending === 0" :title="checkinPending === 0 ? (checkinTotal === 0 ? '没有可签到的账号' : '今天都已经签到过了，明天再来') : `依次对支持签到的 ${checkinPending} 处（渠道 + WorkBuddy 国内版）签到：逐渠道顺序执行，避免触发上游风控；没有签到端点的渠道自动跳过`" @click="runCheckinAll">
           {{ checkinAll.running ? `签到中… ${checkinAll.done}/${checkinAll.total}` : allChecked ? '已签' : '一键签到' }}
@@ -602,6 +606,21 @@ const CHANNEL_SETTINGS_FIELDS = [
     key: 'rotation', label: '账号轮转', unit: '', type: 'bool', default: true, scopes: ['qoder', 'qodercn'],
     hint: '关掉就永远用清单里第一个可用账号（旧版行为）',
   },
+  // ── 自动维护（后端 server/channels/auto-tasks.js）──
+  {
+    key: 'autoCheckin', label: '自动签到', unit: '', type: 'bool', default: true, scopes: ['trae', 'qodercn'],
+    hint: '每天到点自动签一次；本机没开机时会在下次启动后补签。Qoder 国际版没有稳定的每日窗口，仍走手动',
+  },
+  {
+    key: 'autoCheckinHour', label: '签到时点', unit: '点', type: 'number',
+    min: 0, max: 23, step: 1, default: 10, scopes: ['trae', 'qodercn'],
+    hint: 'Qoder 国内版每天 10:00（UTC+8）刷新领取窗口，默认设在 10 点之后',
+  },
+  {
+    key: 'balanceRefreshMinutes', label: '积分刷新', unit: '分钟（0=关）', type: 'number',
+    min: 0, max: 1440, step: 5, default: 30, scopes: ['trae', 'qoder', 'qodercn'],
+    hint: '后台定期刷新每个账号的积分余额；0 表示只在打开页面或手动点「刷新积分」时查',
+  },
   // ── Trae 中转 ──
   {
     key: 'traeFirstByteMs', label: '首字超时', unit: '秒', type: 'number',
@@ -1098,6 +1117,8 @@ const busyKey = ref('') // 行内/卡内按钮的互斥键，形如 `${id}:${act
 // 不放进 accounts 里：余额是**按需**查的（要打上游），与账号清单（本地读盘）不同源，
 // 混在一起会让 5 秒轮询把每次轮询都变成一轮余额请求。
 const balances = ref({})
+// 「刷新积分」按钮的互斥标记：后台余额刷新与手动刷新共用一个入口
+const balancesBusy = ref(false)
 const modelsByProvider = ref({}) // provider → RpcModelListEntry[]
 // WorkBuddy 的模型行与「上游全量」分开存：行用于渲染（和渠道包同结构），
 // 上游全量用于保存启用清单时补齐 displayName / maxContext 等字段
@@ -1646,6 +1667,9 @@ async function checkinAccount(acct) {
     // 签到会写下「今天签过」与积分，重读一次让按钮立刻置灰、积分立刻更新。
     // 不重读的话要等下一轮 5 秒轮询，用户会以为没生效又点一次
     await reload({ silent: true })
+    // 积分是签到后最想知道的结果：余额有 5 分钟节流，这里强制跳过，别让用户
+    // 看到签到前的老数字
+    await loadBalancesAll({ force: true })
   } catch (err) {
     showToast('签到失败：' + err.message, 'error', 6000)
   } finally {
@@ -1657,9 +1681,14 @@ async function checkinAccount(acct) {
 // 「余额 0」会被理解成「额度被清空了」，而真实原因往往是上游没给这个端点。
 function balanceText(acct) {
   const record = balances.value[acct.id]
-  if (!record) return ''
-  if (record.error) return '余额查询失败'
-  return `积分 ${formatCredit(record.total)}`
+  if (record) {
+    if (record.error) return '余额查询失败'
+    return `积分 ${formatCredit(record.total)}`
+  }
+  // 本次还没查到时回落到账号清单里的上次读数（签到 / 后台刷新会写它）。
+  // 标「上次」是为了不让人把旧快照当成实时值。
+  if (Number.isFinite(acct.credits)) return `积分 ${formatCredit(acct.credits)}（上次）`
+  return ''
 }
 
 // 余额自动刷新：有 balance 端点的渠道，整渠道一次拉齐（credits.balances 内部
@@ -1671,13 +1700,14 @@ let balancesLoading = false
 const BALANCE_REFRESH_MS = 5 * 60 * 1000
 
 async function loadBalancesAll({ force = false } = {}) {
-  if (balancesLoading) return
-  if (!force && Date.now() - balancesRefreshedAt < BALANCE_REFRESH_MS) return
+  if (balancesLoading) return { refreshed: 0, failed: 0, skipped: true }
+  if (!force && Date.now() - balancesRefreshedAt < BALANCE_REFRESH_MS) return { refreshed: 0, failed: 0, skipped: true }
   const targets = PROVIDERS.filter(p => statuses.value[p.id]?.capabilities?.balance === true
     && accounts.value.some(a => a.provider === p.id))
-  if (!targets.length) return
+  if (!targets.length) return { refreshed: 0, failed: 0, skipped: true }
   balancesLoading = true
   const patch = {}
+  let failed = 0
   try {
     const results = await Promise.all(targets.map(async p => {
       try {
@@ -1691,15 +1721,32 @@ async function loadBalancesAll({ force = false } = {}) {
       for (const row of rows) {
         if (!row?.accountId) continue
         const total = row?.balance?.total
-        patch[row.accountId] = Number.isFinite(total)
-          ? { total, error: '' }
-          : { total: null, error: row?.error || '查询失败' }
+        if (Number.isFinite(total)) patch[row.accountId] = { total, error: '' }
+        else {
+          failed++
+          patch[row.accountId] = { total: null, error: row?.error || '查询失败' }
+        }
       }
     }
     balances.value = { ...balances.value, ...patch }
     balancesRefreshedAt = Date.now()
+    return { refreshed: Object.keys(patch).length - failed, failed, skipped: false }
   } finally {
     balancesLoading = false
+  }
+}
+
+// 手动刷新：后台每 30 分钟也会刷一次（见渠道设置），这里给「刚充完值 / 刚签完」时立刻看结果
+async function refreshBalances() {
+  if (balancesBusy.value) return
+  balancesBusy.value = true
+  try {
+    const result = await loadBalancesAll({ force: true })
+    if (result.skipped) return
+    if (result.failed > 0) showToast(`积分刷新：${result.refreshed} 个成功，${result.failed} 个查询失败`, 'error', 6000)
+    else showToast(`积分已刷新：${result.refreshed} 个账号`, 'success', 4000)
+  } finally {
+    balancesBusy.value = false
   }
 }
 async function testAccount(acct) {
@@ -1762,7 +1809,7 @@ async function claimOnboarding(acct) {
 // 端点支持与否由后端的 provider.status.capabilities 回答（插件没实现那个方法
 // 就是这家不支持，见 plugin-api.js 的可选方法表）。面板不再靠「按钮点了报错」
 // 让用户自己发现这件事：
-//   · 签到：只有 Trae 有 checkin_credits；
+//   · 签到：Trae 走 checkin_credits，Qoder 两家走活动平台（插件清单里的 checkinProviders）；
 //   · 账号测试：account.test 还留在旧 RPC 表里，当前插件没实现。
 // 读不到 capabilities 时按「支持」处理（宁可显示也不突然消失），
 // 只有明确为 false 才隐藏。
@@ -2550,6 +2597,8 @@ async function runCheckinAll() {
     showToast(checkinSummary.value, checkinFailed.value ? 'error' : 'success', 8000)
     // 签到会改积分与「今天签过」的状态，重读一次让卡片上的数字与按钮跟得上
     await reload({ silent: true })
+    // 刚领到的积分要立刻显示出来：跳过余额查询的 5 分钟节流
+    await loadBalancesAll({ force: true })
   } catch (err) {
     checkinFailed.value = true
     checkinSummary.value = '一键签到中断：' + (err?.message || '未知错误')

@@ -34,6 +34,11 @@ const USAGE_PATH = '/sash/api/v2/me/usage'
 // 活动平台（每日领取积分）：官方桌面端 0.4.8 主进程调它。
 // ⚠️ 头集合必须逐字对齐，且**不发任何 cosy-machine\*** —— 派生值会让服务端把
 // 「每日领取 100 Credits」整条静默过滤（HTTP 200 + 只剩 VIEW_DETAILS）。
+//
+// 「今天领过没」的唯一判据是列表里那条 CREDITS 活动的 claimStatus：
+// Qoder CN 0.5.5 桌面端的 asar 里没有签到 UI（签到在 growth-page 活动页里，
+// 见 g.alicdn.com/qbase/qoder/.../activity-iframe.js），活动页把
+// claimStatus === 'CLAIMED' 显示成「已领取」；桌面端本身不缓存这个状态。
 const CAMPAIGNS_PATH = '/sash/api/v1/me/campaigns'
 const campaignClaimPath = id => `/sash/api/v1/me/campaigns/${encodeURIComponent(String(id))}/claim`
 // 旧签到端点（部分区域已下线，只剩活动平台）：404/405/410 才算「本区没有」
@@ -389,6 +394,14 @@ function nextCheckinWindow(nowMs = Date.now()) {
   return next - UTC8_OFFSET_MS
 }
 
+// 每日领取的「活动日」键（YYYY-MM-DD）：以 UTC+8 10:00 为界。
+// 面板用它判断「今天领过没」—— 存日期而不是「上次领取时刻」，跨窗口自动失效；
+// 用 UTC+8 而不是系统时区，是因为活动窗口本身就是 UTC+8 固定的（见 nextCheckinWindow）。
+function checkinDayKey(nowMs = Date.now()) {
+  const shifted = nowMs + UTC8_OFFSET_MS - CHECKIN_WINDOW_HOUR * 3600 * 1000
+  return new Date(shifted).toISOString().slice(0, 10)
+}
+
 // ── 积分余额 ──
 
 // 安全读数字：上游可能发字符串数字；解析不出返回 undefined（不编造 0）
@@ -587,6 +600,7 @@ module.exports = {
   createDeviceSession,
   deriveMachineId,
   nextCheckinWindow,
+  checkinDayKey,
   resolveModelKey,
   buildAuthUrl,
   buildPollUrl,

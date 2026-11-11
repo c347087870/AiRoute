@@ -94,15 +94,22 @@ async function main() {
       cooldownMs: 0, // 低于下限
       maxConcurrency: 99, // 高于上限
       firstChunkTimeoutMs: '60000', // 字符串数字
+      autoCheckinHour: 99,
+      balanceRefreshMinutes: -5,
       bogus: 1,
     })
     assert.equal(normalized.cooldownMs, 1000)
     assert.equal(normalized.maxConcurrency, 16)
     assert.equal(normalized.firstChunkTimeoutMs, 60000)
+    assert.equal(normalized.autoCheckinHour, 23, '签到时点夹在 0-23')
+    assert.equal(normalized.balanceRefreshMinutes, 0, '刷新间隔夹在 0-1440')
     assert.equal('bogus' in normalized, false)
     // 默认值等于旧版行为
     assert.equal(settingsModule.DEFAULTS.cooldownMs, 60000)
     assert.equal(settingsModule.DEFAULTS.firstChunkTimeoutMs, 120000)
+    assert.equal(settingsModule.DEFAULTS.autoCheckin, true)
+    assert.equal(settingsModule.DEFAULTS.autoCheckinHour, 10)
+    assert.equal(settingsModule.DEFAULTS.balanceRefreshMinutes, 30)
   })
 
   await test('转帧：空名工具调用被丢弃，finish 降级成 stop', () => {

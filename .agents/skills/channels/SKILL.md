@@ -45,6 +45,7 @@ server/channels/index.js（CJS 门面）
                   ├ trae/index.js   ──► provider.js ──► protocol.js
                   └ qoder/index.js  ──► provider.js ──► protocol.js + wasm.js + qoder-auth-wasm.wasm
       └ sse.js（内部 chunk → OpenAI 帧 + 用量口径换算）
+  └ auto-tasks.js  ← 宿主级定时器：Trae / Qoder 国内版每日自动签到 + 积分余额定期刷新
 ```
 
 **插件包里没有 `require('../shared/...')`**：凭据与登录回调都由宿主注入
@@ -69,6 +70,7 @@ server/channels/index.js（CJS 门面）
 | --- | --- | --- |
 | 登录流程、刷新、请求头、请求体转换、目录解析 | `plugins/<id>/protocol.js`（纯函数） | — |
 | 选号、续期时机、失败重试、签到、额度 | `plugins/<id>/provider.js` | — |
+| 每日自动签到、积分余额定期刷新、重试节奏 | `server/channels/auto-tasks.js`（宿主级定时器） | ❌ 不要在插件里自带定时器 |
 | Qoder 加密请求体 / 签名头 | `plugins/qoder/wasm.js` + `qoder-auth-wasm.wasm` | 不要改 WASM 产物 |
 | 「这家有哪些方法、要不要申报签到」 | `plugins/<id>/index.js`（清单 + ABI 适配） | — |
 | 插件怎么被发现 / 装 / 卸 / 启停 | `plugin-host.js` / `plugin-store.js` | 不要在各插件里各写一份清单逻辑 |
@@ -183,6 +185,7 @@ qoder-accounts.json           同上（qodercn 是 qodercn-accounts.json）
 qoder-machine.json            Qoder 设备标识的安装盐（machine_id 由 (盐, uid) 派生，换机即换设备）
 qoder-max-output.json         从 400 学到的各模型输出上限（7 天有效）
 channel-settings.json         渠道运行参数（每张渠道卡的「设置」内页读写，见下）
+channel-auto-tasks.json       自动签到的当日去重与积分刷新时刻（宿主 auto-tasks.js）
 channel-versions.json         Trae / Qoder 的官网最新版本号快照（version-sync 每天刷新）
 owned-channels-state.json     模型开关与失效台账
 ```
@@ -190,8 +193,24 @@ owned-channels-state.json     模型开关与失效台账
 **渠道设置**（`server/channels/settings.js`，入口在每张渠道卡的「设置」，`GET/PUT /api/channels/settings`）：
 **每家一份** —— 顶层是默认值，`providers.<id>` 是该渠道的覆盖值，取实际参数用
 `settings.forProvider(id)`（改 Trae 不再影响 Qoder）。可配项：首帧上限、先发响应头、空闲心跳、
-限流冷却、单号并发、同号间隔、会话亲和、账号轮转，以及 Trae 的首字超时 / 选号策略 /
-会话粘性 / 形态清洗 / Max 模式。默认值刻意等于改造前的行为 —— 排查时先看这个文件。
+限流冷却、单号并发、同号间隔、会话亲和、账号轮转、自动签到开关 / 时点（Trae / Qoder 国内版）、
+积分刷新间隔，以及 Trae 的首字超时 / 选号策略 / 会话粘性 / 形态清洗 / Max 模式。
+默认值刻意等于改造前的行为 —— 排查时先看这个文件。
+
+**自动签到 / 积分刷新**（`server/channels/auto-tasks.js`，宿主级定时器）：
+只给 Trae 与 Qoder 国内版自动签到 —— 每天到 `autoCheckinHour`（默认 10 点，Qoder 活动窗口
+UTC+8 10:00，整点后等 5 分钟再查，避开新活动发布延迟）跑一次 `credits.claimAll`；
+进程晚于时点启动会补签；失败每 30 分钟重试、最多 3 次；当日结果写 `channel-auto-tasks.json`，
+重启不会重复签。积分对所有有 `balance()` 的渠道按 `balanceRefreshMinutes`（默认 30，0=关）刷新。
+面板的「刷新积分」按钮走同一条 `credits.balances`，签到后会自动强制刷一次，不等 5 分钟节流。
+
+**签到状态显示**：面板账号行的「签到 / 已签」只看 `checkinDone`，由插件在账号清单里报出：
+Trae 读 `trae-accounts.json` 的 `lastCheckinDay`；Qoder 读 `qodercn-accounts.json` 的
+`lastCheckinDay`（按 UTC+8 10:00 的活动窗口日算，见 `protocol.checkinDayKey`）。
+Qoder 的判据来自活动平台 `GET /sash/api/v1/me/campaigns` 里 CREDITS 活动的
+`claimStatus === 'CLAIMED'`（官方 growth-page 同样把它显示成「已领取」）；**不要**把
+VIEW_DETAILS 的运营活动算进「已领」，也不要在 `checkin()` 的 done / claimed 分支漏记
+`lastCheckinDay` —— 漏记的表现就是「点完签到仍显示未签到，再点回今天已签到」。
 
 **版本号自动同步**（`server/channels/version-sync.js`）：启动即拉、之后每 24 小时一次，
 双源取最大 —— Trae 用 `docs.trae.cn/ide_changelog` + 本机安装的 `product.json`
@@ -211,7 +230,8 @@ node scripts/channels-login.js trae       # 起登录 → 打印 loginUrl → �
 
 ```bash
 npm run channels:verify              # 8 项：插件实现齐全 + 清单对齐 + WASM + 产物已移除 + 不直连存储
-node scripts/test-channel-plugins.js # 8 项：装/卸/启停、失败隔离、统一 ABI、内置不可删
+node scripts/test-channel-plugins.js # 13 项：装/卸/启停、失败隔离、统一 ABI、Trae / Qoder 签到落盘
+node scripts/test-channel-auto-tasks.js # 12 项：自动签到时点 / 当日去重 / 重试 / 积分刷新间隔
 node scripts/test-channels.js        # 11 项：目录 / 三端点转帧 / RPC 透传 / 404 / 断流
 npm test
 npm run test:e2e
