@@ -734,6 +734,61 @@ test('describeInstallExit：0 / -1 / 8 / 9 / 其它退出码各有明确文案',
   assert.match(core.describeInstallExit(16, '2.0.1'), /覆盖安装失败（退出码 16）/)
 })
 
+group('手动覆盖安装（Windows 稳定路径）')
+
+test('manualPs1：等进程退出 → 解压 → 覆盖 → 回读版本 → 同步卸载信息 → 启动', () => {
+  const script = helper.manualPs1({
+    artifact: 'C:\\u\\AiRoute-2.1.0-x64.zip',
+    installDir: 'D:\\软件\\airoute',
+    exe: 'D:\\软件\\airoute\\AiRoute.exe',
+    version: '2.1.0'
+  })
+  assert.match(script, /Get-Process -Name 'AiRoute'/)
+  assert.match(script, /StartsWith\(\$installDir/)
+  assert.match(script, /tar\.exe -xf \$Zip -C \$stage/)
+  assert.match(script, /robocopy \$stage \$installDir \/E/)
+  assert.match(script, /VersionInfo\.FileVersion/)
+  assert.match(script, /DisplayVersion/)
+  assert.match(script, /Start-Process -FilePath \$targetExe/)
+  assert.match(script, /exit \$code/)
+  // 版本必须来自参数并做回读，不能写死一个「成功」
+  assert.match(script, /-ne \$expected/)
+})
+
+test('manualCmd：调用同目录 apply-update.ps1，支持把 zip 拖到脚本上', () => {
+  const cmd = helper.manualCmd('AiRoute-2.1.0-x64.zip')
+  assert.match(cmd, /apply-update\.ps1/)
+  assert.match(cmd, /%~dp0AiRoute-2\.1\.0-x64\.zip/)
+  assert.match(cmd, /%~1/)
+})
+
+test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ README', () => {
+  const { root, cleanup } = tempDir()
+  try {
+    const folder = path.join(root, 'updates')
+    fs.ensureDirSync(folder)
+    const artifact = path.join(folder, 'AiRoute-2.1.0-x64.zip')
+    fs.writeFileSync(artifact, 'zip')
+    const result = helper.writeManualUpdater({
+      artifact,
+      installDir: 'D:\\p',
+      exe: 'D:\\p\\AiRoute.exe',
+      version: '2.1.0'
+    })
+    assert.ok(fs.existsSync(result.cmdPath))
+    assert.ok(fs.existsSync(result.ps1Path))
+    assert.ok(fs.existsSync(result.readmePath))
+    const raw = fs.readFileSync(result.ps1Path)
+    assert.deepStrictEqual([...raw.slice(0, 3)], [0xef, 0xbb, 0xbf], 'ps1 必须带 BOM')
+    assert.ok(raw.toString('utf8').includes('D:\\p'))
+    const cmd = fs.readFileSync(result.cmdPath, 'utf8')
+    assert.ok(/^[\x00-\x7F]*$/.test(cmd), 'cmd 内容必须是 ASCII（cmd.exe 按 OEM 代码页解析）')
+    assert.ok(fs.readFileSync(result.readmePath, 'utf8').includes('install-update.cmd'))
+  } finally {
+    cleanup()
+  }
+})
+
 // ===== 汇总 =====
 asyncChain.then(() => {
   console.log('')

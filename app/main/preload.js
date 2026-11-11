@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   notifyModelChanged: () => ipcRenderer.send('model-data-changed'),
   // 更新功能：一键升级 / 升级进度 / 回滚
   installUpdate: (payload) => ipcRenderer.invoke('update-install', payload),
+  prepareManualUpdate: (payload) => ipcRenderer.invoke('update-prepare-manual', payload),
   getInstallStatus: () => ipcRenderer.invoke('update-install-status'),
   rollbackUpdate: () => ipcRenderer.invoke('update-rollback'),
   // 更新功能：另存为对话框 / 用系统浏览器打开外链 / 打开文件夹并选中文件

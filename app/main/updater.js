@@ -13,6 +13,9 @@ const installKind = require('./install-kind')
 const winLauncher = require('./win-update-launcher')
 
 const UPDATE_DIR = process.env.AIROUTE_UPDATE_DIR || path.join(app.getPath('userData'), 'updates')
+// 手动覆盖安装的脚本与 zip 放在独立目录：updates 每次启动都会被 cleanupStale 清空，
+// 放那里会在用户「退出前又打开一次应用」时把刚生成的脚本删掉。
+const MANUAL_DIR = path.join(app.getPath('userData'), 'updates-manual')
 const JOURNAL = path.join(UPDATE_DIR, 'journal.json')
 const INSTALL_EXIT = path.join(UPDATE_DIR, winLauncher.EXIT_FILE)
 const BACKUP_DIR = path.join(UPDATE_DIR, 'backup')
@@ -78,7 +81,7 @@ function resolveWindowsTarget() {
   }
   const kind = installKind.detectInstallKind({ platform: 'win32' })
   if (!installKind.supportsOneClick(kind, 'win32')) {
-    return { ok: false, reason: '便携版不支持一键升级，请使用「手动下载安装包」（安装版支持一键升级）' }
+    return { ok: false, reason: '便携版不支持覆盖安装，请使用「手动下载安装包」（安装版支持覆盖更新）' }
   }
   const exe = app.getPath('exe')
   if (!fs.existsSync(exe)) {
@@ -194,6 +197,41 @@ function setState(patch) {
 
 function getStatus() {
   return { ...state, updateDir: UPDATE_DIR }
+}
+
+// Windows 稳定路径：不自动退出/安装，只把已下载并校验过的 zip 变成用户可双击的覆盖安装脚本。
+// 为什么不让主进程直接跑：自动启动器依赖「应用退出后子进程还活着」，部分机器/安全软件下
+// 不成立；用户双击脚本时应用已经关闭，不存在这个前提，且失败信息会留在窗口里。
+async function prepareManualInstall(payload) {
+  if (!IS_WIN) throw new Error('覆盖安装脚本仅用于 Windows')
+  const target = resolveTarget()
+  if (!target.ok) throw new Error(target.reason)
+  const { artifactPath, sha256, version } = payload || {}
+  if (!artifactPath || !version) throw new Error('缺少更新包信息')
+  if (!/^[0-9A-Za-z._-]+$/.test(String(version))) throw new Error('版本号非法')
+  if (!core.isInside(UPDATE_DIR, artifactPath)) throw new Error('更新包路径非法')
+  if (!/\.zip$/i.test(artifactPath)) throw new Error('覆盖安装需要 zip 更新包')
+  if (!fs.existsSync(artifactPath)) throw new Error('更新包不存在，请重新下载')
+  const expected = core.normalizeSha(sha256)
+  if (!expected) throw new Error('缺少 SHA-256 校验值，已停止')
+  const actual = await core.sha256File(artifactPath)
+  if (actual !== expected) throw new Error('更新包 SHA-256 校验失败')
+  const installDir = path.dirname(target.target)
+  if (!core.canWriteDir(installDir)) throw new Error(`没有写入 ${installDir} 的权限`)
+  const manualDir = path.join(MANUAL_DIR, `v${version}`)
+  fs.ensureDirSync(manualDir)
+  const manualZip = path.join(manualDir, path.basename(artifactPath))
+  if (path.resolve(artifactPath) !== path.resolve(manualZip)) {
+    fs.copySync(artifactPath, manualZip, { overwrite: true })
+  }
+  const result = winLauncher.writeManualUpdater({
+    artifact: manualZip,
+    installDir,
+    exe: target.target,
+    version,
+  })
+  console.log('[aiRoute] 已生成覆盖安装脚本:', result.cmdPath)
+  return { ...result, installDir, version, artifactPath: manualZip }
 }
 
 // 启动安装任务（异步执行，进度通过 getStatus 轮询）
@@ -340,10 +378,12 @@ function quitForInstall(delay = 800) {
 
 module.exports = {
   UPDATE_DIR,
+  MANUAL_DIR,
   STAGE_TEXT,
   init,
   getStatus,
   startInstall,
+  prepareManualInstall,
   startRollback,
   resolveTarget
 }

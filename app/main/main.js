@@ -255,6 +255,9 @@ ipcMain.handle('set-auto-launch', (_, enabled) => {
 // 更新功能：一键升级（下载 → SHA-256 → 备份 → 原子替换 → 回读 → 重启由主进程串起来）
 ipcMain.handle('update-install', (_, payload) => updater.startInstall(payload))
 
+// Windows 稳定路径：把已下载的 zip 生成覆盖安装脚本（用户退出应用后双击执行）
+ipcMain.handle('update-prepare-manual', (_, payload) => updater.prepareManualInstall(payload))
+
 // 一键升级进度快照（渲染进程轮询：阶段 / 错误 / 是否已回滚 / 可用备份）
 ipcMain.handle('update-install-status', () => updater.getStatus())
 

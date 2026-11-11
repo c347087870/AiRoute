@@ -2,6 +2,28 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.1.1] - 2026-11-11
+
+Windows 更新改成「下载覆盖包 + 双击 install-update.cmd」：不再依赖应用退出后自动启动的安装器，这是 2.1.0 一键升级在部分机器上「下载完成后什么都没发生、重启仍是旧版」的根治方案。
+
+### 修复
+
+- **Windows 一键升级不可靠**：应用退出后由主进程启动的 PowerShell 启动器，在部分机器 / 安全软件环境下会被回收，表现为更新包下载完成但安装目录没有变化。现改为下载 zip 覆盖包 → 生成 `install-update.cmd`，用户退出 AiRoute 后双击执行
+- **覆盖安装脚本**：先等 AiRoute 进程退出（最多 3 分钟），再解压 → `robocopy` 覆盖安装目录 → 回读 `AiRoute.exe` 的 FileVersion → 启动应用；不跑 NSIS 安装器、不碰卸载器、不写 HKLM、不需要 UAC。失败时保留 `install-update.log` 和更新包
+- **应用和功能信息同步**：覆盖完成后同步 `DisplayName` / `DisplayVersion` / `InstallLocation`，避免「程序已经是新版、应用和功能还显示旧版」
+- **下载兜底**：应用内下载失败时，可用「Release 页面」用浏览器下载 `AiRoute-<版本>-<架构>.zip`，再把它拖到 `install-update.cmd` 上；脚本会核对 zip 里的版本
+- macOS 一键升级（备份 / 原子替换 / 回滚）不变
+
+### 测试
+
+- `test-update` 增加 `manualPs1` / `manualCmd` / `writeManualUpdater` 用例（41 项）
+- 沙箱实测：复制 2.0.6 安装目录 + 2.1.0 zip，运行生成的脚本，约 5 秒覆盖完成，FileVersion 从 2.0.6 → 2.1.0
+- `npm test` / `npm run test:e2e` 全绿
+
+### 升级说明
+
+2.0.6 及更早版本的旧更新链路可能仍会失败一次：请手动下载 `AiRoute-2.1.1-x64.zip`，退出 AiRoute（托盘图标 → 退出）后解压，把解压出的文件覆盖到原安装目录（例如 `D:\软件\airoute`）再启动；不方便覆盖时也可运行 `AiRoute-2.1.1-x64-setup.exe` 并在安装界面选择原安装目录。从 2.1.1 起，后续更新使用 `install-update.cmd`，不再走旧的一键安装链路。
+
 ## [2.1.0] - 2026-11-11
 
 渠道账号支持自动签到与积分余额刷新，并修好 Qoder 国内版「签到后仍显示未签到」的状态同步。

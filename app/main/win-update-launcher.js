@@ -99,6 +99,140 @@ function buildScript(options) {
   return setupScript({ ...options, artifact: options.artifact || options.installer, installDir })
 }
 
+// ===== 手动覆盖安装（Windows 稳定路径）=====
+//
+// 自动启动器依赖「应用退出后子进程还活着」这个前提；在某些机器/安全软件下不成立，
+// 表现是升级包下载完了却什么都没发生。这里改成用户自己双击的脚本：
+//   · 应用关闭后运行，不存在父子进程生命周期问题；
+//   · 不跑 NSIS 安装器、不碰卸载器、不写 HKLM、不需要 UAC；
+//   · 只解压 zip → robocopy 覆盖安装目录 → 回读 FileVersion → 拉起应用。
+// zip 也可以从浏览器下载后直接拖到 install-update.cmd 上使用。
+const MANUAL_CMD = 'install-update.cmd'
+const MANUAL_PS1 = 'apply-update.ps1'
+const MANUAL_README = 'README.txt'
+
+function manualPs1({ artifact, installDir, exe, version, logFile }) {
+  const zipName = path.basename(String(artifact || ''))
+  const logPath = logFile || 'install-update.log'
+  return [
+    'param([Parameter(Position=0)][string]$Zip = "")',
+    "$ErrorActionPreference = 'Stop'",
+    '$here = Split-Path -Parent $MyInvocation.MyCommand.Path',
+    `$targetExe = ${psQuote(exe)}`,
+    `$installDir = ${psQuote(installDir)}`,
+    `$expected = ${psQuote(version)}`,
+    `$log = Join-Path $here ${psQuote(logPath)}`,
+    `if ([string]::IsNullOrWhiteSpace($Zip)) { $Zip = Join-Path $here ${psQuote(zipName)} }`,
+    'function Write-Log([string]$text) {',
+    '  $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $text',
+    '  Write-Host $line',
+    '  Add-Content -LiteralPath $log -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue',
+    '}',
+    'Write-Host ""',
+    'Write-Host "AiRoute 覆盖安装" -ForegroundColor Cyan',
+    'Write-Host ("目标目录：" + $installDir)',
+    'Write-Host ("目标版本：" + $expected)',
+    'Write-Host ""',
+    'if (-not (Test-Path -LiteralPath $Zip)) { Write-Log ("找不到更新包：" + $Zip); exit 2 }',
+    '# 等应用退出：用户可能直接双击脚本，也可能先关闭；两种都覆盖',
+    '$deadline = (Get-Date).AddMinutes(3)',
+    'while ($true) {',
+    "  $running = @(Get-Process -Name 'AiRoute' -ErrorAction SilentlyContinue | Where-Object {",
+    '    try { $_.Path -and $_.Path.StartsWith($installDir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }',
+    '  })',
+    '  if ($running.Count -eq 0) { break }',
+    '  Write-Host "检测到 AiRoute 正在运行，请从托盘图标退出（关闭窗口只是最小化）..." -ForegroundColor Yellow',
+    '  Start-Sleep -Seconds 3',
+    '  if ((Get-Date) -gt $deadline) { Write-Log "等待 AiRoute 退出超时"; exit 3 }',
+    '}',
+    'Start-Sleep -Seconds 2',
+    "$stage = Join-Path $env:TEMP ('airoute-update-' + [guid]::NewGuid().ToString('N'))",
+    'New-Item -ItemType Directory -Path $stage -Force | Out-Null',
+    '$code = 0',
+    'try {',
+    '  Write-Log ("解压更新包：" + $Zip)',
+    '  & tar.exe -xf $Zip -C $stage',
+    '  if ($LASTEXITCODE -ne 0) { Write-Log "tar 解压失败，改用 Expand-Archive"; Expand-Archive -LiteralPath $Zip -DestinationPath $stage -Force }',
+    "  $stagedExe = Join-Path $stage 'AiRoute.exe'",
+    "  if (-not (Test-Path -LiteralPath $stagedExe)) { throw '更新包不完整：解压后找不到 AiRoute.exe' }",
+    '  $stagedVersion = (Get-Item -LiteralPath $stagedExe).VersionInfo.FileVersion',
+    '  if ($stagedVersion -ne $expected) { throw "更新包版本是 $stagedVersion，期望 $expected" }',
+    '  Write-Log "覆盖安装目录：$installDir"',
+    '  & robocopy $stage $installDir /E /R:5 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null',
+    '  if ($LASTEXITCODE -ge 8) { throw "robocopy 失败（退出码 $LASTEXITCODE）" }',
+    '  $installedVersion = (Get-Item -LiteralPath $targetExe).VersionInfo.FileVersion',
+    '  if ($installedVersion -ne $expected) { throw "覆盖后版本仍为 $installedVersion" }',
+    '  # 同步「应用和功能」里的版本号与安装目录：zip 覆盖不会改注册表，不改会一直显示旧版本',
+    "  $keys = @(Get-ChildItem 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall' -ErrorAction SilentlyContinue | ForEach-Object {",
+    '    Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue',
+    '  } | Where-Object { $_.DisplayIcon -and ($_.DisplayIcon -like ($installDir + "*")) })',
+    '  foreach ($key in $keys) {',
+    '    Set-ItemProperty -LiteralPath $key.PSPath -Name DisplayVersion -Value $expected -ErrorAction SilentlyContinue',
+    '    Set-ItemProperty -LiteralPath $key.PSPath -Name DisplayName -Value ("AiRoute " + $expected) -ErrorAction SilentlyContinue',
+    '    Set-ItemProperty -LiteralPath $key.PSPath -Name InstallLocation -Value $installDir -ErrorAction SilentlyContinue',
+    '  }',
+    '  Write-Log ("更新成功：v" + $expected)',
+    '} catch {',
+    '  $code = 4',
+    '  Write-Log ("更新失败：" + $_.Exception.Message)',
+    '  Write-Log ("更新包保留在：" + $Zip)',
+    '} finally {',
+    '  Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue',
+    '}',
+    'if ($code -eq 0) {',
+    '  Write-Host "正在启动 AiRoute..." -ForegroundColor Green',
+    '  try { Start-Process -FilePath $targetExe } catch { Write-Log ("启动失败：" + $_.Exception.Message) }',
+    '}',
+    'exit $code'
+  ].join('\r\n') + '\r\n'
+}
+
+function manualCmd(zipName) {
+  return [
+    '@echo off',
+    'setlocal',
+    'cd /d "%~dp0"',
+    'if "%~1"=="" (set "ZIP=%~dp0' + String(zipName || '').replace(/"/g, '') + '") else (set "ZIP=%~1")',
+    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0' + MANUAL_PS1 + '" "%ZIP%"',
+    'echo.',
+    'echo Update finished. Press any key to close this window.',
+    'pause >nul'
+  ].join('\r\n') + '\r\n'
+}
+
+function manualReadme({ version, installDir }) {
+  return [
+    'AiRoute 覆盖安装',
+    '',
+    `目标版本：${version}`,
+    `安装目录：${installDir}`,
+    '',
+    '使用步骤：',
+    '1. 退出 AiRoute（托盘图标右键 → 退出；直接关窗口只会最小化）；',
+    `2. 双击本文件夹里的 ${MANUAL_CMD}；`,
+    '3. 脚本会等待 AiRoute 退出，然后解压更新包、覆盖安装目录并重新启动；',
+    '4. 看到「更新成功」即完成，失败时把 install-update.log 发给开发者。',
+    '',
+    '如果更新包是通过浏览器下载的：把 zip 文件拖到 install-update.cmd 上也可以，',
+    '脚本会自动使用拖入的文件并核对版本。',
+    ''
+  ].join('\r\n')
+}
+
+function writeManualUpdater({ artifact, installDir, exe, version }) {
+  const folder = path.dirname(artifact)
+  const ps1Path = path.join(folder, MANUAL_PS1)
+  const cmdPath = path.join(folder, MANUAL_CMD)
+  const readmePath = path.join(folder, MANUAL_README)
+  fs.mkdirSync(folder, { recursive: true })
+  // PS1 带 BOM：PowerShell 5.1 才按 UTF-8 解析中文（安装目录可能含中文）
+  fs.writeFileSync(ps1Path, '\ufeff' + manualPs1({ artifact, installDir, exe, version }), 'utf8')
+  // CMD 内容全 ASCII：cmd.exe 按系统 OEM 代码页解析，中文写进去容易乱码
+  fs.writeFileSync(cmdPath, manualCmd(path.basename(artifact)), 'ascii')
+  fs.writeFileSync(readmePath, manualReadme({ version, installDir }), 'utf8')
+  return { folder, ps1Path, cmdPath, readmePath }
+}
+
 // 载荷类型：zip 覆盖 / setup 安装包
 function payloadKind(filePath) {
   return /\.zip$/i.test(String(filePath || '')) ? 'zip' : 'setup'
@@ -128,10 +262,17 @@ module.exports = {
   SCRIPT_FILE,
   WAIT_SECONDS,
   EXIT_VERSION_MISMATCH,
+  MANUAL_CMD,
+  MANUAL_PS1,
+  MANUAL_README,
   psQuote,
   powershellPath,
   payloadKind,
   buildScript,
+  manualPs1,
+  manualCmd,
+  manualReadme,
+  writeManualUpdater,
   writeScript,
   spawnLauncher
 }

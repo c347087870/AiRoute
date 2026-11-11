@@ -124,7 +124,7 @@
             <AppButton variant="primary" :disabled="busy || !supported" @click="oneClickUpdate">
               {{ primaryLabel }}
             </AppButton>
-            <AppButton variant="secondary" :disabled="busy" @click="manualDownload">手动下载</AppButton>
+            <AppButton variant="secondary" v-if="!isWindowsOverlay" :disabled="busy" @click="manualDownload">手动下载</AppButton>
             <AppButton variant="secondary" v-if="savedPath" @click="openFolder">打开文件夹</AppButton>
             <AppButton variant="secondary" @click="openReleasePage">Release 页面</AppButton>
             <span v-if="info.publishedAt" class="config-hint inline">发布于 {{ formatTime(info.publishedAt) }}</span>
@@ -136,7 +136,11 @@
           <div v-if="installError" class="warning-box">
             ⚠ {{ installError }}{{ rolledBack ? '（已自动回滚到上一版本）' : '' }}
           </div>
-          <div v-if="savedPath" class="config-hint">安装包已保存到：{{ savedPath }}（可双击手动安装）</div>
+          <div v-if="savedPath" class="config-hint">
+            {{ isWindowsOverlay
+              ? `更新文件已生成：${savedPath}（退出 AiRoute 后双击同目录的 install-update.cmd）`
+              : `安装包已保存到：${savedPath}（可双击手动安装）` }}
+          </div>
           <div v-if="!supported" class="config-hint">{{ unsupportedReason }}</div>
           <div class="config-hint">{{ installHint }}</div>
         </div>
@@ -176,7 +180,7 @@ const {
   info, checking, stage, stageText, percent, error, installError, rolledBack, savedPath,
   downloading, busy, supported, unsupportedReason, backup, lastResult,
   oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus,
-  isMacPlatform, isWinInstaller
+  isMacPlatform
 } = useUpdate()
 
 // 本地版本号：优先取服务端 /api/system/status（打开页面就有，不依赖联网），
@@ -191,26 +195,30 @@ const currentVersion = computed(() => sysStatus.value?.version || info.value?.cu
 const BETA_MARKER = /-(alpha|beta|rc|next|dev)([.\-]|$)/i
 const releaseLine = computed(() => info.value?.line || sysStatus.value?.line || (BETA_MARKER.test(currentVersion.value) ? 'beta' : 'stable'))
 
-// 一键升级按钮文案：按阶段展示当前动作，失败后变成重试
+// Windows 安装版的更新方式：下载覆盖包 + 生成脚本，由用户退出应用后双击执行。
+// 不再走「自动退出 → 静默安装」那条在部分机器上跑不通的链路。
+const isWindowsOverlay = computed(() => info.value?.platform === 'win' && info.value?.installKind !== 'portable')
+
+// 更新按钮文案：按阶段展示当前动作，失败后变成重试
 const primaryLabel = computed(() => {
   switch (stage.value) {
     case 'downloading': return `下载中 ${percent.value}%`
-    case 'verifying': return '校验安装包…'
+    case 'verifying': return '校验更新包…'
     case 'backing-up': return '备份中…'
     case 'replacing': return '安装中…'
     case 'readback': return '回读校验…'
     case 'restarting': return '正在重启…'
-    case 'error': return `重试升级到 v${info.value?.latest || ''}`
-    default: return `一键升级到 v${info.value?.latest || ''}`
+    case 'error': return isWindowsOverlay.value ? `重试下载 v${info.value?.latest || ''}` : `重试升级到 v${info.value?.latest || ''}`
+    default: return isWindowsOverlay.value ? `下载更新包 v${info.value?.latest || ''}` : `一键升级到 v${info.value?.latest || ''}`
   }
 })
 
-// 安装方式提示：macOS 走原子替换 + 自动回滚；Windows 安装版走静默安装（无自动回滚）；
-// Windows 便携版不支持一键升级，只能手动下载替换
+// 安装方式提示：macOS 走原子替换 + 自动回滚；Windows 安装版走「下载覆盖包 + 用户双击脚本」；
+// Windows 便携版不参与覆盖安装，只能手动替换
 const installHint = computed(() => {
   if (isMacPlatform()) return '一键升级会下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启；任一步失败自动回滚'
-  if (isWinInstaller()) return '一键升级会下载安装包 → SHA-256 校验 → 退出应用 → 静默安装 → 自动重启；安装失败会重新启动当前版本（无自动回滚）'
-  return '便携版不支持一键升级：下载安装包后手动替换 exe。改用安装版（文件名带 -setup，便携版是 -portable）即可一键升级'
+  if (isWindowsOverlay.value) return '下载更新包 → SHA-256 校验 → 生成 install-update.cmd；退出 AiRoute 后双击脚本覆盖安装并重启（不跑安装器、不需要 UAC）。应用内下载失败时可在「Release 页面」用浏览器下载 zip，再拖到 install-update.cmd 上'
+  return '便携版不支持覆盖安装：请下载安装包后手动替换 exe。改用安装版（文件名带 -setup）即可使用覆盖更新'
 })
 
 // 统一提取接口错误信息：axios 的网络层失败没有 response，原始文案只有 "Network Error"，
