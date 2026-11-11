@@ -34,14 +34,12 @@ const RATE_LIMIT_FALLBACK_MS = 60 * 1000
 // 积分为零的账号在多长时间内可信（快照陈旧时 fail-open，别把好号误杀）
 const CREDITS_FRESH_MS = 24 * 3600 * 1000
 
-// 本地日期键（YYYY-MM-DD）。签到按**自然日**算，跨零点自动失效，
+// 北京时间的自然日（YYYY-MM-DD）。签到按**自然日**算，跨零点自动失效，
 // 所以存日期而不是存时间戳再比 24 小时。
-// 与 server/workbuddy/pool.js 的 localDay 同口径，但两边各留一份：
-// 插件不引用 WorkBuddy 的实现（那是另一套后端，不该成为插件的依赖）。
+// 用 UTC+8 而不是系统时区：Trae 客户端判跨天用的是服务端时间派生的 beijingDayKey
+// （反编译 workbench.desktop.main.js 可见），机器时区改了不该影响签到状态。
 function localDay(ms) {
-  const d = new Date(ms)
-  const pad = n => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10)
 }
 
 class TraeError extends Error {

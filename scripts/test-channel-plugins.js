@@ -18,6 +18,7 @@ const path = require('node:path')
 const root = path.join(__dirname, '..')
 const { createPluginHost } = require(path.join(root, 'server', 'channels', 'plugin-host'))
 const { createPluginStore, BUILTIN_PLUGINS } = require(path.join(root, 'server', 'channels', 'plugin-store'))
+const qoderProtocol = require(path.join(root, 'server', 'channels', 'plugins', 'qoder', 'protocol'))
 
 // 每个用例一套独立 dataDir：插件清单是按目录落盘的，共用会互相污染
 function freshDir(name) {
@@ -27,11 +28,9 @@ function freshDir(name) {
   return dir
 }
 
-// 本地日期键：与插件里判定「今天签过」用的是同一口径（自然日，非 24 小时）
+// 北京时间的日期键：与插件里判定「今天签过」用的是同一口径（UTC+8 自然日）
 function localDay(ms) {
-  const d = new Date(ms)
-  const pad = n => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10)
 }
 
 const silent = { info() {}, warn() {}, error() {} }
@@ -300,6 +299,112 @@ async function main() {
       const third = await backend.checkin('trae', uid)
       assert.equal(third.outcome, 'failed')
       row = backend.listAccounts('trae').find(item => item.uid === uid)
+      assert.equal(row.checkinDone, false, '失败不该记成已签到')
+    } finally {
+      global.fetch = realFetch
+      await host.shutdown()
+    }
+  })
+
+  // ⑪ Qoder 的签到状态也要报出来
+  //
+  // 判据来自活动平台的 claimStatus（官方 growth-page 把 CLAIMED 显示成「已领取」），
+  // 但列表里还混着 VIEW_DETAILS 的运营活动 —— 只有 CREDITS 活动才算签到。
+  await test('Qoder 报出今日签到状态（活动日：UTC+8 10:00 换窗口）', async () => {
+    const dir = freshDir('qoder-checkin-state')
+    const host = createPluginHost({ dataDir: dir, logger: silent })
+    host.load()
+    const today = qoderProtocol.checkinDayKey()
+    const yesterday = qoderProtocol.checkinDayKey(Date.now() - 24 * 60 * 60 * 1000)
+    fs.writeFileSync(path.join(dir, 'qodercn-accounts.json'), JSON.stringify({
+      accounts: [
+        { uid: 'cn-signed-today', id: 'qodercn-aaaaaaaa', name: '今天领过', enabled: true, lastCheckinDay: today, lastCheckinAt: 1700000000000 },
+        { uid: 'cn-signed-yesterday', id: 'qodercn-bbbbbbbb', name: '昨天领过', enabled: true, lastCheckinDay: yesterday, lastCheckinAt: 1699000000000 },
+        { uid: 'cn-never', id: 'qodercn-cccccccc', name: '没领过', enabled: true },
+      ],
+    }))
+    const rows = host.instanceOf('qoder').backend.listAccounts('qodercn')
+    const byUid = new Map(rows.map(row => [row.uid, row]))
+    assert.equal(byUid.get('cn-signed-today').checkinDone, true, '今天领过要报 true')
+    assert.equal(byUid.get('cn-signed-today').lastCheckinAt, 1700000000000, '最近领取时刻要透出来')
+    assert.equal(byUid.get('cn-signed-yesterday').checkinDone, false, '昨天的窗口不算今天')
+    assert.equal(byUid.get('cn-never').checkinDone, false, '没领过不该报 true')
+    assert.equal(byUid.get('cn-never').lastCheckinAt, 0)
+    await host.shutdown()
+  })
+
+  // ⑫ Qoder 签到落盘：claimed / already 才记，失败不记
+  //
+  // 用户报的现象是「点完签到还显示未签到，再点显示今天已签到」：
+  // provider.checkin 拿到了 done/claimed，但没写 lastCheckinDay，面板就一直画「签到」。
+  await test('Qoder 签到落盘：已领 / 领取成功才记，失败不记', async () => {
+    const dir = freshDir('qoder-checkin-persist')
+    const uid = 'cn-uid-001'
+    fs.writeFileSync(path.join(dir, 'channel-credentials.json'), JSON.stringify({
+      QODERCN_ACCOUNT_DEADBEEF: JSON.stringify({
+        uid,
+        access_token: 'token-x',
+        refresh_token: '',
+        expire_time: Date.now() + 3600 * 1000,
+        machine_id: 'machine-x',
+      }),
+    }))
+    const host = createPluginHost({ dataDir: dir, logger: silent })
+    host.load()
+    const backend = host.instanceOf('qoder').backend
+    const realFetch = global.fetch
+    const creditCampaign = extra => ({
+      campaignId: 'campaign-1',
+      campaignKey: 'act-daily',
+      actionType: 'CLAIM_BENEFIT',
+      claimStatus: 'CLAIMABLE',
+      benefit: { kind: 'CREDITS', amount: 100 },
+      placements: [{ content: { zh: { title: '每天领 100 Credits' } } }],
+      ...extra,
+    })
+    function stub(campaigns, claim) {
+      global.fetch = async url => {
+        const target = String(url)
+        // claim 的 URL 也包含 /campaigns（/campaigns/<id>/claim），先判它
+        if (target.endsWith('/claim')) return { ok: true, status: 200, json: async () => claim }
+        if (target.includes('/campaigns')) return { ok: true, status: 200, json: async () => ({ campaigns }) }
+        return { ok: false, status: 404, json: async () => ({}) }
+      }
+    }
+    try {
+      // ① 上游说今天已领 → 记日期，但不编一个「刚刚领的」时刻
+      stub([creditCampaign({ claimStatus: 'CLAIMED' })])
+      const first = await backend.checkin('qodercn', uid)
+      assert.equal(first.outcome, 'done')
+      let row = backend.listAccounts('qodercn').find(item => item.uid === uid)
+      assert.equal(row.checkinDone, true, '上游说已领过也要记下来')
+      assert.equal(row.lastCheckinAt, 0, '只知道日期、不知道时刻，不能写 now')
+      assert.equal(row.id, 'qodercn-deadbeef', 'id 必须沿用凭据键名')
+
+      // ② 可领 → claim 成功 → 记下日期与时刻
+      fs.rmSync(path.join(dir, 'qodercn-accounts.json'), { force: true })
+      stub([creditCampaign({})], { status: 'CLAIMED' })
+      const second = await backend.checkin('qodercn', uid)
+      assert.equal(second.outcome, 'claimed')
+      assert.equal(second.credit, 100, 'claim 响应不带金额时用活动列表的 benefit.amount 补齐')
+      row = backend.listAccounts('qodercn').find(item => item.uid === uid)
+      assert.equal(row.checkinDone, true, '领取成功后要报「今天领过」')
+      assert.ok(row.lastCheckinAt > 0, '成功路径要记下领取时刻')
+
+      // ③ 活动平台只回 VIEW_DETAILS 的运营活动 → 不能当成「签到成功」
+      fs.rmSync(path.join(dir, 'qodercn-accounts.json'), { force: true })
+      stub([{ campaignId: 'promo', actionType: 'VIEW_DETAILS', claimStatus: 'CLAIMED' }])
+      const third = await backend.checkin('qodercn', uid)
+      assert.equal(third.outcome, 'ineligible', '运营活动不算签到')
+      row = backend.listAccounts('qodercn').find(item => item.uid === uid)
+      assert.equal(row.checkinDone, false, '没签到不能显示已签')
+
+      // ④ claim 失败 → 不能记，否则按钮会灰一整天
+      fs.rmSync(path.join(dir, 'qodercn-accounts.json'), { force: true })
+      stub([creditCampaign({})], { status: 'FAILED', failureCode: 'CAMPAIGN_BUSY' })
+      const fourth = await backend.checkin('qodercn', uid)
+      assert.notEqual(fourth.outcome, 'claimed')
+      row = backend.listAccounts('qodercn').find(item => item.uid === uid)
       assert.equal(row.checkinDone, false, '失败不该记成已签到')
     } finally {
       global.fetch = realFetch

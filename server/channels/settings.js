@@ -39,6 +39,12 @@ const DEFAULTS = {
   affinity: true,
   // 账号轮转：关掉即「永远用清单里第一个可用账号」（旧行为）
   rotation: true,
+  // ── 自动维护（见 auto-tasks.js）──
+  // 自动签到：每天到这个点给 Trae / Qoder 国内版签一次；进程晚于时点启动会补签
+  autoCheckin: true,
+  autoCheckinHour: 10,
+  // 积分余额后台刷新间隔（分钟，0 = 关）：只对实现了 balance() 的渠道生效
+  balanceRefreshMinutes: 30,
   // ── Trae 中转（P0/P1）──
   // 首字超时：建连后这么久还没吐第一个字节就换号。Trae 思考型模型首字 10~40s，
   // 10 秒是「卡住的号」与「模型在想」的分界，换号只发生在毫无产出时。
@@ -67,6 +73,8 @@ const RANGES = {
   cooldownMs: [1000, 6 * 60 * 60 * 1000],
   maxConcurrency: [0, 16],
   minGapMs: [0, 10000],
+  autoCheckinHour: [0, 23],
+  balanceRefreshMinutes: [0, 1440],
   traeFirstByteMs: [3000, 60000],
   traeStickyTtlMs: [0, 24 * 60 * 60 * 1000],
 }

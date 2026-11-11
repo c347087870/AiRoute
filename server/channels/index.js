@@ -19,6 +19,7 @@ const workbuddy = require('../workbuddy/runtime')
 const accountHealth = require('../account-health')
 const { createOwnedRuntime } = require('./owned/runtime')
 const { createSettings } = require('./settings')
+const { createAutoTasks } = require('./auto-tasks')
 const { BUILTIN_PLUGINS } = require('./plugin-store')
 
 // 渠道数据目录与代码目录分开：server/channels 是随包分发的代码，
@@ -31,6 +32,7 @@ let runtime = null
 let initializing = null
 let owned = null
 let channelSettings = null
+let autoTasks = null
 // 运行时还没起来时也要能读设置（面板可能在初始化完成前就打开）
 const settingsFileDir = () => (owned?.dataDir || resolveDataDir())
 
@@ -164,6 +166,16 @@ function init(options = {}) {
     runtime = created
     // 目录刷新放在后台：某个渠道登录态异常不该拖住服务启动
     created.refresh().catch(error => logger.warn?.(`[channels] 模型目录刷新失败：${error.message}`))
+    // 自动签到 / 积分刷新：定时器归宿主管，插件只提供 checkin()/balance()
+    autoTasks = createAutoTasks({
+      dataDir,
+      // 走模块级 rpc（不是 owned.rpc）：账号被上游禁用等证据由 afterRpc 统一收口
+      rpc: body => rpc(body),
+      settings,
+      providers: () => (runtime ? runtime.providers : []),
+      logger,
+    })
+    autoTasks.start()
     return created
   })().catch(error => {
     // 初始化失败就把句柄清掉：留着一个已关闭的运行时会让请求拿到 404
@@ -249,6 +261,9 @@ async function reloadPlugins() {
   const dataDir = owned?.dataDir || resolveDataDir()
   if (!runtime) return init({ dataDir })
   const onChanged = owned?.onChanged
+  // 定时器持有的是旧运行时的 rpc：先停掉，重建后再由 init 起一份新的
+  autoTasks?.stop()
+  autoTasks = null
   const closing = runtime.close()
   runtime = null
   initializing = null
@@ -264,6 +279,8 @@ async function shutdown() {
       await initializing
     } catch {}
   }
+  autoTasks?.stop()
+  autoTasks = null
   if (!runtime) return
   const closing = runtime.close()
   runtime = null

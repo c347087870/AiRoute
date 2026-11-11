@@ -373,6 +373,38 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
     notify()
   }
 
+  // 静默写注册表：不触发 onChanged。签到状态与积分快照都不影响模型目录，
+  // 触发重建等于每次签到/查余额都白跑一趟远端采集。
+  function patchAccountQuiet(provider, uid, patch) {
+    const entries = readRegistry(provider)
+    const index = entries.findIndex(entry => entry.uid === uid)
+    if (index === -1) {
+      const existing = listAccounts(provider).find(entry => entry.uid === uid)
+      entries.push({
+        uid,
+        id: existing?.id || accounts.accountId(provider, uid),
+        name: existing?.name || uid,
+        enabled: true,
+        addedAt: Date.now(),
+        ...patch,
+      })
+    } else {
+      entries[index] = { ...entries[index], ...patch }
+    }
+    writeRegistry(provider, entries)
+  }
+
+  // 记下「这个活动日领过了」。只写注册表、不发 notify（理由同 patchAccountQuiet）。
+  //
+  // stampAt=false 用于「上游说今天已领过」：那时我们只知道日期，不知道是哪一刻
+  // 领的，写一个 now 会让「最近签到」显示成刚刚。
+  function noteCheckinDone(provider, uid, { stampAt = true } = {}) {
+    const now = Date.now()
+    const patch = { lastCheckinDay: protocol.checkinDayKey(now) }
+    if (stampAt) patch.lastCheckinAt = now
+    patchAccountQuiet(provider, uid, patch)
+  }
+
   // 国际版出现「排队中」（10605）= 官方已把这个号放进禁用队列，实测不会自愈。
   // 打持久标记并从选号里剔除，免得每个请求都白等 30 秒×2。
   function markOfficialDisabled(provider, uid, reason) {
@@ -402,6 +434,9 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
 
   function accountEntries(provider) {
     const now = Date.now()
+    // 活动日：UTC+8 10:00 换一批（见 protocol.checkinDayKey）。存的是日期，
+    // 跨窗口自然失效 —— 第二天按钮不会还灰着。
+    const day = protocol.checkinDayKey(now)
     return listAccounts(provider).map(entry => {
       const credential = accounts.getCredential(dataDir, provider, entry.uid)
       const until = cooldowns.get(entry.uid)
@@ -412,6 +447,12 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
         expiresAt: credential ? protocol.credentialExpiresAtMs(credential) ?? 0 : 0,
         expired: credential ? protocol.isExpired(credential) : true,
         hasCredential: credential !== undefined,
+        // 今天领过没：面板据此把「签到」按钮置灰。字段名与 Trae / WorkBuddy
+        // 同名同义，界面上三套后端才是同一个字段。
+        // ⚠️ 缺了这两个字段，签到成功后按钮会一直显示「签到」，
+        // 再点一次只能从上游拿到「今天已领过」—— 用户看到的就是「明明签了还显示未签」。
+        checkinDone: entry.lastCheckinDay === day,
+        lastCheckinAt: Number(entry.lastCheckinAt) || 0,
         // 今日已用 token（账号级，见 tokenToday 的说明）
         tokenUsageToday: tokenUsageTodayOf(entry.uid),
         // 冷却到什么时候（面板可显示「限流中」，避免用户以为号坏了）
@@ -1146,6 +1187,9 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       // 保留现场：形状不符时把原始响应的摘要带出来，否则只能看到一句「不符合预期」
       throw new Error(`积分余额查询失败：响应形状不符合预期（${raw.slice(0, 160)}）`)
     }
+    // 余额快照落盘：面板刷新后下一次打开也能立刻看到上次读数，不必等一轮查询；
+    // 静默写（不 notify），否则每次查余额都会触发一次模型目录重算。
+    patchAccountQuiet(provider, uid, { credits: value.total, creditsFetchedAt: Date.now() })
     return value
   }
 
@@ -1184,6 +1228,18 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       kind: String(benefit.kind ?? '').toUpperCase(),
       amount: Number(benefit.amount) || 0,
     }
+  }
+
+  // 只有「领积分」的活动算签到。活动平台里还混着「查看详情」类运营活动
+  // （actionType=VIEW_DETAILS，没有 benefit）：把它们算进「今天已领过」，
+  // 会让用户看到「已签」但实际一分没领。
+  // 判据同时看 benefit.kind 与 actionType：官方 growth-page 用 claimStatus 显示
+  // 「已领取」，但列表里其它活动也可能是 CLAIMED，不能按条数一概而论。
+  function isCreditCampaign(item) {
+    const kind = campaignBenefit(item).kind
+    if (kind === 'CREDITS') return true
+    // 少数活动领完后会把 benefit 摘掉，但 actionType 仍是 CLAIM_BENEFIT
+    return kind === '' && campaignAction(item) === 'CLAIM_BENEFIT'
   }
 
   // 拉活动列表。候选基址只在「连接失败 / 404 / 405 / 410」时回落 ——
@@ -1257,7 +1313,7 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
   }
 
   // 旧签到端点：只有 404/405/410 才算「本区没有」，403 多是出口/WAF，不能缓存
-  async function legacyCheckin(provider, credential) {
+  async function legacyCheckin(provider, credential, uid) {
     const product = protocol.PRODUCTS[provider]
     try {
       const response = await request(`${product.openApiBase}${protocol.CHECKIN_STATUS_PATH}`, {
@@ -1274,8 +1330,14 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       }
       if (!response.ok) return { outcome: 'failed', message: `签到状态查询失败（HTTP ${response.status}）` }
       const body = await response.json().catch(() => ({}))
-      const claimed = String(body?.status ?? '').toUpperCase() === 'CLAIMED'
-      if (claimed) return { outcome: 'done', message: '今天已签过' }
+      const legacyStatus = String(body?.status ?? '').toUpperCase()
+      // 上游明确回 DISABLED 时不要再去 claim：那是「这一区已经没有旧签到」，
+      // 不是「还没签」。实测 Qoder 国内版就是这个值。
+      if (legacyStatus === 'DISABLED') return { outcome: 'ineligible', message: '本区域每日签到已关闭', unsupported: true }
+      if (legacyStatus === 'CLAIMED') {
+        noteCheckinDone(provider, uid, { stampAt: false })
+        return { outcome: 'done', message: '今天已签过' }
+      }
       const claim = await request(`${product.openApiBase}${protocol.CHECKIN_CLAIM_PATH}`, {
         method: 'POST',
         headers: {
@@ -1287,12 +1349,16 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       })
       const claimBody = await claim.json().catch(() => ({}))
       const text = JSON.stringify(claimBody)
-      if (claim.status === 409 || text.includes('ALREADY_CLAIMED')) return { outcome: 'done', message: '今天已签过' }
+      if (claim.status === 409 || text.includes('ALREADY_CLAIMED')) {
+        noteCheckinDone(provider, uid, { stampAt: false })
+        return { outcome: 'done', message: '今天已签过' }
+      }
       if (!claim.ok || claimBody?.success === false) {
         return { outcome: 'failed', message: `签到失败（HTTP ${claim.status}）` }
       }
       const credit = Number(claimBody?.rewardCredits) || 0
-      return { outcome: 'claimed', credit, message: credit > 0 ? `签到领取 ${credit} 积分` : '签到成功' }
+      noteCheckinDone(provider, uid)
+      return { outcome: 'claimed', ...credit > 0 ? { credit } : {}, message: credit > 0 ? `签到领取 ${credit} 积分` : '签到成功' }
     } catch (error) {
       return { outcome: 'failed', message: `签到请求失败：${error.message}` }
     }
@@ -1321,7 +1387,7 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       const unsupported = /HTTP (404|405|410)|活动平台不可用/.test(error.message)
       if (unsupported) {
         checkinProbe.set(provider, { supported: false, until: Date.now() + 6 * 3600 * 1000, reason: error.message })
-        const legacy = await legacyCheckin(provider, credential)
+        const legacy = await legacyCheckin(provider, credential, target)
         if (legacy.outcome !== 'ineligible') return legacy
         return { outcome: 'ineligible', message: '本区域没有每日领取活动' }
       }
@@ -1337,18 +1403,21 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
     let credit = 0
     let claimed = 0
     let already = 0
+    let credited = 0
     const notes = []
     for (const item of list.campaigns) {
       const id = item?.campaignId ?? item?.campaign_id
       if (!id) continue
+      // 只认「领积分」的活动：VIEW_DETAILS 的运营活动不是签到，
+      // 把它们算进 already 会让面板显示「已签」而实际没领到积分。
+      if (!isCreditCampaign(item)) continue
+      credited++
       const status = campaignStatus(item)
       // ⚠️ 先判已领，再判 actionType：官方领完会把 actionType 降级成 VIEW_DETAILS，
       // 反过来判会把「今天已领」报成「没有可领的活动」
       if (status === 'CLAIMED') { already++; continue }
       const action = campaignAction(item)
       if (action !== '' && action !== 'CLAIM_BENEFIT') continue
-      const benefit = campaignBenefit(item)
-      if (benefit.kind !== '' && benefit.kind !== 'CREDITS') continue
       if (status !== 'CLAIMABLE') {
         const reason = String(item?.unavailableReason ?? '').toUpperCase()
         if (reason === 'REDEMPTION_CODE_OUT_OF_STOCK') notes.push('库存不足')
@@ -1357,9 +1426,12 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       }
       const result = await claimCampaign(provider, credential, id)
       if (result.kind === 'claimed') {
+        // claim 响应有时只回 status=CLAIMED、不带金额；活动列表里的 benefit.amount
+        // 就是这个活动的奖励额，用它补齐（不要为了让界面好看编一个数）
+        const gained = result.credit || campaignBenefit(item).amount || 0
         claimed++
-        credit += result.credit || 0
-        notes.push(`${campaignTitle(item)}：${result.message}`)
+        credit += gained
+        notes.push(`${campaignTitle(item)}：${gained > 0 ? `领取 ${gained} 积分` : result.message}`)
       } else if (result.kind === 'already-claimed') {
         already++
       } else if (result.kind === 'blocked') {
@@ -1374,9 +1446,16 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
     }
 
     if (claimed > 0) {
-      return { outcome: 'claimed', credit, message: `领取 ${claimed} 项，共 ${credit} 积分` }
+      noteCheckinDone(provider, target)
+      return { outcome: 'claimed', ...credit > 0 ? { credit } : {}, message: credit > 0 ? `领取 ${claimed} 项，共 ${credit} 积分` : `领取 ${claimed} 项` }
     }
-    if (already > 0) return { outcome: 'done', message: `今天已领过${notes.length ? `（${notes.join('；')}）` : ''}` }
+    if (already > 0) {
+      // 上游说今天领过也要落盘：否则面板按钮永远可点，点下去只回一句「今天已领过」
+      noteCheckinDone(provider, target, { stampAt: false })
+      return { outcome: 'done', message: `今天已领过${notes.length ? `（${notes.join('；')}）` : ''}` }
+    }
+    // 有领积分活动但都不可领（成就未完成 / 库存不足）：不是「已签」
+    if (credited > 0 && notes.length === 0) notes.push('活动暂不可领取')
     return { outcome: 'ineligible', message: notes.length > 0 ? notes.join('；') : `今天没有可领取的活动（${nextNote}）` }
   }
 
