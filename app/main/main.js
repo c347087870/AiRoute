@@ -258,6 +258,9 @@ ipcMain.handle('update-install', (_, payload) => updater.startInstall(payload))
 // Windows 稳定路径：把已下载的 zip 生成覆盖安装脚本（用户退出应用后双击执行）
 ipcMain.handle('update-prepare-manual', (_, payload) => updater.prepareManualInstall(payload))
 
+// 方案 A：用户点「立即安装」→ 生成覆盖脚本 → detached cmd 执行 → 应用退出并覆盖安装
+ipcMain.handle('update-install-prepared', (_, payload) => updater.installPreparedUpdate(payload))
+
 // 一键升级进度快照（渲染进程轮询：阶段 / 错误 / 是否已回滚 / 可用备份）
 ipcMain.handle('update-install-status', () => updater.getStatus())
 
