@@ -704,6 +704,7 @@ function createTrae({ dataDir, logger = console, credentials, login, settings, v
     let firstByteSeen = false
     const toolCalls = new Map()
     let usage
+    let usageStat
     let finishReason
     let sawDone = false
 
@@ -804,6 +805,15 @@ function createTrae({ dataDir, logger = console, credentials, login, settings, v
     }
     if (usage) {
       // Trae 的用量口径：prompt_tokens / completion_tokens，缓存命中在 prompt_tokens_details
+      const credits = Number(usage.credit ?? usage.credits)
+      usageStat = {
+        input: usage.prompt_tokens ?? usage.input_tokens ?? 0,
+        output: usage.completion_tokens ?? usage.output_tokens ?? 0,
+        cacheRead: usage.prompt_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0,
+        cacheWrite: 0,
+        ...Number.isFinite(credits) ? { credits } : {},
+        ...(servedUid ? { uid: servedUid } : {}),
+      }
       onChunk({
         type: 'usage',
         usage: {
@@ -815,6 +825,8 @@ function createTrae({ dataDir, logger = console, credentials, login, settings, v
           reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
           // 记账归因：面板的「今日 token」按账号累计（同 WorkBuddy 的 tokenUsageToday）
           ...(servedUid ? { uid: servedUid } : {}),
+          // 上游这次真实扣的积分（字段名是单数 credit，实测 0.01 这类小数）
+          ...Number.isFinite(credits) ? { credits } : {},
         },
       })
     }
@@ -828,7 +840,7 @@ function createTrae({ dataDir, logger = console, credentials, login, settings, v
             ? 'stop'
             : 'error'
     onChunk({ type: 'finish', reason: { kind: reason } })
-    return { emitted }
+    return { emitted, servedUid, usage: usageStat }
   }
 
   // ── 补全 ──

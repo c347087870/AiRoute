@@ -6,9 +6,8 @@
 //
 // 数据源（全部公开、无需凭据，按可靠性分层）：
 //   Trae:
-//     ① docs.trae.cn/ide_changelog  —— 官方更新日志，HTML 里嵌版本号（可能滞后）
-//     ② 本机已安装的 Trae（resources/app/product.json）—— 比日志更准，但仅本机有
-//     两者取最大值；都失败时沿用内置默认值。
+//     ① 本机已安装的 Trae（resources/app/product.json）—— **权威**，真实运行版本
+//     ② docs.trae.cn/ide_changelog  —— 没装本机时的兜底（整页 HTML，需先剥标签再匹配）
 //   Qoder:
 //     ① qoder.com/changelog —— Next.js RSC payload，带 tag_name/published_at/type
 //       结构化数据，type=ide 即桌面 IDE 版本
@@ -65,12 +64,15 @@ function fetchWithTimeout(url, timeoutMs = 15000) {
 
 // ── Trae 数据源 ──
 
-// 官方更新日志：HTML 里「v3.4.x」与「3.4.x」两种写法都有，取最大值
+// 官方更新日志：HTML 里「v3.4.x」与「3.4.x」两种写法都有，取最大值。
+// ⚠️ 先剥掉标签再匹配：整页 HTML 里混着 SVG path 的贝塞尔坐标
+// （如 -4.855.75-8.834），在原始 HTML 上跑版本正则会把它抓成 4.855.75。
 async function fetchTraeDocsVersion() {
   const response = await fetchWithTimeout('https://docs.trae.cn/ide_changelog?lang=zh')
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
   const body = await response.text()
-  const versions = [...body.matchAll(/(?<![0-9.])(?:[vV])?(\d+\.\d+\.\d+)(?![0-9])/g)]
+  const textOnly = body.replace(/<[^>]*>/g, ' ')
+  const versions = [...textOnly.matchAll(/(?<![0-9.])(?:[vV])?(\d+\.\d+\.\d+)(?![0-9])/g)]
     .map(m => versionOrNull(m[1]))
     .filter(Boolean)
   const max = maxVersion(versions)
@@ -169,7 +171,10 @@ async function refreshVersions() {
     qoder: { ...FALLBACK.qoder },
   }
 
-  // Trae：docs 更新日志 vs 本机安装，取最大
+  // Trae：**本机 product.json 的 appVersion 是权威** —— 它就是真实运行的版本。
+  // docs 页面只作没装本机时的兜底，绝不和本机值「取最大」：整页 HTML 里混着
+  // SVG path 的贝塞尔坐标（如 -4.855.75-8.834），取 max 会选中这种假值，
+  // 登录链接的 x_app_version / 换证 IDEVersion / 请求头都会发一个不存在的版本。
   try {
     result.sources.traeDocs = await fetchTraeDocsVersion()
   } catch (error) {
@@ -177,12 +182,13 @@ async function refreshVersions() {
   }
   const traeLocal = readTraeLocalVersion()
   if (traeLocal) result.sources.traeLocal = traeLocal.appVersion
-  const traeMax = maxVersion([
-    versionOrNull(result.sources.traeDocs),
-    versionOrNull(traeLocal && traeLocal.appVersion),
-  ])
-  if (traeMax) {
-    result.trae.appVersion = traeMax.raw
+
+  const traeLocalVer = versionOrNull(traeLocal && traeLocal.appVersion)
+  const traeDocsVer = versionOrNull(result.sources.traeDocs)
+  // 本机装了就以本机为准；没装才信 docs（docs 只兜底，不做交叉取大）
+  const traePick = traeLocalVer || traeDocsVer
+  if (traePick) {
+    result.trae.appVersion = traePick.raw
     // plugin_version（登录链接用）跟着本机构建号走：本机没有就用内置默认
     result.trae.pluginVersion = (traeLocal && traeLocal.pluginVersion) || FALLBACK.trae.pluginVersion
   }

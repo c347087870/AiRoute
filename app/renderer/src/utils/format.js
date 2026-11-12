@@ -13,6 +13,20 @@ export function formatCompact(num) {
   return String(value)
 }
 
+// 中文大数：大于等于 1 万时压缩成「万 / 亿 / 万亿」。
+// 用量页的 token 动辄上亿，展示 374,275,318 既占宽度也不直观。
+export function formatCnNumber(num, digits = 2) {
+  const value = Number(num)
+  if (!Number.isFinite(value)) return '0'
+  const abs = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  const trim = text => text.replace(/\.?0+$/, '')
+  if (abs >= 1e12) return `${sign}${trim((abs / 1e12).toFixed(digits))}万亿`
+  if (abs >= 1e8) return `${sign}${trim((abs / 1e8).toFixed(digits))}亿`
+  if (abs >= 1e4) return `${sign}${trim((abs / 1e4).toFixed(digits))}万`
+  return formatNumber(value)
+}
+
 // 缓存命中率：缓存读 ÷（未命中输入 + 缓存读）。缓存写不计入分母——
 // 写缓存的那部分输入本来就没命中，算进去会把刚写入上下文的首轮请求也当成「可命中」
 export function calcCacheHitRate(stats) {

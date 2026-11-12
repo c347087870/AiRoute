@@ -969,6 +969,7 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
     let emitted = false
     const toolCalls = new Map()
     let usage
+    let usageStat
     let finishReason
     let sawDone = false
 
@@ -1058,6 +1059,15 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
       })
     }
     if (usage) {
+      const credits = Number(usage.credits)
+      usageStat = {
+        input: usage.prompt_tokens ?? 0,
+        output: usage.completion_tokens ?? 0,
+        cacheRead: usage.prompt_tokens_details?.cached_tokens ?? 0,
+        cacheWrite: 0,
+        ...Number.isFinite(credits) ? { credits } : {},
+        ...(servedUid ? { uid: servedUid } : {}),
+      }
       onChunk({
         type: 'usage',
         usage: {
@@ -1068,7 +1078,7 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
           totalTokens: usage.total_tokens,
           reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
           // 上游直接报的积分消耗（复数：单数 credits 恒为 0，实测踩过）
-          ...Number.isFinite(Number(usage.credits)) ? { credits: Number(usage.credits) } : {},
+          ...Number.isFinite(credits) ? { credits } : {},
           // 记账归因：面板的「今日 token」按账号累计（同 WorkBuddy 的 tokenUsageToday）
           ...(servedUid ? { uid: servedUid } : {}),
         },
@@ -1089,7 +1099,7 @@ function createQoder({ dataDir, logger = console, credentials, settings, version
           ? 'stop'
           : 'error'
     onChunk({ type: 'finish', reason: { kind: reason } })
-    return { emitted }
+    return { emitted, servedUid, usage: usageStat }
   }
 
   // ── 登录（设备码轮询）──

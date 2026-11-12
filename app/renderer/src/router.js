@@ -4,8 +4,7 @@ import RoutingRules from './views/RoutingRules.vue'
 import Providers from './views/Providers.vue'
 import WorkbuddyPool from './views/WorkbuddyPool.vue'
 import Channels from './views/Channels.vue'
-import Logs from './views/Logs.vue'
-import TokenStats from './views/TokenStats.vue'
+import Usage from './views/Usage.vue'
 import Benchmark from './views/Benchmark.vue'
 import Settings from './views/Settings.vue'
 import Tutorial from './views/Tutorial.vue'
@@ -20,8 +19,10 @@ const routes = [
   { path: '/providers', name: 'Providers', component: Providers, meta: { title: '模型来源' } },
   { path: '/workbuddy', name: 'WorkbuddyPool', component: WorkbuddyPool, meta: { title: 'WorkBuddy 账号池', back: true } },
   { path: '/channels', name: 'Channels', component: Channels, meta: { title: '渠道账号' } },
-  { path: '/logs', name: 'Logs', component: Logs, meta: { title: '日志查看', back: true } },
-  { path: '/token-stats', name: 'TokenStats', component: TokenStats, meta: { title: 'Token 使用统计', back: true } },
+  // 日志与用量合并为一个一级页面，旧地址保留重定向，避免书签/旧入口 404
+  { path: '/usage', name: 'Usage', component: Usage, meta: { title: '日志与用量' } },
+  { path: '/logs', redirect: '/usage?tab=logs' },
+  { path: '/token-stats', redirect: '/usage?tab=stats' },
   { path: '/benchmark', name: 'Benchmark', component: Benchmark, meta: { title: '模型测分', back: true } },
   { path: '/settings', name: 'Settings', component: Settings, meta: { title: '系统设置' } },
   { path: '/tutorial', name: 'Tutorial', component: Tutorial, meta: { title: '使用教程' } }

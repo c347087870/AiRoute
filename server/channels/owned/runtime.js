@@ -17,6 +17,26 @@ const path = require('path')
 
 const { createPluginHost } = require('../plugin-host')
 
+// 积分余额响应里的「累计已用」：Trae 的 packages[].used 直接给；
+// Qoder 的 packages 只有 total/remaining，按差值补。没有 packages 时返回 undefined，
+// 不能编一个 0（那会把「查不到」当成「今天没消耗」）。
+function usedTotalOf(value) {
+  const packages = Array.isArray(value?.packages) ? value.packages : []
+  let used = 0
+  let found = false
+  for (const pkg of packages) {
+    if (!pkg || typeof pkg !== 'object') continue
+    if (Number.isFinite(Number(pkg.used))) {
+      used += Number(pkg.used)
+      found = true
+    } else if (Number.isFinite(Number(pkg.total)) && Number.isFinite(Number(pkg.remaining))) {
+      used += Math.max(0, Number(pkg.total) - Number(pkg.remaining))
+      found = true
+    }
+  }
+  return found ? Math.round(used * 10000) / 10000 : undefined
+}
+
 function createOwnedRuntime({ dataDir, logger = console, onChanged, settings }) {
   const host = createPluginHost({ dataDir, logger, settings })
   const loaded = host.load()
@@ -453,7 +473,15 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged, settings }) 
         const done = await optional(provider, 'balance', entry.uid)
         if (!done.supported) return { ok: false, error: `${provider} 不提供余额查询端点` }
         const value = done.value || {}
-        return { ok: true, value: { accountId: entry.id, balance: value.balance ?? value.total ?? null } }
+        return {
+          ok: true,
+          value: {
+            accountId: entry.id,
+            uid: entry.uid,
+            balance: value.balance ?? value.total ?? null,
+            usedTotal: usedTotalOf(value),
+          },
+        }
       }
 
       // 令牌主动校验（Trae CheckLogin）：不消耗积分，保活/面板测试用
@@ -527,6 +555,7 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged, settings }) 
             const value = await balance.call(instance.backend, provider, entry.uid)
             rows.push({
               accountId: entry.id,
+              uid: entry.uid,
               nickname: entry.name,
               // Trae 回 { total, packages, expiredTotal }（余额 = Σ 各资源包剩余），
               // 没有 balance 字段；两个都认，取不到才是 null
@@ -534,6 +563,8 @@ function createOwnedRuntime({ dataDir, logger = console, onChanged, settings }) 
                 total: value.balance ?? value.total ?? null,
                 expiredTotal: value.expiredTotal ?? 0,
               },
+              // 累计已用（Σ packages[].used）：用于「今日消耗」的日差分
+              usedTotal: usedTotalOf(value),
             })
           } catch (error) {
             rows.push({ accountId: entry.id, nickname: entry.name, error: error.message })

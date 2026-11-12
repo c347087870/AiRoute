@@ -795,8 +795,14 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
   }
   res.on('close', onClose)
 
-  const recordUsage = usage => {
+  const recordUsage = (usage, completion) => {
     const stat = channelSse.toStatUsage(usage) || upstream.emptyUsage()
+    // 插件 complete() 的返回值带着 servedUid / 规范化 usage：collector 里如果只剩
+    // OpenAI 原样字段（没有 uid），用它补账号归因，否则账号维度永远是空的。
+    if (completion?.servedUid && !stat.uid) stat.uid = completion.servedUid
+    if (stat.credits === undefined && Number.isFinite(Number(completion?.usage?.credits))) {
+      stat.credits = Number(completion.usage.credits)
+    }
     tokenStats.recordTokens(entry.ref, stat)
     return stat
   }
@@ -806,6 +812,7 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
   let started = false
   let emitter = null
   let collector = null
+  let completion = null
   // 首帧看门狗：stalled 决定这次失败怎么记账 ——「等满上限还一个字都没有」
   // 是模型/上游的问题，不能用「用户取消」搪塞过去（那会让它永远不失活）
   let stallTimer = null
@@ -897,7 +904,7 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       const writer = channelSse.createStreamWriter(entry.ref)
       collector = writer.collector
 
-      await rt.complete({ model: entry.model.id, openAi }, chunk => {
+      completion = await rt.complete({ model: entry.model.id, openAi }, chunk => {
         // 有字节就说明上游活着；哪怕这一帧还拼不出完整帧（frames 为空）也撤掉看门狗
         gotChunk = true
         clearStallTimer()
@@ -927,7 +934,7 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       }
       res.end()
 
-      const usage = recordUsage(collector.usage)
+      const usage = recordUsage(collector.usage, completion)
       modelHealth.noteSuccess(entry.ref)
       logger.log({
         model: entry.ref,
@@ -947,15 +954,15 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
 
     // 非流式：聚合后一次返回
     collector = channelSse.createCollector(entry.ref)
-    await rt.complete({ model: entry.model.id, openAi }, chunk => {
+    completion = await rt.complete({ model: entry.model.id, openAi }, chunk => {
       // 同样按「有没有字节」判活：非流式不代表上游可以在首帧上限内一声不吭
       gotChunk = true
       clearStallTimer()
       collector.push(chunk)
     }, controller.signal)
     if (collector.failed) throw Object.assign(new Error('渠道生成未正常收尾'), { status: 502 })
-    const completion = collector.completion()
-    const usage = recordUsage(collector.usage)
+    const completionBody = collector.completion()
+    const usage = recordUsage(collector.usage, completion)
     modelHealth.noteSuccess(entry.ref)
     logger.log({
       model: entry.ref,
@@ -970,10 +977,10 @@ async function handleChannelRequest(entry, req, res, startTime, isFallback, prim
       totalTokens: upstream.usageTotalOrNull(usage)
     })
     res.json(clientIsAnthropic
-      ? wbAnthropic.toMessage(completion, entry.ref)
+      ? wbAnthropic.toMessage(completionBody, entry.ref)
       : clientIsResponses
-        ? wbResponses.toResponse(completion, entry.ref)
-        : completion)
+        ? wbResponses.toResponse(completionBody, entry.ref)
+        : completionBody)
   } catch (err) {
     // 已经发出 200 与部分帧：收尾并结束，不把错误交给外层（外层会再写一次
     // 响应头，在已发送的响应上必然抛 ERR_HTTP_HEADERS_SENT）
@@ -1153,7 +1160,11 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
       const out = emitter.end()
       if (out) res.write(out)
     }
-    tokenStats.recordTokens(entry.ref, streamUsage)
+    tokenStats.recordTokens(entry.ref, {
+      ...streamUsage,
+      ...(fwd?.uid ? { uid: fwd.uid } : {}),
+      ...(typeof fwd?.credits === 'number' ? { credits: fwd.credits } : {})
+    })
     modelHealth.noteSuccess(entry.ref, fwd?.credits)
     logger.log({
       ...wbBaseLog,
@@ -1201,7 +1212,11 @@ async function handleWorkbuddyRequest(entry, req, res, startTime, isFallback, pr
   if (!aggregated) throw new Error('上游未返回有效响应')
 
   const usage = upstream.extractUsage(aggregated, false) || upstream.emptyUsage()
-  tokenStats.recordTokens(entry.ref, usage)
+  tokenStats.recordTokens(entry.ref, {
+    ...usage,
+    ...(fwd?.uid ? { uid: fwd.uid } : {}),
+    ...(typeof fwd?.credits === 'number' ? { credits: fwd.credits } : {})
+  })
   modelHealth.noteSuccess(entry.ref, fwd?.credits)
   logger.log({
     ...wbBaseLog,
@@ -2453,6 +2468,84 @@ app.get('/api/token-stats', (req, res) => {
   res.json(tokenStats.getAllStats())
 })
 
+// 渠道 / 账号维度的积分与 token 明细 + 换算比。
+// 账号名在这里补齐（token 统计本身只认识 uid），避免前端再拼两套账号请求。
+const CREDIT_CHANNEL_LABELS = {
+  trae: 'Trae',
+  qoder: 'Qoder 国际版',
+  qodercn: 'Qoder 国内版',
+  workbuddy: 'WorkBuddy 国内版',
+  'workbuddy-global': 'WorkBuddy 国际版',
+}
+
+app.get('/api/token-stats/scopes', async (req, res) => {
+  try {
+    const snapshot = tokenStats.getScopeStats()
+    const channels = Object.values(snapshot.channels).map(item => {
+      const total = item.periods.total
+      const credits = Number(total.creditsUsed) || 0
+      const tokens = Number(total.total) || 0
+      return {
+        ...item,
+        name: CREDIT_CHANNEL_LABELS[item.id] || item.id,
+        ratio: {
+          tokens,
+          credits,
+          // 「100 积分 ≈ 多少 token」：用累计 token / 累计积分 × 100
+          tokensPer100Credits: credits > 0 ? Math.round((tokens / credits) * 100) : null,
+          creditsPer1MTokens: tokens > 0 ? Math.round((credits / tokens) * 1000000 * 100) / 100 : null,
+        },
+      }
+    })
+
+    const accounts = Object.values(snapshot.accounts)
+    const nameMap = new Map()
+    const providers = [...new Set(accounts.map(item => item.channel))]
+    for (const provider of providers) {
+      try {
+        if (provider === 'workbuddy' || provider === 'workbuddy-global') {
+          const realm = provider === 'workbuddy-global' ? 'global' : 'cn'
+          for (const account of workbuddy.getRuntime()?.listAccounts() || []) {
+            if ((account.realm || 'cn') !== realm) continue
+            nameMap.set(`${provider}:${account.uid}`, {
+              accountId: account.uid,
+              name: account.nickname || String(account.uid).slice(0, 8),
+              todayTokens: Number(account.tokenUsageToday) || 0,
+            })
+          }
+        } else {
+          const reply = await channels.rpc({ method: 'account.list', payload: { provider } })
+          if (reply?.ok === true && Array.isArray(reply.value)) {
+            for (const account of reply.value) {
+              if (!account || !account.uid) continue
+              nameMap.set(`${provider}:${account.uid}`, {
+                accountId: account.id,
+                name: account.name || account.nickname || account.id,
+                todayTokens: Number(account.tokenUsageToday) || 0,
+              })
+            }
+          }
+        }
+      } catch {
+        /* 账号名只是展示信息，取不到就退回 uid */
+      }
+    }
+
+    res.json({
+      ok: true,
+      generatedAt: Date.now(),
+      channels,
+      accounts: accounts.map(item => ({
+        ...item,
+        ...(nameMap.get(`${item.channel}:${item.uid}`) || {}),
+        name: (nameMap.get(`${item.channel}:${item.uid}`) || {}).name || String(item.uid).slice(0, 8),
+      })),
+    })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
 app.get('/api/token-stats/today', (req, res) => {
   res.json(tokenStats.getTodayStats())
 })
@@ -3120,6 +3213,48 @@ app.post('/api/channels/refresh', async (req, res) => {
   }
 })
 
+// 渠道积分余额查询的附加账：把「累计已用」快照写进 token 统计，并给每行补
+// 今日消耗（Trae 没有逐请求积分，用余额累计已用的日差分；Qoder 优先用逐请求积分）。
+async function augmentCreditRows(method, payload, result) {
+  if (!result || result.ok !== true || !result.value || typeof result.value !== 'object') return
+  const provider = payload && typeof payload.provider === 'string' ? payload.provider : ''
+  if (method === 'credits.balances') {
+    const rows = Array.isArray(result.value.accounts) ? result.value.accounts : []
+    for (const row of rows) {
+      if (!row || typeof row.uid !== 'string' || !row.uid) continue
+      if (Number.isFinite(Number(row.usedTotal))) {
+        tokenStats.recordBalanceSnapshot({
+          channel: provider,
+          uid: row.uid,
+          usedTotal: Number(row.usedTotal),
+          remaining: row.balance && Number.isFinite(Number(row.balance.total)) ? Number(row.balance.total) : undefined
+        })
+      }
+      const today = tokenStats.getAccountToday(provider, row.uid)
+      row.usedToday = today.creditsUsed
+      row.creditsToday = today.credits
+      row.balanceCreditsToday = today.balanceCredits
+    }
+    return
+  }
+  if (method === 'account.balance') {
+    const row = result.value
+    if (!row || typeof row.uid !== 'string' || !row.uid) return
+    if (Number.isFinite(Number(row.usedTotal))) {
+      tokenStats.recordBalanceSnapshot({
+        channel: provider,
+        uid: row.uid,
+        usedTotal: Number(row.usedTotal),
+        remaining: Number.isFinite(Number(row.balance)) ? Number(row.balance) : undefined
+      })
+    }
+    const today = tokenStats.getAccountToday(provider, row.uid)
+    row.usedToday = today.creditsUsed
+    row.creditsToday = today.credits
+    row.balanceCreditsToday = today.balanceCredits
+  }
+}
+
 // 渠道管理 RPC 透传：登录 / 账号池 / 积分 / 黑名单 / 备份全走渠道包自己的方法表。
 // 这里不做方法白名单 —— 抄一份方法表只会随上游版本漂移，而渠道包的 RPC 层
 // 已经对每个方法做了参数校验。
@@ -3130,6 +3265,8 @@ app.post('/api/channels/rpc', async (req, res) => {
   res.on('close', onClose)
   try {
     const result = await channels.rpc({ method: body.method, payload: body.payload }, controller.signal)
+    // 积分余额：顺手记累计已用快照，并把「今日消耗」补到每一行
+    await augmentCreditRows(body.method, body.payload, result)
     // 账号类方法会改动池与目录：登录成功、删号、启停都影响「哪些模型可见」
     if (typeof body.method === 'string' && /^(?:account|login|provider|model|credits)\./.test(body.method)) {
       scheduleChannelSync()
@@ -3279,3 +3416,4 @@ const PORT = process.env.PORT || engine.getServerConfig().port || 3000
 listen(PORT)
 // 启动即审一轮，之后按间隔轮转：进程重启后余额与账号状态可能已经变过
 modelHealthAudit.start()
+

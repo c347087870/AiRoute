@@ -25,6 +25,13 @@ let statsCache = {
   byMonth: {},    // { "2026-09": statObj }
   byHour: {},     // { "2026-09-04-14": statObj }
   byModel: {},    // { "glm/glm-4.6": statObj }
+  // 渠道 / 账号维度：用于「每个渠道的积分与 token」「每个账号的多时间窗口」
+  // scope = { byDay: { day: stat }, byMonth: { month: stat }, total: stat }
+  byChannel: {},
+  byAccount: {},
+  // 余额快照基线：{ "trae:uid": { day, usedTotal, remaining, at } }
+  // 用于没有逐请求积分的渠道（Trae）按「累计已用」差分算今日消耗
+  balanceBaseline: {},
   requests: []    // 最近请求明细，仅用于排查，最多保留 1000 条
 }
 
@@ -37,8 +44,9 @@ function toNumber(value) {
 }
 
 function initStatObj() {
-  // credits：按积分计费的渠道（Qoder）用它记账；token 渠道恒为 0
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, count: 0, failed: 0, credits: 0 }
+  // credits：上游逐请求回报的积分（Qoder / WorkBuddy）
+  // balanceCredits：没有逐请求积分时，用余额累计已用的日差分补出来的积分（Trae）
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, count: 0, failed: 0, credits: 0, balanceCredits: 0 }
 }
 
 // 补齐历史数据缺失的缓存与失败计数字段，避免 undefined 累加出 NaN
@@ -52,7 +60,8 @@ function normalizeStatObj(raw) {
     total: toNumber(source.total),
     count: toNumber(source.count),
     failed: toNumber(source.failed),
-    credits: toNumber(source.credits)
+    credits: toNumber(source.credits),
+    balanceCredits: toNumber(source.balanceCredits)
   }
 }
 
@@ -61,6 +70,21 @@ function normalizeStatMap(map) {
   if (!map || typeof map !== 'object') return out
   for (const [key, value] of Object.entries(map)) {
     out[key] = normalizeStatObj(value)
+  }
+  return out
+}
+
+// 渠道 / 账号 scope：{ byDay, byMonth, total }
+function normalizeScopeMap(map) {
+  const out = {}
+  if (!map || typeof map !== 'object') return out
+  for (const [key, value] of Object.entries(map)) {
+    const scope = value && typeof value === 'object' ? value : {}
+    out[key] = {
+      byDay: normalizeStatMap(scope.byDay),
+      byMonth: normalizeStatMap(scope.byMonth),
+      total: normalizeStatObj(scope.total)
+    }
   }
   return out
 }
@@ -76,6 +100,9 @@ function loadStats() {
         byMonth: normalizeStatMap(data.byMonth),
         byHour: normalizeStatMap(data.byHour),
         byModel: normalizeStatMap(data.byModel),
+        byChannel: normalizeScopeMap(data.byChannel),
+        byAccount: normalizeScopeMap(data.byAccount),
+        balanceBaseline: data.balanceBaseline && typeof data.balanceBaseline === 'object' ? data.balanceBaseline : {},
         requests: Array.isArray(data.requests) ? data.requests.slice(0, MAX_REQUEST_RECORDS) : []
       }
     }
@@ -140,6 +167,77 @@ function accumulate(target, usage) {
   if (usage.credits) target.credits = (target.credits || 0) + usage.credits
 }
 
+// 模型引用 → 渠道：channels/trae/xxx → trae；channels/workbuddy/xxx → workbuddy；
+// 其它 provider（openai/xxx）按第一段算，没有账号归因
+function channelOf(model) {
+  const parts = String(model || '').split('/')
+  if (parts[0] === 'channels' && parts.length >= 3) return parts[1]
+  return parts[0] || 'unknown'
+}
+
+function ensureScope(map, key) {
+  if (!map[key]) map[key] = { byDay: {}, byMonth: {}, total: initStatObj() }
+  return map[key]
+}
+
+function accumulateScope(scope, timestamp, normalized) {
+  const dayKey = getDayKey(timestamp)
+  const monthKey = getMonthKey(timestamp)
+  if (!scope.byDay[dayKey]) scope.byDay[dayKey] = initStatObj()
+  if (!scope.byMonth[monthKey]) scope.byMonth[monthKey] = initStatObj()
+  accumulate(scope.byDay[dayKey], normalized)
+  accumulate(scope.byMonth[monthKey], normalized)
+  accumulate(scope.total, normalized)
+}
+
+// 余额累计已用（Trae 的 packages[].used 之和）的日差分 → balanceCredits。
+// 同一天第一次只记基线；之后每次余额刷新把增量写进该账号/渠道的当日桶。
+function recordBalanceSnapshot({ channel, uid, usedTotal, remaining, timestamp = Date.now() }) {
+  if (!channel || !uid || !Number.isFinite(Number(usedTotal))) return
+  const key = `${channel}:${uid}`
+  const total = Number(usedTotal)
+  const left = Number(remaining)
+  const day = getDayKey(timestamp)
+  // 即使今天还没消耗，也把账号/渠道 scope 建出来：面板要显示 0，而不是「没有这个账号」
+  ensureScope(statsCache.byAccount, key)
+  ensureScope(statsCache.byChannel, channel)
+  const prev = statsCache.balanceBaseline[key]
+  if (!prev || prev.day !== day) {
+    statsCache.balanceBaseline[key] = {
+      day,
+      usedTotal: total,
+      remaining: Number.isFinite(left) ? left : 0,
+      at: timestamp
+    }
+    scheduleSave()
+    return
+  }
+  const delta = Math.max(0, total - Number(prev.usedTotal || 0))
+  prev.usedTotal = total
+  prev.remaining = Number.isFinite(left) ? left : prev.remaining
+  prev.at = timestamp
+  if (delta > 0) {
+    const add = target => {
+      target.balanceCredits = (target.balanceCredits || 0) + delta
+    }
+    const accountScope = ensureScope(statsCache.byAccount, key)
+    const dayKey = getDayKey(timestamp)
+    const monthKey = getMonthKey(timestamp)
+    if (!accountScope.byDay[dayKey]) accountScope.byDay[dayKey] = initStatObj()
+    if (!accountScope.byMonth[monthKey]) accountScope.byMonth[monthKey] = initStatObj()
+    add(accountScope.byDay[dayKey])
+    add(accountScope.byMonth[monthKey])
+    add(accountScope.total)
+    const channelScope = ensureScope(statsCache.byChannel, channel)
+    if (!channelScope.byDay[dayKey]) channelScope.byDay[dayKey] = initStatObj()
+    if (!channelScope.byMonth[monthKey]) channelScope.byMonth[monthKey] = initStatObj()
+    add(channelScope.byDay[dayKey])
+    add(channelScope.byMonth[monthKey])
+    add(channelScope.total)
+  }
+  scheduleSave()
+}
+
 // 记录一次请求的 Token 用量
 // usage: { input, output, cacheRead, cacheWrite, credits }，缺失字段按 0 处理
 function recordTokens(model, usage, timestamp = Date.now()) {
@@ -164,6 +262,12 @@ function recordTokens(model, usage, timestamp = Date.now()) {
   accumulate(statsCache.byMonth[monthKey], normalized)
   accumulate(statsCache.byHour[hourKey], normalized)
   accumulate(statsCache.byModel[statKey], normalized)
+
+  // 渠道 / 账号维度：账号来自插件 usage.uid（Trae / Qoder / WorkBuddy 都会带）
+  const channel = channelOf(statKey)
+  accumulateScope(ensureScope(statsCache.byChannel, channel), timestamp, normalized)
+  const uid = typeof usage?.uid === 'string' ? usage.uid : ''
+  if (uid) accumulateScope(ensureScope(statsCache.byAccount, `${channel}:${uid}`), timestamp, normalized)
 
   statsCache.requests.unshift({
     timestamp,
@@ -243,6 +347,20 @@ function cleanupOldData(retentionDays = RETENTION_DAYS) {
   for (const key of Object.keys(statsCache.byMonth)) {
     if (key < cutoffMonthKey) { delete statsCache.byMonth[key]; cleaned = true }
   }
+  for (const map of [statsCache.byChannel, statsCache.byAccount]) {
+    for (const scope of Object.values(map)) {
+      if (!scope || typeof scope !== 'object') continue
+      for (const key of Object.keys(scope.byDay || {})) {
+        if (key < cutoffDayKey) { delete scope.byDay[key]; cleaned = true }
+      }
+      for (const key of Object.keys(scope.byMonth || {})) {
+        if (key < cutoffMonthKey) { delete scope.byMonth[key]; cleaned = true }
+      }
+    }
+  }
+  for (const [key, baseline] of Object.entries(statsCache.balanceBaseline)) {
+    if (!baseline || baseline.day < cutoffDayKey) { delete statsCache.balanceBaseline[key]; cleaned = true }
+  }
 
   if (cleaned) saveStats()
 }
@@ -253,13 +371,18 @@ function getAllStats() {
     byMonth: statsCache.byMonth,
     byHour: statsCache.byHour,
     byModel: statsCache.byModel,
+    byChannel: statsCache.byChannel,
+    byAccount: statsCache.byAccount,
     recentRequests: statsCache.requests.slice(0, 50)
   }
 }
 
 // 清空全部统计（不可恢复）：五个维度归零并立即落盘，同时清掉待落盘定时器避免回写旧数据
 function clearAllStats() {
-  statsCache = { byDay: {}, byMonth: {}, byHour: {}, byModel: {}, requests: [] }
+  statsCache = {
+    byDay: {}, byMonth: {}, byHour: {}, byModel: {},
+    byChannel: {}, byAccount: {}, balanceBaseline: {}, requests: []
+  }
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
@@ -292,6 +415,8 @@ function sumStats(list) {
     result.total += stats.total
     result.count += stats.count
     result.failed += stats.failed
+    result.credits += Number(stats.credits) || 0
+    result.balanceCredits += Number(stats.balanceCredits) || 0
   }
   return result
 }
@@ -348,6 +473,8 @@ function getStatsByDays(days) {
     // failed 一并累计：请求次数口径 = count + failed（与 getRequestSummary 一致，
     // 否则状态面板与 Token 统计页对「今天的请求数」会给出两个不同数字）
     result.failed += dayStats.failed
+    result.credits += Number(dayStats.credits) || 0
+    result.balanceCredits += Number(dayStats.balanceCredits) || 0
   }
 
   return result
@@ -389,7 +516,10 @@ function getDaysDetailBetween(startTs, endTs) {
       cacheWrite: stats.cacheWrite,
       total: stats.total,
       count: stats.count,
-      failed: stats.failed
+      failed: stats.failed,
+      credits: Number(stats.credits) || 0,
+      balanceCredits: Number(stats.balanceCredits) || 0,
+      creditsUsed: (Number(stats.credits) || 0) > 0 ? Number(stats.credits) : Number(stats.balanceCredits) || 0
     })
   }
 
@@ -418,6 +548,8 @@ function getThisWeekStats() {
     result.total += dayStats.total
     result.count += dayStats.count
     result.failed += dayStats.failed
+    result.credits += Number(dayStats.credits) || 0
+    result.balanceCredits += Number(dayStats.balanceCredits) || 0
   }
   return result
 }
@@ -455,8 +587,129 @@ function getCalendarRanges() {
   }
 }
 
-function getHourlyDetailForDay(dateStr) {
-  const details = []
+// ── 渠道 / 账号维度：时间窗口与换算比 ──
+
+// 一个 statObj 的展示口径：credits 是上游逐请求回报；balanceCredits 是余额差分。
+// 两者取更可信的那个：有逐请求积分就用它，否则用余额差分（Trae）。
+function periodView(raw) {
+  const stat = normalizeStatObj(raw)
+  const creditsUsed = stat.credits > 0 ? stat.credits : stat.balanceCredits
+  return { ...stat, creditsUsed }
+}
+
+function daysFrom(startTs, endTs = Date.now()) {
+  const out = []
+  const cursor = new Date(startTs)
+  cursor.setHours(12, 0, 0, 0)
+  const last = new Date(endTs)
+  last.setHours(12, 0, 0, 0)
+  for (; cursor.getTime() <= last.getTime(); cursor.setDate(cursor.getDate() + 1)) {
+    out.push(getDayKey(cursor.getTime()))
+  }
+  return out
+}
+
+function monthsFrom(startYear, startMonth, now = new Date()) {
+  const out = []
+  const cursor = new Date(startYear, startMonth, 1)
+  const end = new Date(now.getFullYear(), now.getMonth(), 1)
+  while (cursor.getTime() <= end.getTime()) {
+    out.push(getMonthKey(cursor.getTime()))
+    cursor.setMonth(cursor.getMonth() + 1)
+  }
+  return out
+}
+
+function sumDayKeys(scope, keys) {
+  return sumStats(keys.map(key => scope.byDay[key]))
+}
+
+function sumMonthKeys(scope, keys) {
+  return sumStats(keys.map(key => scope.byMonth[key]))
+}
+
+// 一个 scope 的六个时间窗口 + 总计
+function getScopePeriods(scope) {
+  if (!scope) {
+    const empty = periodView(initStatObj())
+    return { day: empty, threeDay: empty, week: empty, month: empty, quarter: empty, year: empty, total: empty }
+  }
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth()
+  const today = new Date(y, m, now.getDate())
+  const weekStart = new Date(y, m, now.getDate() - ((now.getDay() + 6) % 7))
+  const monthStart = new Date(y, m, 1)
+  const quarterStart = new Date(y, m - 2, 1)
+  const yearStart = new Date(y, 0, 1)
+  const threeStart = new Date(y, m, now.getDate() - 2)
+
+  return {
+    day: periodView(scope.byDay[getDayKey(today.getTime())]),
+    threeDay: periodView(sumDayKeys(scope, daysFrom(threeStart))),
+    week: periodView(sumDayKeys(scope, daysFrom(weekStart))),
+    month: periodView(sumMonthKeys(scope, monthsFrom(y, m))),
+    quarter: periodView(sumMonthKeys(scope, monthsFrom(quarterStart.getFullYear(), quarterStart.getMonth()))),
+    year: periodView(sumMonthKeys(scope, monthsFrom(y, 0))),
+    total: periodView(scope.total)
+  }
+}
+
+// 当前所有渠道 / 账号的统计快照：
+//   { channels: { trae: { periods } }, accounts: { "trae:uid": { channel, uid, periods, balance } } }
+// 渠道 / 账号的逐日序列：给「每日积分消耗 / 100 积分≈Token」趋势图用。
+// 固定输出最近 N 天（没有数据补 0），前端不用自己补日期。
+function buildScopeTrend(scope, days = 30) {
+  const out = []
+  const today = new Date()
+  for (let offset = days - 1; offset >= 0; offset--) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - offset)
+    const key = getDayKey(date.getTime())
+    const stat = periodView(scope?.byDay?.[key] || initStatObj())
+    out.push({
+      date: key,
+      label: `${pad2(date.getMonth() + 1)}/${pad2(date.getDate())}`,
+      credits: stat.creditsUsed,
+      tokens: stat.total,
+      tokenPer100Credits: stat.creditsUsed > 0 ? Math.round((stat.total / stat.creditsUsed) * 100) : null,
+    })
+  }
+  return out
+}
+
+function getScopeStats() {
+  const channels = {}
+  for (const [id, scope] of Object.entries(statsCache.byChannel)) {
+    channels[id] = { id, periods: getScopePeriods(scope), trend: buildScopeTrend(scope) }
+  }
+  const accounts = {}
+  for (const [key, scope] of Object.entries(statsCache.byAccount)) {
+    const index = key.indexOf(':')
+    if (index <= 0) continue
+    const channel = key.slice(0, index)
+    const uid = key.slice(index + 1)
+    const baseline = statsCache.balanceBaseline[key]
+    accounts[key] = {
+      channel,
+      uid,
+      periods: getScopePeriods(scope),
+      trend: buildScopeTrend(scope),
+      // 最近一次余额快照的剩余积分（只用于面板显示，不参与统计）
+      remaining: baseline && Number.isFinite(Number(baseline.remaining)) ? Number(baseline.remaining) : null
+    }
+  }
+  return { channels, accounts }
+}
+
+// 面板账号行用：某账号今天消耗的积分（逐请求优先，否则余额差分）
+function getAccountToday(channel, uid) {
+  const scope = statsCache.byAccount[`${channel}:${uid}`]
+  const periods = getScopePeriods(scope)
+  return periods.day
+}
+
+function getHourlyDetailForDay(dateStr) {  const details = []
 
   for (let hour = 0; hour < 24; hour++) {
     const hourKey = `${dateStr}-${pad2(hour)}`
@@ -470,7 +723,10 @@ function getHourlyDetailForDay(dateStr) {
       cacheWrite: stats.cacheWrite,
       total: stats.total,
       count: stats.count,
-      failed: stats.failed
+      failed: stats.failed,
+      credits: Number(stats.credits) || 0,
+      balanceCredits: Number(stats.balanceCredits) || 0,
+      creditsUsed: (Number(stats.credits) || 0) > 0 ? Number(stats.credits) : Number(stats.balanceCredits) || 0
     })
   }
 
@@ -511,6 +767,11 @@ module.exports = {
   getThisWeekStats,
   getCalendarRanges,
   getHourlyDetailForDay,
+  recordBalanceSnapshot,
+  getScopeStats,
+  getScopePeriods,
+  getAccountToday,
+  channelOf,
   cleanupOldData,
   saveStats,
   flush,

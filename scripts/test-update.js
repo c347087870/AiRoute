@@ -172,6 +172,21 @@ test('installAssetCandidates：安装版优先 -setup.exe（方案 1），zip �
   assert.strictEqual(updateServer.installAssetCandidates('v1.7.2', 'installer').some(n => n.includes('-portable')), false)
 })
 
+test('parseReleaseAtom：API 限流时从 Releases Atom 取 beta tag', () => {
+  const xml = `<?xml version="1.0"?><feed><entry>
+    <link rel="alternate" href="https://github.com/c347087870/AiRoute/releases/tag/v2.2.0-beta.6"/>
+    <title>v2.2.0-beta.6</title><updated>2026-11-12T06:19:00Z</updated>
+  </entry><entry>
+    <link rel="alternate" href="https://github.com/c347087870/AiRoute/releases/tag/v2.2.0-beta.5"/>
+    <title>v2.2.0-beta.5</title><updated>2026-11-12T06:14:00Z</updated>
+  </entry></feed>`
+  const list = updateServer.parseReleaseAtom(xml)
+  assert.deepStrictEqual(list.map(r => r.tag_name), ['v2.2.0-beta.6', 'v2.2.0-beta.5'])
+  assert.strictEqual(list[0].prerelease, true)
+  const picked = updateServer.pickRelease(list, 'beta', r => (r.assets || []).length > 0)
+  assert.strictEqual(picked.tag_name, 'v2.2.0-beta.6', 'Atom 回落也要能挑出最新 beta')
+})
+
 test('normalizeInstallKind / canOneClick：只有安装版与 macOS 支持一键升级', () => {
   assert.strictEqual(updateServer.normalizeInstallKind('portable', 'win32'), 'portable')
   assert.strictEqual(updateServer.normalizeInstallKind('installer', 'win32'), 'installer')

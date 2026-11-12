@@ -86,6 +86,11 @@ export function getTokenStats() {
   return api.get('/api/token-stats').then(r => r.data)
 }
 
+// 渠道 / 账号维度的积分与 token 明细（含 100 积分 ≈ Token 换算比）
+export function getTokenScopes() {
+  return api.get('/api/token-stats/scopes').then(r => r.data)
+}
+
 // 状态面板四个时间维度（当日 / 本月 / 近三月 / 本年），一次请求取回。
 // 月维度由服务端按月汇总桶聚合，前端不再自己把按日明细加起来
 export function getTokenStatsRange() {
