@@ -801,6 +801,7 @@ test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ auto cmd / READM
       exe: 'D:\\p\\AiRoute.exe',
       version: '2.1.0'
     })
+    assert.strictEqual(result.kind, 'zip')
     assert.ok(fs.existsSync(result.cmdPath))
     assert.ok(fs.existsSync(result.autoCmdPath))
     assert.ok(fs.existsSync(result.ps1Path))
@@ -813,6 +814,32 @@ test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ auto cmd / READM
     const auto = fs.readFileSync(result.autoCmdPath, 'utf8')
     assert.ok(auto.includes('if errorlevel 1'))
     assert.ok(fs.readFileSync(result.readmePath, 'utf8').includes('install-update.cmd'))
+  } finally {
+    cleanup()
+  }
+})
+
+test('writeManualUpdater（setup）：生成 NSIS 静默安装脚本', () => {
+  const { root, cleanup } = tempDir()
+  try {
+    const folder = path.join(root, 'updates')
+    fs.ensureDirSync(folder)
+    const artifact = path.join(folder, 'AiRoute-2.2.0-beta.2-x64-setup.exe')
+    fs.writeFileSync(artifact, 'setup')
+    const result = helper.writeManualUpdater({
+      artifact,
+      installDir: 'D:\\p',
+      exe: 'D:\\p\\AiRoute.exe',
+      version: '2.2.0-beta.2',
+      pid: 1234
+    })
+    assert.strictEqual(result.kind, 'setup')
+    const ps1 = fs.readFileSync(result.ps1Path, 'utf8')
+    assert.match(ps1, /-ArgumentList '\/S','--updated','\/D=D:\\p'/)
+    assert.match(ps1, /\$appPid = 1234/, 'setup 脚本要等主进程退出')
+    assert.match(ps1, /Start-Process -FilePath 'D:\\p\\AiRoute\.exe'/)
+    const auto = fs.readFileSync(result.autoCmdPath, 'utf8')
+    assert.strictEqual(auto.includes('"%ZIP%"'), false, 'setup 脚本不接 zip 参数')
   } finally {
     cleanup()
   }

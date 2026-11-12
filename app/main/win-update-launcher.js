@@ -188,13 +188,13 @@ function manualPs1({ artifact, installDir, exe, version, logFile }) {
   ].join('\r\n') + '\r\n'
 }
 
-function manualCmd(zipName, { auto = false } = {}) {
+function manualCmd(zipName, { auto = false, passZip = true } = {}) {
   const lines = [
     '@echo off',
     'setlocal',
     'cd /d "%~dp0"',
     'if "%~1"=="" (set "ZIP=%~dp0' + String(zipName || '').replace(/"/g, '') + '") else (set "ZIP=%~1")',
-    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0' + MANUAL_PS1 + '" "%ZIP%"',
+    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0' + MANUAL_PS1 + '"' + (passZip ? ' "%ZIP%"' : ''),
     'echo.'
   ]
   if (auto) {
@@ -208,7 +208,7 @@ function manualCmd(zipName, { auto = false } = {}) {
   return lines.join('\r\n') + '\r\n'
 }
 
-function manualReadme({ version, installDir }) {
+function manualReadme({ version, installDir, kind = 'zip' }) {
   return [
     'AiRoute 覆盖安装',
     '',
@@ -218,29 +218,45 @@ function manualReadme({ version, installDir }) {
     '使用步骤：',
     '1. 退出 AiRoute（托盘图标右键 → 退出；直接关窗口只会最小化）；',
     `2. 双击本文件夹里的 ${MANUAL_CMD}；`,
-    '3. 脚本会等待 AiRoute 退出，然后解压更新包、覆盖安装目录并重新启动；',
+    '3. 脚本会等待 AiRoute 退出，然后运行更新并重新启动；',
     '4. 看到「更新成功」即完成，失败时把 install-update.log 发给开发者。',
     '',
-    '如果更新包是通过浏览器下载的：把 zip 文件拖到 install-update.cmd 上也可以，',
-    '脚本会自动使用拖入的文件并核对版本。',
+    kind === 'zip'
+      ? '如果更新包是通过浏览器下载的：把 zip 文件拖到 install-update.cmd 上也可以，\n脚本会自动使用拖入的文件并核对版本。'
+      : '本目录是 exe 安装包路径：脚本会静默运行安装包（/S --updated /D=安装目录），\n安装完成后回读版本并启动应用。',
     ''
   ].join('\r\n')
 }
 
-function writeManualUpdater({ artifact, installDir, exe, version }) {
+function writeManualUpdater({ artifact, installDir, exe, version, pid = 0 }) {
   const folder = path.dirname(artifact)
   const ps1Path = path.join(folder, MANUAL_PS1)
   const cmdPath = path.join(folder, MANUAL_CMD)
   const autoCmdPath = path.join(folder, MANUAL_AUTO_CMD)
   const readmePath = path.join(folder, MANUAL_README)
+  const kind = payloadKind(artifact)
   fs.mkdirSync(folder, { recursive: true })
   // PS1 带 BOM：PowerShell 5.1 才按 UTF-8 解析中文（安装目录可能含中文）
-  fs.writeFileSync(ps1Path, '\ufeff' + manualPs1({ artifact, installDir, exe, version }), 'utf8')
+  const script = kind === 'zip'
+    ? manualPs1({ artifact, installDir, exe, version })
+    // exe 安装包：复用旧的 NSIS 静默安装脚本，只是现在由 detached cmd 拉起，
+    // 且脚本自己等进程退出、写退出码、启动应用
+    : buildScript({
+      kind: 'setup',
+      pid,
+      artifact,
+      installDir,
+      exe,
+      exitFile: path.join(folder, 'install-exit.txt'),
+      version,
+      waitSeconds: 60
+    })
+  fs.writeFileSync(ps1Path, '\ufeff' + script, 'utf8')
   // CMD 内容全 ASCII：cmd.exe 按系统 OEM 代码页解析，中文写进去容易乱码
-  fs.writeFileSync(cmdPath, manualCmd(path.basename(artifact)), 'ascii')
-  fs.writeFileSync(autoCmdPath, manualCmd(path.basename(artifact), { auto: true }), 'ascii')
-  fs.writeFileSync(readmePath, manualReadme({ version, installDir }), 'utf8')
-  return { folder, ps1Path, cmdPath, autoCmdPath, readmePath }
+  fs.writeFileSync(cmdPath, manualCmd(path.basename(artifact), { passZip: kind === 'zip' }), 'ascii')
+  fs.writeFileSync(autoCmdPath, manualCmd(path.basename(artifact), { auto: true, passZip: kind === 'zip' }), 'ascii')
+  fs.writeFileSync(readmePath, manualReadme({ version, installDir, kind }), 'utf8')
+  return { folder, ps1Path, cmdPath, autoCmdPath, readmePath, kind }
 }
 
 // 载荷类型：zip 覆盖 / setup 安装包

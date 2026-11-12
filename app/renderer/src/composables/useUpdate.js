@@ -408,7 +408,7 @@ async function syncDownloadState() {
       stage.value = 'downloading'
       percent.value = state.percent || 0
       pollDownload()
-    } else if (state.mode === 'install' && state.status === 'done' && /\.zip$/i.test(state.artifactPath || '') && state.sha256 && state.version) {
+    } else if (state.mode === 'install' && state.status === 'done' && /(?:\.zip|-setup\.exe)$/i.test(state.artifactPath || '') && state.sha256 && state.version) {
       // 页面刷新 / 切回设置页：服务端还记着已下载的包，恢复成「立即安装」
       downloaded.value = { version: state.version, artifactPath: state.artifactPath, sha256: state.sha256 }
       if (stage.value === 'idle' || stage.value === 'error') stage.value = 'ready'
