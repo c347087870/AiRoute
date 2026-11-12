@@ -101,9 +101,9 @@ function writeJournal(data) {
 }
 
 // 读启动器留下的安装器退出码；没有这个文件说明上次没走到安装那一步
-function readInstallExit() {
+function readInstallExit(file = INSTALL_EXIT) {
   try {
-    const code = Number(String(fs.readFileSync(INSTALL_EXIT, 'utf8')).trim())
+    const code = Number(String(fs.readFileSync(file, 'utf8')).trim())
     return Number.isFinite(code) ? code : null
   } catch {
     return null
@@ -135,7 +135,8 @@ function readLastResult() {
   // Windows：启动器跑完安装后只写退出码、不改 journal。版本没变就是没装成，
   // 用退出码给出具体原因，比笼统的「未完成」有用
   if (IS_WIN && journal.status === 'installing') {
-    const code = readInstallExit()
+    const exitPath = journal.manual && journal.logPath ? journal.logPath : INSTALL_EXIT
+    const code = readInstallExit(exitPath)
     if (code !== null) {
       return { ...base, ok: false, error: core.describeInstallExit(code, app.getVersion()), rolledBack: false }
     }
@@ -219,7 +220,7 @@ async function prepareManualArtifacts(payload) {
   if (!core.isInside(UPDATE_DIR, artifactPath) && !core.isInside(MANUAL_DIR, artifactPath)) {
     throw new Error('更新包路径非法')
   }
-  if (!/\.zip$/i.test(artifactPath)) throw new Error('覆盖安装需要 zip 更新包')
+  if (!core.isWindowsUpdateArtifact(artifactPath)) throw new Error('覆盖安装需要 zip 或 -setup.exe 更新包')
   if (!fs.existsSync(artifactPath)) throw new Error('更新包不存在，请重新下载')
   const expected = core.normalizeSha(sha256)
   if (!expected) throw new Error('缺少 SHA-256 校验值，已停止')
@@ -253,6 +254,7 @@ async function prepareManualArtifacts(payload) {
     installDir,
     exe: target.target,
     version,
+    pid: process.pid,
   })
   console.log('[aiRoute] 已生成覆盖安装脚本:', result.cmdPath)
   return {
@@ -260,7 +262,7 @@ async function prepareManualArtifacts(payload) {
     installDir,
     version,
     artifactPath: manualZip,
-    logPath: path.join(manualDir, 'install-update.log'),
+    logPath: path.join(manualDir, result.kind === 'zip' ? 'install-update.log' : 'install-exit.txt'),
   }
 }
 

@@ -2,6 +2,26 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0-beta.3] - 2026-11-12
+
+修复 beta.2 下载兜底到 `-setup.exe` 时，「立即安装」报「覆盖安装需要 zip 更新包」的问题。beta.3 是修复后的测试基准版本。
+
+### 修复
+
+- **立即安装支持 exe 安装包**：`prepareManualArtifacts` 接受 `.zip` 与 `-setup.exe`；exe 走 NSIS 静默安装（`/S --updated /D=<安装目录>`），由 detached cmd 拉起，等主进程退出后安装、回读 FileVersion 并启动应用
+- **安装结果可判定**：exe 安装脚本把安装器退出码写到 `install-exit.txt`，新版本启动后按退出码提示（0 / -1 / 8 / 9 / 其它）
+- **下载兜底不再报错**：zip 下载失败时服务端会回落到 `-setup.exe`，现在这条路径也能完成安装
+
+### 测试
+
+- `test-update` 增加 setup 脚本生成用例（44 项）
+- `npm test` / `npm run test:e2e` 全绿
+
+### 说明
+
+- beta.1 / beta.2 这对测试版本暴露了 exe 兜底 bug；建议手动安装 beta.3 作为基准，再测试 beta.3 → beta.4
+- beta.4 只改版本号，用于验证应用内检查更新、下载、立即安装的完整链路
+
 ## [2.2.0-beta.2] - 2026-11-12
 
 第二个更新测试版本：代码与 2.2.0-beta.1 相同，仅版本号 +1，用于验证 `beta.1 → beta.2` 的应用内更新流程（检查更新 → App 内下载 → 立即安装 → 自动覆盖安装并重启）。
