@@ -1,16 +1,12 @@
 <template>
   <div class="token-stats-page">
-    <div class="page-toolbar">
-      <AppButton variant="danger" @click="clearStats" :disabled="loading">清空</AppButton>
-    </div>
-
-    <!-- 时间维度选择：通用分段控件（SegmentedTabs），与状态面板同一套外观与键盘行为 -->
-    <div class="page-toolbar period-toolbar">
+    <div class="stats-toolbar">
       <SegmentedTabs
         v-model="selectedPeriod"
         :options="periods"
         label="用量统计时间维度"
       />
+      <AppButton variant="danger" @click="clearStats" :disabled="loading">清空</AppButton>
     </div>
 
     <!-- 汇总统计卡片：总计 / 输入 / 缓存读 / 缓存写 -->
@@ -25,7 +21,7 @@
         </div>
         <div class="summary-content">
           <div class="summary-label">总计 Token</div>
-          <div class="summary-value purple">{{ formatNumber(currentStats.total) }}</div>
+          <div class="summary-value purple">{{ formatCnNumber(currentStats.total) }}</div>
         </div>
       </div>
 
@@ -39,7 +35,7 @@
         </div>
         <div class="summary-content">
           <div class="summary-label">输入（未命中缓存）</div>
-          <div class="summary-value blue">{{ formatNumber(currentStats.input) }}</div>
+          <div class="summary-value blue">{{ formatCnNumber(currentStats.input) }}</div>
         </div>
       </div>
 
@@ -53,7 +49,7 @@
         </div>
         <div class="summary-content">
           <div class="summary-label">缓存读</div>
-          <div class="summary-value purple">{{ formatNumber(currentStats.cacheRead) }}</div>
+          <div class="summary-value purple">{{ formatCnNumber(currentStats.cacheRead) }}</div>
         </div>
       </div>
 
@@ -67,7 +63,7 @@
         </div>
         <div class="summary-content">
           <div class="summary-label">缓存写</div>
-          <div class="summary-value orange">{{ formatNumber(currentStats.cacheWrite) }}</div>
+          <div class="summary-value orange">{{ formatCnNumber(currentStats.cacheWrite) }}</div>
         </div>
       </div>
 
@@ -201,6 +197,106 @@
       </div>
     </div>
 
+    <!-- 积分消耗趋势：和 Token 趋势同一套时间维度 -->
+    <div class="section">
+      <h2 class="section-title">积分消耗趋势</h2>
+      <div class="card">
+        <UsageChart
+          :title="selectedPeriod === 'today' ? '本日每小时积分消耗' : `${currentPeriodLabel}每日积分消耗`"
+          label="当前"
+          color="var(--warn-text)"
+          :points="creditPoints"
+          :format-value="formatCredit"
+        />
+      </div>
+    </div>
+
+    <!-- 渠道维度：总积分 / 总 token / 100 积分≈token -->
+    <div class="section">
+      <h2 class="section-title">各渠道积分与 Token 消耗</h2>
+      <div class="card">
+        <table class="model-table">
+          <thead>
+            <tr>
+              <th>渠道</th>
+              <th>总积分</th>
+              <th>总 Token</th>
+              <th title="按累计 Token ÷ 累计积分 × 100 计算；数据不足时显示 -">100 积分≈Token</th>
+              <th>Token 占比</th>
+              <th>{{ currentPeriodLabel }}积分</th>
+              <th>{{ currentPeriodLabel }}Token</th>
+              <th>积分占比</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in scopeChannels" :key="row.id">
+              <td>{{ row.name || row.id }}</td>
+              <td class="text-orange">{{ formatCredit(row.periods.total.creditsUsed) }}</td>
+              <td class="font-bold">{{ formatCnNumber(row.periods.total.total) }}</td>
+              <td class="text-purple">{{ row.ratio.tokensPer100Credits === null ? '-' : formatNumber(row.ratio.tokensPer100Credits) }}</td>
+              <td>{{ tokenPercent(row.periods.total.total) }}%</td>
+              <td class="text-orange">{{ formatCredit(periodOf(row).creditsUsed) }}</td>
+              <td>{{ formatNumber(periodOf(row).total) }}</td>
+              <td>
+                <div class="percentage-bar">
+                  <div class="percentage-fill" :style="{ width: creditPercent(row.periods.total.creditsUsed) + '%' }"></div>
+                  <span class="percentage-text">{{ creditPercent(row.periods.total.creditsUsed) }}%</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!scopeChannels.length" class="empty">暂无渠道积分数据</div>
+      </div>
+    </div>
+
+    <!-- 账号维度：六个时间窗口的积分消耗 -->
+    <div class="section">
+      <h2 class="section-title">各账号积分消耗（按时间窗口）</h2>
+      <div class="card">
+        <div class="table-wrap">
+          <table class="model-table">
+            <thead>
+              <tr>
+                <th>渠道</th>
+                <th>账号</th>
+                <th>当日</th>
+                <th>近三天</th>
+                <th>本周</th>
+                <th>本月</th>
+                <th>近三月</th>
+                <th>本年</th>
+                <th>总积分</th>
+                <th>总 Token</th>
+                <th>积分占比</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in scopeAccounts" :key="row.channel + ':' + row.uid">
+                <td>{{ channelName(row.channel) }}</td>
+                <td class="nowrap">{{ row.name || String(row.uid).slice(0, 8) }}</td>
+                <td class="text-orange">{{ formatCredit(row.periods.day.creditsUsed) }}</td>
+                <td class="text-orange">{{ formatCredit(row.periods.threeDay.creditsUsed) }}</td>
+                <td class="text-orange">{{ formatCredit(row.periods.week.creditsUsed) }}</td>
+                <td class="text-orange">{{ formatCredit(row.periods.month.creditsUsed) }}</td>
+                <td class="text-orange">{{ formatCredit(row.periods.quarter.creditsUsed) }}</td>
+                <td class="text-orange">{{ formatCredit(row.periods.year.creditsUsed) }}</td>
+                <td class="font-bold text-orange">{{ formatCredit(row.periods.total.creditsUsed) }}</td>
+                <td>{{ formatCnNumber(row.periods.total.total || row.todayTokens || 0) }}</td>
+                <td>
+                  <div class="percentage-bar">
+                    <div class="percentage-fill" :style="{ width: creditPercent(row.periods.total.creditsUsed) + '%' }"></div>
+                    <span class="percentage-text">{{ creditPercent(row.periods.total.creditsUsed) }}%</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="!scopeAccounts.length" class="empty">暂无账号积分数据</div>
+      </div>
+    </div>
+
     <!-- 模型使用量表格 -->
     <div class="section">
       <h2 class="section-title">各模型使用量</h2>
@@ -220,9 +316,9 @@
             <tr v-for="(stats, model) in modelStats" :key="model">
               <td>{{ model }}</td>
               <td>{{ formatNumber(reqCount(stats)) }}</td>
-              <td class="font-bold">{{ formatNumber(stats.total) }}</td>
-              <td class="text-muted">{{ formatNumber(stats.cacheRead) }}</td>
-              <td class="text-orange">{{ formatNumber(stats.cacheWrite) }}</td>
+              <td class="font-bold">{{ formatCnNumber(stats.total) }}</td>
+              <td class="text-muted">{{ formatCnNumber(stats.cacheRead) }}</td>
+              <td class="text-orange">{{ formatCnNumber(stats.cacheWrite) }}</td>
               <td>
                 <div class="percentage-bar">
                   <div 
@@ -248,15 +344,17 @@ import {
   getTokenStatsCalendar,
   getTokenStatsRange,
   getTokenStats,
+  getTokenScopes,
   clearTokenStats
 } from '../api.js'
 import { showToast } from '../composables/useToast.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { formatNumber, formatPercent, calcCacheHitRate, toLocalDateKey } from '../utils/format.js'
+import { formatNumber, formatPercent, calcCacheHitRate, toLocalDateKey, formatCnNumber } from '../utils/format.js'
 
 import AppButton from '../components/AppButton.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
+import UsageChart from '../components/UsageChart.vue'
 // 时间维度选项：与状态面板同一套日历口径（本日 / 本周 / 本月 / 近三月 / 本年），
 // 另外保留「近三天」这个滚动窗口 —— 它回答的是「这两三天有没有异常」，
 // 和「本周」在周一当天重合、周二起就不一样，两者都需要
@@ -272,6 +370,7 @@ const periods = [
 const selectedPeriod = ref('today') // 默认显示今天的小时数据
 const periodData = ref({ summary: {}, details: [] })
 const modelStatsData = ref({})
+const scopeData = ref({ channels: [], accounts: [] })
 const loading = ref(false)
 
 // Tooltip 状态
@@ -325,6 +424,12 @@ const chartData = computed(() => {
   }
 })
 
+// 积分趋势：明细里现在带 credits/balanceCredits（服务端按天/小时聚合）
+const creditPoints = computed(() => (periodData.value.details || []).map(item => ({
+  label: item.displayLabel || item.displayDate || '',
+  value: item.creditsUsed != null ? item.creditsUsed : (item.credits || 0)
+})))
+
 // 请求次数（含失败）：与状态面板「今日请求」同口径
 function reqCount(stats) {
   return (Number(stats && stats.count) || 0) + (Number(stats && stats.failed) || 0)
@@ -332,6 +437,49 @@ function reqCount(stats) {
 
 // 模型统计数据
 const modelStats = computed(() => modelStatsData.value.byModel || {})
+
+// ── 渠道 / 账号积分维度 ──
+const PERIOD_KEY = { today: 'day', 3: 'threeDay', week: 'week', month: 'month', quarter: 'quarter', year: 'year' }
+const currentPeriodLabel = computed(() => {
+  const found = periods.find(p => p.value === selectedPeriod.value)
+  return found ? found.label : ''
+})
+
+const scopeChannels = computed(() => {
+  const rows = Array.isArray(scopeData.value.channels) ? scopeData.value.channels.slice() : []
+  return rows.sort((a, b) => (b.periods?.total?.creditsUsed || 0) - (a.periods?.total?.creditsUsed || 0))
+})
+const scopeAccounts = computed(() => {
+  const rows = Array.isArray(scopeData.value.accounts) ? scopeData.value.accounts.slice() : []
+  return rows.sort((a, b) => (b.periods?.total?.creditsUsed || 0) - (a.periods?.total?.creditsUsed || 0))
+})
+
+function periodOf(row) {
+  return row?.periods?.[PERIOD_KEY[selectedPeriod.value] || 'day'] || {}
+}
+
+function channelName(id) {
+  const found = scopeChannels.value.find(row => row.id === id)
+  return found?.name || id
+}
+
+function formatCredit(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '0'
+  return Number.isInteger(number) ? String(number) : number.toFixed(2)
+}
+
+function creditPercent(value) {
+  const total = scopeChannels.value.reduce((sum, row) => sum + (Number(row.periods?.total?.creditsUsed) || 0), 0)
+  if (total <= 0) return 0
+  return Math.round(((Number(value) || 0) / total) * 100)
+}
+
+function tokenPercent(value) {
+  const total = scopeChannels.value.reduce((sum, row) => sum + (Number(row.periods?.total?.total) || 0), 0)
+  if (total <= 0) return 0
+  return Math.round(((Number(value) || 0) / total) * 100)
+}
 
 // 图表标题：直接用维度标签，不再用「近 N 天」拼 —— 本周 / 本月这类日历口径
 // 拼出来会是「近week天」这种错字
@@ -572,9 +720,13 @@ async function loadPeriodData(period, { silent = false } = {}) {
       periodData.value = await getTokenStatsCalendar(period)
     }
     
-    // 同时加载模型统计
-    const allStats = await getTokenStats()
+    // 同时加载模型统计与渠道 / 账号维度的积分明细
+    const [allStats, scopes] = await Promise.all([getTokenStats(), getTokenScopes()])
     modelStatsData.value = allStats
+    scopeData.value = {
+      channels: Array.isArray(scopes?.channels) ? scopes.channels : [],
+      accounts: Array.isArray(scopes?.accounts) ? scopes.accounts : []
+    }
   } catch (err) {
     console.error('Failed to load token stats:', err)
   } finally {
@@ -619,8 +771,14 @@ onMounted(() => {
 
 
 /* 时间维度选择器：与状态面板一致靠左对齐，与下方卡片左边缘齐平 */
-.period-toolbar {
-  justify-content: flex-start;
+/* 时间维度与「清空」同一行：维度在左，清空靠右 */
+.stats-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
 }
 
 
@@ -887,4 +1045,6 @@ onMounted(() => {
   }
 }
 </style>
+
+
 

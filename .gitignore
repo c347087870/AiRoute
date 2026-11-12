@@ -64,3 +64,7 @@ app/dist-electron/
 .DS_Store
 Thumbs.db
 BLOG.md
+
+# 本地测试构建输出（不进库）
+app/test-dist/
+app/test-release/

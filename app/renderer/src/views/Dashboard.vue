@@ -15,7 +15,7 @@
     <div class="section">
       <div class="section-header">
         <h2 class="section-title">用量概览</h2>
-        <router-link class="link-more" to="/token-stats">用量统计 →</router-link>
+        <router-link class="link-more" to="/usage?tab=stats">用量统计 →</router-link>
       </div>
       <div class="usage-grid">
         <div class="card stat-card">
@@ -60,7 +60,7 @@
     <div class="section">
       <div class="section-header">
         <h2 class="section-title">最近请求</h2>
-        <router-link class="link-more" to="/logs">查看全部 →</router-link>
+        <router-link class="link-more" to="/usage?tab=logs">查看全部 →</router-link>
       </div>
       <div class="card table-card">
         <table class="table" v-if="recentLogs.length">

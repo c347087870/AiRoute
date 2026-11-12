@@ -27,8 +27,8 @@ const rendererCwd = path.join(appCwd, 'renderer')
 const serverSrcDir = path.join(root, 'server')
 const serverBldDir = path.join(appCwd, 'server')
 const buildDepsDir = path.join(root, '.build-node_modules')
-const buildOutputDir = path.join(appCwd, 'dist-electron')
-const releaseDir = path.join(appCwd, 'release')
+const buildOutputDir = path.resolve(appCwd, process.env.AIROUTE_BUILD_OUTPUT || 'dist-electron')
+const releaseDir = path.resolve(appCwd, process.env.AIROUTE_BUILD_RELEASE || 'release')
 
 // 目标平台：默认跟随当前主机，可用 --mac / --win 显式指定（只为给出更清晰的报错）
 const targetPlatform = process.argv.includes('--mac') ? 'darwin' : process.argv.includes('--win') ? 'win32' : process.platform
@@ -283,7 +283,7 @@ buildRenderer.on('close', (code) => {
   // --publish never：electron-builder 检测到在 tag 上构建会隐式 publish（默认 onTagOrDraft），
   // CI 里没有 GH_TOKEN 会直接失败；发布统一交给 workflow 的 gh release，这里显式关掉
   // 架构显式传给 electron-builder：多架构时产物名里的 ${arch} 才能各自展开成独立文件
-  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', '--publish', 'never', isMac ? '--mac' : '--win', ...arches.map(arch => `--${arch}`)]
+  const builderArgs = ['electron-builder', '--config', 'electron-builder.json', `--config.directories.output=${buildOutputDir}`, '--publish', 'never', isMac ? '--mac' : '--win', ...arches.map(arch => `--${arch}`)]
 
   const buildApp = spawn('npx', builderArgs, {
     cwd: root,

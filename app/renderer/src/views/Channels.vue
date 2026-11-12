@@ -232,8 +232,9 @@
                   <span :class="acct.enabled === false ? 'text-muted' : 'ch-ok'">
                     {{ acct.enabled === false ? '已停用' : '可用' }}
                   </span>
-                  <!-- 有余额端点的渠道显示积分：查不到时如实说「查询失败」，不显示 0 -->
+                  <!-- 有余额端点的渠道显示积分：不够时如实说「查询失败」，不显示 0 -->
                   <span v-if="balanceText(acct)" :class="{ 'ch-bad': balances[acct.id]?.error }">{{ balanceText(acct) }}</span>
+                  <span v-if="usedTodayText(acct)" class="text-orange">{{ usedTodayText(acct) }}</span>
                   <!-- 今日已用 token：账号级内存账本（WorkBuddy 池与插件各记各的）。
                        字段缺失就不显示 —— 与 WorkBuddy 行同一写法，不写 0 -->
                   <span v-if="Number.isFinite(acct.tokenUsageToday)">今日 {{ formatToken(acct.tokenUsageToday) }} token</span>
@@ -1691,6 +1692,14 @@ function balanceText(acct) {
   return ''
 }
 
+// 今日消耗（来源：token 统计的逐请求积分，或 Trae 余额累计已用的日差分）
+function usedTodayText(acct) {
+  const record = balances.value[acct.id]
+  const used = record?.usedToday
+  if (!Number.isFinite(used)) return ''
+  return `今日 -${formatCredit(used)}`
+}
+
 // 余额自动刷新：有 balance 端点的渠道，整渠道一次拉齐（credits.balances 内部
 // 已逐账号顺序查，比行上逐个 account.balance 少 N-1 次往返）。
 // 余额是分钟级的慢变量（失活审计也是 10 分钟一轮），按 5 分钟节流，
@@ -1721,10 +1730,15 @@ async function loadBalancesAll({ force = false } = {}) {
       for (const row of rows) {
         if (!row?.accountId) continue
         const total = row?.balance?.total
-        if (Number.isFinite(total)) patch[row.accountId] = { total, error: '' }
-        else {
+        if (Number.isFinite(total)) {
+          patch[row.accountId] = {
+            total,
+            usedToday: Number.isFinite(row.usedToday) ? row.usedToday : null,
+            error: ''
+          }
+        } else {
           failed++
-          patch[row.accountId] = { total: null, error: row?.error || '查询失败' }
+          patch[row.accountId] = { total: null, usedToday: null, error: row?.error || '查询失败' }
         }
       }
     }

@@ -244,6 +244,49 @@ async function fetchReleaseList() {
   return list
 }
 
+// 通道四：GitHub Releases Atom 订阅。API 被限流（60 次/小时）或网络不可达时，
+// Atom 仍能拿到最近发布过的 tag（含 prerelease，草稿不出现）。没有资产清单，
+// 但 beta 线只需要 tag；后续按约定的资产名拼下载地址即可。
+function parseReleaseAtom(xml, nowMs = Date.now()) {
+  const blocks = String(xml || '').split('<entry>').slice(1)
+  const out = []
+  for (const block of blocks) {
+    const tagMatch = block.match(/\/releases\/tag\/([^"<]+)/)
+    const tag = tagMatch ? decodeURIComponent(tagMatch[1]).trim() : ''
+    if (!tag) continue
+    const titleMatch = block.match(/<title>([^<]+)<\/title>/)
+    const publishedMatch = block.match(/<updated>([^<]+)<\/updated>/)
+    out.push({
+      tag_name: tag,
+      name: titleMatch ? titleMatch[1].trim() : tag,
+      prerelease: /-/.test(tag),
+      draft: false,
+      // 让 pickRelease 的 hasAsset 检查通过；describeRelease 找不到具体资产时会
+      // 按 assetCandidates 的默认名拼下载地址（与 Release 约定一致）
+      assets: [{ name: 'atom-feed' }],
+      body: '',
+      published_at: publishedMatch ? publishedMatch[1] : '',
+      atomFallback: true,
+      _at: nowMs
+    })
+  }
+  return out
+}
+
+async function fetchReleaseAtom() {
+  const res = await axios.get(`https://github.com/${REPO}/releases.atom`, {
+    timeout: 8000,
+    responseType: 'text',
+    transformResponse: [data => data],
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    maxRedirects: 5,
+    validateStatus: s => s === 200
+  })
+  const list = parseReleaseAtom(res.data)
+  if (!list.length) throw new Error('Releases Atom 里没有可用的版本')
+  return list
+}
+
 // 把一个 Release 对象整理成 checkUpdate 需要的形状（与 fetchByApi 同构）
 function describeRelease(data) {
   const names = assetCandidates(data.tag_name)
@@ -275,9 +318,16 @@ async function checkUpdate(force) {
   if (line === 'beta') {
     // beta 线：拉列表 → 排除草稿 → 只要 prerelease → 优先挑带本平台资产的。
     // beta 线暂时没有已发布的版本（例如只建了草稿）时不能报错：用户会看到
-    // 「检查更新失败」，可实际上没有任何可装的东西，如实回答「已是最新」更准确
+    // 「检查更新失败」，可实际上没有任何可装的东西，如实回答「已是最新」更准确。
+    // API 403/限流时回落到 GitHub Releases Atom（公开、无需 token）。
     channel = 'releases'
-    const list = await fetchReleaseList()
+    let list
+    try {
+      list = await fetchReleaseList()
+    } catch (e) {
+      channel = 'atom'
+      list = await fetchReleaseAtom()
+    }
     const picked = pickRelease(list, 'beta', r => (r.assets || []).length > 0)
     info = picked ? describeRelease(picked) : { tag: `v${current}`, notes: '', publishedAt: '', size: 0, assetName: '', assetDigest: '', checksumsUrl: '', pageUrl: `https://github.com/${REPO}/releases` }
   } else {
@@ -543,6 +593,8 @@ module.exports = {
   comparePrerelease,
   releaseLine,
   pickRelease,
+  parseReleaseAtom,
+  fetchReleaseAtom,
   parseChecksums,
   normalizeSha,
   SETUP_SUFFIX,

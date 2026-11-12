@@ -217,6 +217,8 @@ function toStatUsage(usage) {
     cacheWrite: 0,
     // 积分消耗：Qoder 这类按 credits 计费的渠道唯一能算账的字段
     ...credits === undefined ? {} : { credits },
+    // 账号归因：插件的 usage 帧带 servedUid，统计页据此按账号聚合
+    ...(typeof usage.uid === 'string' && usage.uid ? { uid: usage.uid } : {}),
   }
 }
 

@@ -1,40 +1,43 @@
 <template>
   <div class="logs">
-    <div class="page-toolbar">
-      <div class="header-actions">
+    <div class="logs-toolbar">
+      <div class="filter-bar logs-filters">
+        <select v-model="modelFilter" class="filter-select" title="按模型筛选">
+          <option value="">全部模型</option>
+          <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
+        </select>
+
+        <select v-model="channelFilter" class="filter-select" title="按渠道筛选">
+          <option value="">全部渠道</option>
+          <option v-for="c in channelOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
+
+        <select v-model="statusFilter" class="filter-select" title="按状态筛选">
+          <option value="">全部状态</option>
+          <option value="success">成功</option>
+          <option value="failed">失败</option>
+          <option value="degraded">重试/降级</option>
+        </select>
+
+        <select v-model="limit" class="filter-select limit-select" title="显示条数">
+          <option :value="20">20 条</option>
+          <option :value="50">50 条</option>
+          <option :value="100">100 条</option>
+          <option :value="200">200 条</option>
+        </select>
+
+        <AppButton variant="secondary" @click="resetFilters">重置</AppButton>
+      </div>
+      <div class="logs-meta">
         <span v-if="logSize" class="log-size text-muted">
-          日志已占用 {{ formatBytes(logSize.totalSize) }} · {{ logSize.fileCount }} 个文件
+          日志 {{ formatBytes(logSize.totalSize) }} · {{ logSize.fileCount }} 个文件
         </span>
         <AppButton variant="danger" :disabled="clearing" @click="clearAllLogs">清空</AppButton>
       </div>
     </div>
 
-    <!-- 筛选栏：模型 / 状态 / 条数，任一变化都会重新加载 -->
-    <div class="filter-bar">
-      <select v-model="modelFilter" class="filter-select" title="按模型筛选">
-        <option value="">全部模型</option>
-        <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
-      </select>
-
-      <select v-model="statusFilter" class="filter-select" title="按状态筛选">
-        <option value="">全部状态</option>
-        <option value="success">成功</option>
-        <option value="failed">失败</option>
-        <option value="degraded">重试/降级</option>
-      </select>
-
-      <select v-model="limit" class="filter-select" title="显示条数">
-        <option :value="20">最近 20 条</option>
-        <option :value="50">最近 50 条</option>
-        <option :value="100">最近 100 条</option>
-        <option :value="200">最近 200 条</option>
-      </select>
-
-      <AppButton variant="secondary" @click="resetFilters">重置</AppButton>
-    </div>
-
     <div class="card">
-      <div class="table-wrap scroll-log" v-if="logs.length">
+      <div class="table-wrap scroll-log" v-if="displayLogs.length">
         <table class="table">
           <thead>
             <tr>
@@ -57,7 +60,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(log, i) in logs" :key="i">
+            <tr v-for="(log, i) in displayLogs" :key="i">
               <td class="nowrap">{{ formatTime(log.timestamp) }}</td>
               <td class="input-cell" :title="log.input || ''">{{ formatInput(log.input) }}</td>
               <td class="nowrap">{{ log.model }}</td>
@@ -147,7 +150,7 @@ import { getLogs, getLogModels, clearLogs, getLogsSize, wbAccounts, wbCreditHist
 import { showToast } from '../composables/useToast.js'
 import { usePageActions } from '../composables/usePageActions.js'
 import { usePolling } from '../composables/usePolling.js'
-import { formatNumber, formatTime, formatBytes } from '../utils/format.js'
+import { formatNumber, formatCnNumber, formatTime, formatBytes } from '../utils/format.js'
 
 import AppButton from '../components/AppButton.vue'
 const logs = ref([]) // 当前加载出来的日志列表（服务端已按任务合并，一条 = 一个任务）
@@ -155,6 +158,7 @@ const logSize = ref(null) // 日志目录占用 { totalSize, fileCount }
 const limit = ref(50) // 显示条数
 const modelFilter = ref('') // 模型筛选，空表示全部
 const statusFilter = ref('') // 状态筛选：'' / success / failed / degraded（重试/降级）
+const channelFilter = ref('') // 渠道筛选：从 model 引用前缀推导（channels/xxx/...）
 const modelOptions = ref([]) // 模型下拉选项，来自日志中出现过的模型引用
 const accounts = ref([]) // 账号池账号列表，供「账号」列把 uid 映射为昵称
 const creditEntries = ref([]) // 积分变动流水（当前页，新的在前，账号列由 uid 映射为昵称）
@@ -167,17 +171,29 @@ const creditNote = ref('') // 积分历史统计说明（总条数 · 净变动�
 
 // 是否存在生效中的筛选条件，用于区分两种空状态文案
 const hasActiveFilter = computed(() => {
-  return !!modelFilter.value || !!statusFilter.value
+  return !!modelFilter.value || !!statusFilter.value || !!channelFilter.value
+})
+
+function channelOfLog(model) {
+  const parts = String(model || '').split('/')
+  if (parts[0] === 'channels' && parts[1]) return parts[1]
+  return parts[0] || '其他'
+}
+
+const channelOptions = computed(() => [...new Set(logs.value.map(log => channelOfLog(log.model)).filter(Boolean))].sort())
+const displayLogs = computed(() => {
+  if (!channelFilter.value) return logs.value
+  return logs.value.filter(log => channelOfLog(log.model) === channelFilter.value)
 })
 
 // 缓存 Token 为 0 时显示占位符，非 0 时显示千分位数字
 function formatCacheTokens(value) {
-  return value ? formatNumber(value) : '-'
+  return value ? formatCnNumber(value) : '-'
 }
 
 // Token 单元：未知（上游未提供，null/undefined）显示 -，0 是有效值显示 0
 function formatTokenCell(value) {
-  return value === null || value === undefined ? '-' : formatNumber(value)
+  return value === null || value === undefined ? '-' : formatCnNumber(value)
 }
 
 // 使用记录列：最多显示前 30 字，完整内容通过 title 悬停查看
@@ -333,6 +349,7 @@ usePolling(() => refreshAll({ silent: true }))
 function resetFilters() {
   modelFilter.value = ''
   statusFilter.value = ''
+  channelFilter.value = ''
 }
 
 // 清空全部日志，二次确认后执行（防重入：进行中禁用按钮）
@@ -374,10 +391,36 @@ onMounted(refreshAll)
   margin-right: 4px;
 }
 
+/* 工具条：筛选在左、日志占用与清空在右，一行放下不换行 */
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.logs-filters {
+  margin-bottom: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.logs-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
 
 /* 高度与内边距交给全局大号下拉规则（App.vue 的 select） */
 .filter-select {
   min-width: 132px;
+}
+
+.limit-select {
+  min-width: 92px;
 }
 
 .credit-card {
@@ -476,3 +519,4 @@ onMounted(refreshAll)
 
 
 </style>
+

@@ -89,6 +89,22 @@ async function main() {
     }
   })
 
+  await test('Trae 更新日志：SVG path 坐标不会被当成版本号', async () => {
+    const realFetch = global.fetch
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '<svg><path d="M39.979 29.241c.11-.344-.23-.654-.574-.544-1.53.487-3.162.75-4.855.75-8.834 0-15.997-7.163"/></svg><p>Trae v3.4.17 发布</p>',
+    })
+    try {
+      const result = await sync.refreshVersions()
+      assert.equal(result.sources.traeDocs, '3.4.17', '应只看文本节点，不能抓 SVG path')
+      assert.notEqual(result.trae.appVersion, '4.855.75')
+    } finally {
+      global.fetch = realFetch
+    }
+  })
+
   await test('拉取失败：记录原因、版本回落到「本机安装 / 内置默认」而非报错', async () => {
     const realFetch = global.fetch
     global.fetch = async () => { throw new Error('network down') }
