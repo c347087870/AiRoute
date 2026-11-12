@@ -147,7 +147,11 @@ function readLastResult() {
   }
   if (journal.status === 'installing' || journal.status === 'installed') {
     const logTail = journal.logPath ? `，日志：${journal.logPath}` : ''
-    const error = IS_WIN ? `上次升级未完成（安装脚本未跑完${logTail}）` : '上次升级未完成（应用被中断）'
+    const error = IS_WIN
+      ? journal.interactive
+        ? '安装向导未完成（可能已取消），请重新检查更新'
+        : `上次升级未完成（安装脚本未跑完${logTail}）`
+      : '上次升级未完成（应用被中断）'
     return { ...base, ok: false, error, rolledBack: true }
   }
   return null
@@ -271,63 +275,88 @@ async function prepareManualInstall(payload) {
   return prepareManualArtifacts(payload)
 }
 
-// 方案 A：用户点「立即安装」后由主进程执行。
-// 关键是把 cmd.exe 以 detached 方式拉起：它是原生进程，创建独立进程组后不会随
-// Electron 退出被回收；脚本自己等应用退出、解压、覆盖、回读版本并启动新版本。
+// 方案 1：用户点「立即安装」→ 打开 NSIS 安装向导（-setup.exe 交互模式），应用退出。
+// 向导里由用户点安装，完成页可勾选「运行 AiRoute」；不再弹 cmd / PowerShell。
+// zip 兜底时仍走隐藏的覆盖脚本（windowsHide），但正常路径不会用到。
 async function installPreparedUpdate(payload) {
   if (running) throw new Error('已有升级任务进行中')
   if (!IS_WIN) throw new Error('覆盖安装仅用于 Windows')
   const target = resolveTarget()
   if (!target.ok) throw new Error(target.reason)
-  const prepared = await prepareManualArtifacts(payload)
+
+  const { artifactPath, sha256, version } = payload || {}
+  if (!artifactPath || !version) throw new Error('缺少更新包信息')
+  if (!core.isInside(UPDATE_DIR, artifactPath) && !core.isInside(MANUAL_DIR, artifactPath)) {
+    throw new Error('更新包路径非法')
+  }
+  const isSetup = /-setup\.exe$/i.test(artifactPath)
+  const isZip = /\.zip$/i.test(artifactPath)
+  if (!isSetup && !isZip) throw new Error('需要 -setup.exe 或 zip 更新包')
+  if (!fs.existsSync(artifactPath)) throw new Error('更新包不存在，请重新下载')
+  const expected = core.normalizeSha(sha256)
+  if (!expected) throw new Error('缺少 SHA-256 校验值，已停止')
+  const actual = await core.sha256File(artifactPath)
+  if (actual !== expected) throw new Error('更新包 SHA-256 校验失败')
+
+  const installDir = path.dirname(target.target)
+  if (!core.canWriteDir(installDir)) throw new Error(`没有写入 ${installDir} 的权限`)
   const from = app.getVersion()
-  const to = prepared.version
-  const sha = core.normalizeSha(payload.sha256)
+  const to = version
   running = true
-  const stageState = {
+  setState({
     stage: core.STAGE.REPLACE,
-    message: STAGE_TEXT[core.STAGE.REPLACE],
+    message: isSetup ? '正在打开安装向导…' : STAGE_TEXT[core.STAGE.REPLACE],
     error: '',
     rolledBack: false,
     from,
     to,
-  }
-  setState(stageState)
+  })
   writeJournal({
     status: 'installing',
-    stage: core.STAGE.REPLACE,
+    stage: isSetup ? 'installing' : core.STAGE.REPLACE,
     from,
     to,
-    artifactPath: prepared.artifactPath,
-    sha256: sha,
-    manual: true,
-    logPath: prepared.logPath,
+    artifactPath,
+    sha256: expected,
+    interactive: isSetup,
+    manual: !isSetup,
   })
+
   let child
   try {
-    child = winLauncher.spawnAutoUpdater({ cmdPath: prepared.autoCmdPath })
+    if (isSetup) {
+      // 关键：不带 /S，NSIS 会显示标准安装向导；/D= 把默认目录指向当前安装目录
+      child = winLauncher.spawnInteractiveSetup({ setupPath: artifactPath, installDir })
+    } else {
+      const prepared = await prepareManualArtifacts({ artifactPath, sha256: expected, version })
+      child = winLauncher.spawnAutoUpdater({ cmdPath: prepared.autoCmdPath, hidden: true })
+    }
   } catch (e) {
     running = false
-    throw new Error('无法启动安装脚本：' + (e.message || e))
+    throw new Error('无法启动安装向导：' + (e.message || e))
   }
   if (!child || typeof child.pid !== 'number') {
     running = false
-    throw new Error('无法启动安装脚本')
+    throw new Error('无法启动安装向导')
   }
   writeJournal({
     status: 'installing',
     stage: 'restarting',
     from,
     to,
-    artifactPath: prepared.artifactPath,
-    sha256: sha,
+    artifactPath,
+    sha256: expected,
     launcherPid: child.pid,
-    manual: true,
-    logPath: prepared.logPath,
+    interactive: isSetup,
+    manual: !isSetup,
   })
-  setState({ stage: 'restarting', message: STAGE_TEXT.restarting })
+  setState({
+    stage: 'restarting',
+    message: isSetup ? '安装向导已打开，应用即将退出…' : STAGE_TEXT.restarting,
+  })
   running = false
-  quitForInstall()
+  // 给安装向导一点时间完成进程检测，再退出应用；再由向导接管安装
+  quitForInstall(isSetup ? 1500 : 800)
   return getStatus()
 }
 

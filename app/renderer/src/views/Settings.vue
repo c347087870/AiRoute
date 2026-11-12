@@ -230,7 +230,7 @@ const primaryLabel = computed(() => {
 // Windows 便携版不参与覆盖安装，只能手动替换
 const installHint = computed(() => {
   if (isMacPlatform()) return '一键升级会下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启；任一步失败自动回滚'
-  if (isWindowsOverlay.value) return '点「下载更新包」→ App 内下载并校验 SHA-256 → 点「立即安装」→ 应用退出 → 自动覆盖安装并重启（不跑安装器、不需要 UAC）。下载失败时可在「Release 页面」用浏览器下载 zip，再从更新文件夹手动执行'
+  if (isWindowsOverlay.value) return '点「下载更新包」→ App 内下载并校验 SHA-256 → 点「立即安装」→ 打开标准 NSIS 安装向导（应用会先退出，按向导完成安装；完成页可勾选运行 AiRoute）。不弹 cmd / PowerShell'
   return '便携版不支持覆盖安装：请下载安装包后手动替换 exe。改用安装版（文件名带 -setup）即可使用覆盖更新'
 })
 

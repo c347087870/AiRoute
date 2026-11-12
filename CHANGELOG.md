@@ -2,6 +2,23 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0-beta.5] - 2026-11-12
+
+Windows 更新改为方案 1：下载 `-setup.exe` 后，用户点「立即安装」直接打开 **NSIS 安装向导**，不再出现 cmd / PowerShell 窗口。这是新的测试基准版本。
+
+### 变更
+
+- **安装走 NSIS 安装向导**：点「立即安装」→ 主进程 detached 启动 `-setup.exe`（不带 `/S`）→ 应用退出 → 标准安装向导出现 → 用户按向导完成安装，完成页可勾选「运行 AiRoute」
+- **不再弹 cmd**：正常路径完全不经过 cmd / PowerShell；zip 只在 setup 下载失败时作为隐藏兜底
+- **下载优先 `-setup.exe`**：`installAssetCandidates` 改为 setup 优先、zip 兜底；安装目录通过 `/D=<当前安装目录>` 传给 NSIS，避免装到默认目录
+- 安装向导取消/未完成时，下次启动按 journal 提示「安装向导未完成（可能已取消）」
+
+### 测试
+
+- `test-update` 增加 `spawnInteractiveSetup` 用例（45 项）
+- `npm test` / `npm run test:e2e` 全绿（本机一次 oauth 网络用例受网络影响，重跑/CI 为准）
+- 本地 `npm run build -- --win` + `verify-release`
+
 ## [2.2.0-beta.4] - 2026-11-12
 
 beta.3 的更新测试目标：代码相同，仅版本号 +1。用于验证 `beta.3 → beta.4` 的检查更新、App 内下载、立即安装（zip / exe 两条路径）、自动覆盖安装并重启。

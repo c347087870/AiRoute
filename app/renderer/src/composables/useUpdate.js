@@ -24,12 +24,12 @@ const downloaded = ref(null)    // { version, artifactPath, sha256 }
 // replacing 在 macOS 是「原子替换 .app」，在 Windows 安装版是「运行安装包」，用中性文案覆盖两者
 const STAGE_TEXT = {
   verifying: '校验 SHA-256…',
-  ready: '更新包已下载，点「立即安装」开始覆盖安装',
+  ready: '更新包已下载，点「立即安装」开始安装',
   'backing-up': '备份当前版本…',
-  replacing: '准备覆盖安装…',
-  installing: '正在覆盖安装…',
+  replacing: '正在打开安装向导…',
+  installing: '安装向导已打开…',
   readback: '回读校验新版本…',
-  restarting: '正在安装更新，应用即将退出…'
+  restarting: '安装向导已打开，应用即将退出…'
 }
 
 const downloading = computed(() => stage.value === 'downloading')
@@ -264,8 +264,8 @@ async function installWindowsUpdate() {
   const d = downloaded.value
   if (!window.confirm(
     `立即安装 v${d.version}？\n\n` +
-    '应用会退出，随后自动覆盖安装目录并重新启动。\n' +
-    '请先保存正在进行的操作；安装过程会打开一个控制台窗口显示进度，失败时窗口会保留错误信息。'
+    '会打开标准的 AiRoute 安装向导，请按向导完成安装；应用会先退出，完成页可勾选「运行 AiRoute」。\n' +
+    '请先保存正在进行的操作。'
   )) return false
   installError.value = ''
   stage.value = 'installing'
