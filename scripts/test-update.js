@@ -157,16 +157,16 @@ test('assetCandidates 按运行形态选择产物名', () => {
   assert.ok(portable.includes('AiRoute.exe'))
 })
 
-test('installAssetCandidates：一键升级优先 zip 覆盖包，便携包永不参与', () => {
+test('installAssetCandidates：安装版优先 -setup.exe（方案 1），zip 作为兜底，便携包永不参与', () => {
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   if (process.platform === 'darwin') {
     assert.deepStrictEqual(updateServer.installAssetCandidates('v1.7.2', 'mac'), [`AiRoute-1.7.2-${arch}.dmg`])
     return
   }
-  // 安装版：zip（应用自己解压覆盖）在前，-setup.exe 作为没有 zip 资产的旧版本回落
+  // 安装版：先下 -setup.exe，点「立即安装」走 NSIS 安装向导；没有 setup 时回落 zip 覆盖
   assert.deepStrictEqual(updateServer.installAssetCandidates('v1.7.2', 'installer'), [
-    `AiRoute-1.7.2-${arch}.zip`,
-    `AiRoute-1.7.2-${arch}-setup.exe`
+    `AiRoute-1.7.2-${arch}-setup.exe`,
+    `AiRoute-1.7.2-${arch}.zip`
   ])
   // 便携包不参与（拿便携包「升级」只会解包并启动一个新实例）
   assert.strictEqual(updateServer.installAssetCandidates('v1.7.2', 'installer').some(n => n.includes('-portable')), false)
@@ -785,6 +785,26 @@ test('spawnAutoUpdater：detached cmd.exe 拉脚本（原生进程，不随 Elec
   assert.deepStrictEqual(seen.args, ['/d', '/c', 'C:\\Users\\u\\AppData\\Roaming\\aiRoute\\updates-manual\\v2.2.0\\install-update-auto.cmd'])
   assert.strictEqual(seen.opts.detached, true)
   assert.strictEqual(seen.opts.stdio, 'ignore')
+  assert.strictEqual(seen.opts.windowsHide, false)
+})
+
+test('spawnInteractiveSetup：不带 /S，直接打开 NSIS 安装向导', () => {
+  let seen = null
+  const result = helper.spawnInteractiveSetup({
+    setupPath: 'C:\\u\\AiRoute-2.2.0-beta.5-x64-setup.exe',
+    installDir: 'D:\\p',
+    env: {},
+    spawnFn: (file, args, opts) => {
+      seen = { file, args, opts }
+      return { pid: 77, unref() { seen.unrefed = true } }
+    }
+  })
+  assert.strictEqual(result.pid, 77)
+  assert.strictEqual(seen.unrefed, true)
+  assert.strictEqual(seen.file, 'C:\\u\\AiRoute-2.2.0-beta.5-x64-setup.exe')
+  assert.deepStrictEqual(seen.args, ['/D=D:\\p'])
+  assert.strictEqual(seen.args.some(a => a === '/S'), false, '交互模式不能传 /S')
+  assert.strictEqual(seen.opts.detached, true)
   assert.strictEqual(seen.opts.windowsHide, false)
 })
 

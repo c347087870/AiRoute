@@ -64,7 +64,9 @@ function assetCandidates(version, kind = INSTALL_KIND) {
 function installAssetCandidates(version, kind = INSTALL_KIND) {
   if (kind !== 'installer') return assetCandidates(version, kind)
   const v = String(version).replace(/^v/i, '')
-  return [`AiRoute-${v}-${ARCH}${ZIP_SUFFIX}`, `AiRoute-${v}-${ARCH}${SETUP_SUFFIX}.exe`]
+  // 方案 1：优先下载 -setup.exe，让 NSIS 安装向导以交互方式出现；
+  // zip 只作为安装包不可用时的兜底（走隐藏的覆盖安装）。
+  return [`AiRoute-${v}-${ARCH}${SETUP_SUFFIX}.exe`, `AiRoute-${v}-${ARCH}${ZIP_SUFFIX}`]
 }
 
 // 一键升级的托管下载目录：生产模式由主进程注入 AIROUTE_UPDATE_DIR（userData/updates），

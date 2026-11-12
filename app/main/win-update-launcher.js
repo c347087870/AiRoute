@@ -287,10 +287,24 @@ function spawnLauncher({ scriptPath, spawnFn = spawn, psPath = powershellPath(),
 // 必须是 detached：cmd.exe 是原生进程，创建独立进程组后不会被 Electron 退出回收
 // （直接 spawn powershell.exe 时实测会被回收，这也是旧一键升级失败的主因）。
 // windowsHide=false：覆盖安装期间保留一个控制台窗口显示进度；失败时窗口不会自动关。
-function spawnAutoUpdater({ cmdPath, spawnFn = spawn, env = process.env }) {
+function spawnAutoUpdater({ cmdPath, spawnFn = spawn, env = process.env, hidden = false }) {
   const comspec = env.ComSpec || path.join(env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe')
   const child = spawnFn(comspec, ['/d', '/c', cmdPath], {
     cwd: path.dirname(cmdPath),
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: hidden,
+    env
+  })
+  if (child && typeof child.unref === 'function') child.unref()
+  return child
+}
+
+// 方案 1：把已下载的 -setup.exe 以交互模式拉起，让 NSIS 安装向导自己显示 UI。
+// 不传 /S —— 传了就是静默安装，没有安装向导；/D= 必须是最后一个参数且不带引号
+// （NSIS 的约定；当前安装路径没有空格，PowerShell/cmd 不会被拉起来）。
+function spawnInteractiveSetup({ setupPath, installDir, spawnFn = spawn, env = process.env }) {
+  const child = spawnFn(setupPath, [`/D=${installDir}`], {
     detached: true,
     stdio: 'ignore',
     windowsHide: false,
@@ -319,5 +333,6 @@ module.exports = {
   writeManualUpdater,
   writeScript,
   spawnLauncher,
-  spawnAutoUpdater
+  spawnAutoUpdater,
+  spawnInteractiveSetup
 }
