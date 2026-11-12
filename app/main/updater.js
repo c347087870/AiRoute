@@ -116,14 +116,21 @@ function readLastResult() {
   let journal = null
   try { journal = fs.readJsonSync(JOURNAL) } catch { return null }
   if (!journal || !journal.to) return null
-  const base = { from: journal.from || '', to: journal.to, at: journal.at || '', rolledBack: !!journal.rolledBack }
+  const base = { from: journal.from || '', to: journal.to, at: journal.at || '', rolledBack: !!journal.rolledBack, logPath: journal.logPath || '' }
   if (journal.to === app.getVersion()) {
     try { fs.removeSync(JOURNAL) } catch {}
+    // 覆盖安装成功后清掉 updates-manual\<版本>（zip 有 100MB+，留着只会占空间）；
+    // 延迟几秒，避免和新进程的首次读盘抢文件句柄
+    if (journal.manual && journal.artifactPath) {
+      const dir = path.dirname(journal.artifactPath)
+      setTimeout(() => { try { fs.removeSync(dir) } catch {} }, 5000).unref?.()
+    }
     return { ...base, ok: true }
   }
   if (journal.status === 'error') {
     // Windows 没有备份/回滚，别谎称「已回滚到 vX」（界面会照搬这句话）
-    return { ...base, ok: false, error: journal.error || '升级失败', rolledBack: !IS_WIN && journal.rolledBack !== false }
+    const tail = journal.logPath ? `（日志：${journal.logPath}）` : ''
+    return { ...base, ok: false, error: (journal.error || '升级失败') + tail, rolledBack: !IS_WIN && journal.rolledBack !== false }
   }
   // Windows：启动器跑完安装后只写退出码、不改 journal。版本没变就是没装成，
   // 用退出码给出具体原因，比笼统的「未完成」有用
@@ -138,7 +145,8 @@ function readLastResult() {
     return { ...base, ok: false, error: `安装程序已执行，但当前版本仍为 v${app.getVersion()}，请手动下载安装包重试`, rolledBack: false }
   }
   if (journal.status === 'installing' || journal.status === 'installed') {
-    const error = IS_WIN ? '上次升级未完成（安装程序未跑完）' : '上次升级未完成（应用被中断）'
+    const logTail = journal.logPath ? `，日志：${journal.logPath}` : ''
+    const error = IS_WIN ? `上次升级未完成（安装脚本未跑完${logTail}）` : '上次升级未完成（应用被中断）'
     return { ...base, ok: false, error, rolledBack: true }
   }
   return null
@@ -199,25 +207,41 @@ function getStatus() {
   return { ...state, updateDir: UPDATE_DIR }
 }
 
-// Windows 稳定路径：不自动退出/安装，只把已下载并校验过的 zip 变成用户可双击的覆盖安装脚本。
-// 为什么不让主进程直接跑：自动启动器依赖「应用退出后子进程还活着」，部分机器/安全软件下
-// 不成立；用户双击脚本时应用已经关闭，不存在这个前提，且失败信息会留在窗口里。
-async function prepareManualInstall(payload) {
-  if (!IS_WIN) throw new Error('覆盖安装脚本仅用于 Windows')
+// Windows 覆盖安装的公共准备：校验 zip → 复制到 updates-manual\<版本> → 生成脚本。
+// 「立即安装」与「手动打开更新文件夹」共用这一份，避免两套校验逻辑。
+async function prepareManualArtifacts(payload) {
+  if (!IS_WIN) throw new Error('覆盖安装仅用于 Windows')
   const target = resolveTarget()
   if (!target.ok) throw new Error(target.reason)
   const { artifactPath, sha256, version } = payload || {}
   if (!artifactPath || !version) throw new Error('缺少更新包信息')
   if (!/^[0-9A-Za-z._-]+$/.test(String(version))) throw new Error('版本号非法')
-  if (!core.isInside(UPDATE_DIR, artifactPath)) throw new Error('更新包路径非法')
+  if (!core.isInside(UPDATE_DIR, artifactPath) && !core.isInside(MANUAL_DIR, artifactPath)) {
+    throw new Error('更新包路径非法')
+  }
   if (!/\.zip$/i.test(artifactPath)) throw new Error('覆盖安装需要 zip 更新包')
   if (!fs.existsSync(artifactPath)) throw new Error('更新包不存在，请重新下载')
   const expected = core.normalizeSha(sha256)
   if (!expected) throw new Error('缺少 SHA-256 校验值，已停止')
   const actual = await core.sha256File(artifactPath)
   if (actual !== expected) throw new Error('更新包 SHA-256 校验失败')
+
   const installDir = path.dirname(target.target)
   if (!core.canWriteDir(installDir)) throw new Error(`没有写入 ${installDir} 的权限`)
+
+  // 磁盘空间：解压 + 覆盖要两份空间，低于 2.2 倍 zip 体积就别开始，免得半途失败
+  try {
+    const stat = require('fs').statfsSync(installDir)
+    const free = Number(stat.bavail) * Number(stat.bsize)
+    const need = fs.statSync(artifactPath).size * 2.2
+    if (Number.isFinite(free) && free < need) {
+      throw new Error(`磁盘空间不足：需要约 ${(need / 1073741824).toFixed(1)} GB，可用 ${(free / 1073741824).toFixed(1)} GB`)
+    }
+  } catch (e) {
+    if (/磁盘空间不足/.test(e.message)) throw e
+    // statfs 在个别文件系统上不可用：不阻塞升级，交给脚本的 robocopy 失败兜底
+  }
+
   const manualDir = path.join(MANUAL_DIR, `v${version}`)
   fs.ensureDirSync(manualDir)
   const manualZip = path.join(manualDir, path.basename(artifactPath))
@@ -231,7 +255,78 @@ async function prepareManualInstall(payload) {
     version,
   })
   console.log('[aiRoute] 已生成覆盖安装脚本:', result.cmdPath)
-  return { ...result, installDir, version, artifactPath: manualZip }
+  return {
+    ...result,
+    installDir,
+    version,
+    artifactPath: manualZip,
+    logPath: path.join(manualDir, 'install-update.log'),
+  }
+}
+
+// 手动兜底：只生成脚本，不自动退出（用户自己双击 install-update.cmd）
+async function prepareManualInstall(payload) {
+  return prepareManualArtifacts(payload)
+}
+
+// 方案 A：用户点「立即安装」后由主进程执行。
+// 关键是把 cmd.exe 以 detached 方式拉起：它是原生进程，创建独立进程组后不会随
+// Electron 退出被回收；脚本自己等应用退出、解压、覆盖、回读版本并启动新版本。
+async function installPreparedUpdate(payload) {
+  if (running) throw new Error('已有升级任务进行中')
+  if (!IS_WIN) throw new Error('覆盖安装仅用于 Windows')
+  const target = resolveTarget()
+  if (!target.ok) throw new Error(target.reason)
+  const prepared = await prepareManualArtifacts(payload)
+  const from = app.getVersion()
+  const to = prepared.version
+  const sha = core.normalizeSha(payload.sha256)
+  running = true
+  const stageState = {
+    stage: core.STAGE.REPLACE,
+    message: STAGE_TEXT[core.STAGE.REPLACE],
+    error: '',
+    rolledBack: false,
+    from,
+    to,
+  }
+  setState(stageState)
+  writeJournal({
+    status: 'installing',
+    stage: core.STAGE.REPLACE,
+    from,
+    to,
+    artifactPath: prepared.artifactPath,
+    sha256: sha,
+    manual: true,
+    logPath: prepared.logPath,
+  })
+  let child
+  try {
+    child = winLauncher.spawnAutoUpdater({ cmdPath: prepared.autoCmdPath })
+  } catch (e) {
+    running = false
+    throw new Error('无法启动安装脚本：' + (e.message || e))
+  }
+  if (!child || typeof child.pid !== 'number') {
+    running = false
+    throw new Error('无法启动安装脚本')
+  }
+  writeJournal({
+    status: 'installing',
+    stage: 'restarting',
+    from,
+    to,
+    artifactPath: prepared.artifactPath,
+    sha256: sha,
+    launcherPid: child.pid,
+    manual: true,
+    logPath: prepared.logPath,
+  })
+  setState({ stage: 'restarting', message: STAGE_TEXT.restarting })
+  running = false
+  quitForInstall()
+  return getStatus()
 }
 
 // 启动安装任务（异步执行，进度通过 getStatus 轮询）
@@ -373,6 +468,11 @@ function quitForInstall(delay = 800) {
   setTimeout(() => {
     app.isQuitting = true
     app.quit()
+    // 兜底：主进程被托盘/后台句柄拖住时强制退出，安装脚本自己会等 PID 消失
+    setTimeout(() => {
+      console.warn('[aiRoute] app.quit() 超时，强制退出以执行覆盖安装')
+      app.exit(0)
+    }, 10000).unref?.()
   }, delay)
 }
 
@@ -384,6 +484,7 @@ module.exports = {
   getStatus,
   startInstall,
   prepareManualInstall,
+  installPreparedUpdate,
   startRollback,
   resolveTarget
 }

@@ -2,6 +2,27 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0-beta.1] - 2026-11-12
+
+Windows 应用内更新改成「App 内下载 → 用户点立即安装 → detached cmd 覆盖安装」；同时给设置页补上手动「检查更新」。这是 2.2.0 的第一个测试版本。
+
+### 新增
+
+- **手动检查更新**：设置页版本行新增「检查更新」按钮，强制跳过 30 分钟缓存；自动检查仍保持每分钟静默轮询
+- **Windows App 内下载 + 立即安装**：点「下载更新包」后 App 内下载并校验 zip，完成后进入「已下载」状态，用户点「立即安装」才进入安装；下载和安装彻底分离
+- **detached 覆盖安装**：主进程生成 `install-update-auto.cmd`，以 detached `cmd.exe` 拉起；应用退出后脚本解压 zip → `robocopy` 覆盖 → 回读 FileVersion → 同步「应用和功能」版本 → 启动新版本。不跑 NSIS 安装器、不碰卸载器、不需要 UAC
+- 安装失败时控制台保留错误信息并写 `install-update.log`；新版本启动后根据 journal 提示升级成功或失败
+
+### 测试
+
+- `test-update` 增加 auto cmd / detached spawn 用例（43 项）
+- `npm test` / `npm run test:e2e` 全绿
+
+### 说明
+
+- 这是 beta 版本，只走 beta 更新线路；安装后可以检查到后续 `2.2.0-beta.2`
+- 首次从 2.0.6 等旧版本升级仍需手动覆盖安装（旧版本没有新的更新链路）
+
 ## [2.1.1] - 2026-11-11
 
 Windows 更新改成「下载覆盖包 + 双击 install-update.cmd」：不再依赖应用退出后自动启动的安装器，这是 2.1.0 一键升级在部分机器上「下载完成后什么都没发生、重启仍是旧版」的根治方案。

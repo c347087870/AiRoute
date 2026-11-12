@@ -108,6 +108,7 @@ function buildScript(options) {
 //   · 只解压 zip → robocopy 覆盖安装目录 → 回读 FileVersion → 拉起应用。
 // zip 也可以从浏览器下载后直接拖到 install-update.cmd 上使用。
 const MANUAL_CMD = 'install-update.cmd'
+const MANUAL_AUTO_CMD = 'install-update-auto.cmd'
 const MANUAL_PS1 = 'apply-update.ps1'
 const MANUAL_README = 'README.txt'
 
@@ -181,23 +182,30 @@ function manualPs1({ artifact, installDir, exe, version, logFile }) {
     '}',
     'if ($code -eq 0) {',
     '  Write-Host "正在启动 AiRoute..." -ForegroundColor Green',
-    '  try { Start-Process -FilePath $targetExe } catch { Write-Log ("启动失败：" + $_.Exception.Message) }',
+    '  try { Start-Process -FilePath $targetExe } catch { $code = 5; Write-Log ("启动失败：" + $_.Exception.Message) }',
     '}',
     'exit $code'
   ].join('\r\n') + '\r\n'
 }
 
-function manualCmd(zipName) {
-  return [
+function manualCmd(zipName, { auto = false } = {}) {
+  const lines = [
     '@echo off',
     'setlocal',
     'cd /d "%~dp0"',
     'if "%~1"=="" (set "ZIP=%~dp0' + String(zipName || '').replace(/"/g, '') + '") else (set "ZIP=%~1")',
     'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0' + MANUAL_PS1 + '" "%ZIP%"',
-    'echo.',
-    'echo Update finished. Press any key to close this window.',
-    'pause >nul'
-  ].join('\r\n') + '\r\n'
+    'echo.'
+  ]
+  if (auto) {
+    // App 内的「立即安装」走这个：成功时直接退出（脚本会把新版本拉起来），
+    // 失败时停住窗口，用户能看到原因 / install-update.log
+    lines.push('if errorlevel 1 (echo Update failed. See install-update.log. & pause)')
+  } else {
+    lines.push('echo Update finished. Press any key to close this window.')
+    lines.push('pause >nul')
+  }
+  return lines.join('\r\n') + '\r\n'
 }
 
 function manualReadme({ version, installDir }) {
@@ -223,14 +231,16 @@ function writeManualUpdater({ artifact, installDir, exe, version }) {
   const folder = path.dirname(artifact)
   const ps1Path = path.join(folder, MANUAL_PS1)
   const cmdPath = path.join(folder, MANUAL_CMD)
+  const autoCmdPath = path.join(folder, MANUAL_AUTO_CMD)
   const readmePath = path.join(folder, MANUAL_README)
   fs.mkdirSync(folder, { recursive: true })
   // PS1 带 BOM：PowerShell 5.1 才按 UTF-8 解析中文（安装目录可能含中文）
   fs.writeFileSync(ps1Path, '\ufeff' + manualPs1({ artifact, installDir, exe, version }), 'utf8')
   // CMD 内容全 ASCII：cmd.exe 按系统 OEM 代码页解析，中文写进去容易乱码
   fs.writeFileSync(cmdPath, manualCmd(path.basename(artifact)), 'ascii')
+  fs.writeFileSync(autoCmdPath, manualCmd(path.basename(artifact), { auto: true }), 'ascii')
   fs.writeFileSync(readmePath, manualReadme({ version, installDir }), 'utf8')
-  return { folder, ps1Path, cmdPath, readmePath }
+  return { folder, ps1Path, cmdPath, autoCmdPath, readmePath }
 }
 
 // 载荷类型：zip 覆盖 / setup 安装包
@@ -257,12 +267,30 @@ function spawnLauncher({ scriptPath, spawnFn = spawn, psPath = powershellPath(),
   return child
 }
 
+// App 内「立即安装」的启动器：直接拉起 cmd.exe，由它执行 install-update-auto.cmd。
+// 必须是 detached：cmd.exe 是原生进程，创建独立进程组后不会被 Electron 退出回收
+// （直接 spawn powershell.exe 时实测会被回收，这也是旧一键升级失败的主因）。
+// windowsHide=false：覆盖安装期间保留一个控制台窗口显示进度；失败时窗口不会自动关。
+function spawnAutoUpdater({ cmdPath, spawnFn = spawn, env = process.env }) {
+  const comspec = env.ComSpec || path.join(env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe')
+  const child = spawnFn(comspec, ['/d', '/c', cmdPath], {
+    cwd: path.dirname(cmdPath),
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+    env
+  })
+  if (child && typeof child.unref === 'function') child.unref()
+  return child
+}
+
 module.exports = {
   EXIT_FILE,
   SCRIPT_FILE,
   WAIT_SECONDS,
   EXIT_VERSION_MISMATCH,
   MANUAL_CMD,
+  MANUAL_AUTO_CMD,
   MANUAL_PS1,
   MANUAL_README,
   psQuote,
@@ -274,5 +302,6 @@ module.exports = {
   manualReadme,
   writeManualUpdater,
   writeScript,
-  spawnLauncher
+  spawnLauncher,
+  spawnAutoUpdater
 }

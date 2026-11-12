@@ -1,13 +1,13 @@
 // 更新功能共享状态：侧边栏提示条与设置页「关于与更新」卡片使用同一份数据
-// 一键升级链路：服务端下载 + SHA-256 校验 → 主进程备份 / 原子替换 / 回读 / 重启
-// 任一步失败由主进程自动回滚，渲染进程只负责串流程与展示阶段
+// Windows 安装版：App 内下载 zip → 用户点「立即安装」→ 主进程 detached cmd 覆盖安装并重启
+// macOS：服务端下载 → 主进程备份 / 原子替换 / 回读 / 重启，失败自动回滚
 import { ref, computed } from 'vue'
 import { checkUpdate, startUpdateDownload, getUpdateProgress } from '../api.js'
 import { showToast } from './useToast.js'
 
 const info = ref(null)          // 检查结果 { current, latest, hasUpdate, tag, notes, ... }
 const checking = ref(false)     // 是否正在检查更新
-const stage = ref('idle')       // idle | downloading | verifying | backing-up | replacing | readback | restarting | error
+const stage = ref('idle')       // idle | downloading | verifying | ready | installing | replacing | restarting | error
 const percent = ref(0)          // 下载进度百分比
 const savedPath = ref('')       // 手动下载完成后的保存路径
 const error = ref('')           // 最近一次手动检查的错误信息
@@ -17,24 +17,29 @@ const supported = ref(false)    // 当前环境是否支持一键升级（主进
 const unsupportedReason = ref('') // 不支持一键升级的原因（界面直接展示）
 const backup = ref(null)        // 可回滚的备份 { version, path }
 const lastResult = ref(null)    // 上次升级结果（启动时从主进程 journal 恢复）
+// Windows：已下载的覆盖包（准备好等用户点「立即安装」）
+const downloaded = ref(null)    // { version, artifactPath, sha256 }
 
 // 各阶段的展示文案；下载阶段额外带百分比
 // replacing 在 macOS 是「原子替换 .app」，在 Windows 安装版是「运行安装包」，用中性文案覆盖两者
 const STAGE_TEXT = {
   verifying: '校验 SHA-256…',
+  ready: '更新包已下载，点「立即安装」开始覆盖安装',
   'backing-up': '备份当前版本…',
-  replacing: '正在安装新版本…',
+  replacing: '准备覆盖安装…',
+  installing: '正在覆盖安装…',
   readback: '回读校验新版本…',
-  restarting: '升级完成，正在重启…'
+  restarting: '正在安装更新，应用即将退出…'
 }
 
 const downloading = computed(() => stage.value === 'downloading')
-const installing = computed(() => ['verifying', 'backing-up', 'replacing', 'readback'].includes(stage.value))
+const installing = computed(() => ['verifying', 'backing-up', 'replacing', 'installing', 'readback'].includes(stage.value))
 const restarting = computed(() => stage.value === 'restarting')
 const busy = computed(() => downloading.value || installing.value || restarting.value)
+const ready = computed(() => stage.value === 'ready')
 
 const stageText = computed(() => {
-  if (stage.value === 'downloading') return `下载安装包 ${percent.value}%`
+  if (stage.value === 'downloading') return `下载更新包 ${percent.value}%`
   return STAGE_TEXT[stage.value] || ''
 })
 
@@ -83,6 +88,15 @@ async function runCheck(silent = false, force = false) {
   error.value = ''
   try {
     info.value = await checkUpdate(force)
+    // 已下载的包只对「当前最新版本」有效：服务端发了更新的版本，旧包作废
+    if (downloaded.value && downloaded.value.version !== info.value.latest) {
+      downloaded.value = null
+      if (stage.value === 'ready') stage.value = 'idle'
+    }
+    if (!info.value.hasUpdate) {
+      downloaded.value = null
+      if (stage.value === 'ready') stage.value = 'idle'
+    }
     if (!silent) {
       showToast(info.value.hasUpdate ? `发现新版本 v${info.value.latest}` : `已是最新版本 v${info.value.current}`)
     }
@@ -159,7 +173,7 @@ function pollInstall() {
         if (status.stage && status.stage !== 'idle') stage.value = status.stage
         if (status.stage === 'restarting') {
           stopPoll()
-          showToast('升级完成，应用即将重启…')
+          showToast(isWinInstaller() ? '正在安装更新，应用即将退出…' : '升级完成，应用即将重启…')
           // 兜底：若主进程重启失败（例如被系统阻止），不要把界面永久锁在「正在重启」
           setTimeout(() => { if (stage.value === 'restarting') stage.value = 'idle' }, 5000)
           resolve(true)
@@ -218,19 +232,11 @@ async function refreshInstallStatus() {
   }
 }
 
-// Windows 稳定路径：下载并校验 zip 覆盖包 → 生成用户可双击的 install-update.cmd。
-// 不再依赖「应用退出后自动启动器还活着」；用户退出应用后再双击脚本，失败信息也留在窗口里。
-async function prepareWindowsOverlay() {
-  const target = `v${info.value.latest}`
-  const steps = '将下载更新包 → SHA-256 校验 → 生成 install-update.cmd。\n' +
-    '下载完成后请退出 AiRoute（托盘图标右键 → 退出；关窗口只会最小化），' +
-    '再双击更新文件夹里的 install-update.cmd 覆盖安装并重启。\n' +
-    '不运行安装器、不需要 UAC；如果应用内下载失败，可点「Release 页面」用浏览器下载 zip，' +
-    '再把 zip 拖到 install-update.cmd 上。'
-  if (!window.confirm(`下载覆盖更新包 ${target}：\n\n${steps}\n\n继续？`)) return false
-
+// Windows 方案 A 第一步：App 内下载 zip 覆盖包，校验通过后进入 ready。
+// 不自动安装 —— 等用户点「立即安装」。
+async function downloadWindowsUpdate() {
+  if (downloaded.value) return true
   installError.value = ''
-  savedPath.value = ''
   stage.value = 'downloading'
   percent.value = 0
   try {
@@ -241,20 +247,38 @@ async function prepareWindowsOverlay() {
   }
   const download = await pollDownload()
   if (!download) return false
-  stage.value = 'verifying'
+  downloaded.value = {
+    version: info.value.latest,
+    artifactPath: download.artifactPath,
+    sha256: download.sha256
+  }
+  stage.value = 'ready'
+  showToast(`v${info.value.latest} 更新包已下载，点「立即安装」开始覆盖安装`, 'success', 8000)
+  return true
+}
+
+// Windows 方案 A 第二步：用户点「立即安装」。
+// 主进程会生成覆盖脚本，拉起 detached cmd.exe，然后退出应用；脚本完成覆盖后启动新版本。
+async function installWindowsUpdate() {
+  if (!downloaded.value) return downloadWindowsUpdate()
+  const d = downloaded.value
+  if (!window.confirm(
+    `立即安装 v${d.version}？\n\n` +
+    '应用会退出，随后自动覆盖安装目录并重新启动。\n' +
+    '请先保存正在进行的操作；安装过程会打开一个控制台窗口显示进度，失败时窗口会保留错误信息。'
+  )) return false
+  installError.value = ''
+  stage.value = 'installing'
   try {
-    const result = await window.electronAPI.prepareManualUpdate({
-      version: info.value.latest,
-      artifactPath: download.artifactPath,
-      sha256: download.sha256
+    await window.electronAPI.installPreparedUpdate({
+      version: d.version,
+      artifactPath: d.artifactPath,
+      sha256: d.sha256
     })
-    savedPath.value = result.cmdPath || ''
-    stage.value = 'idle'
-    showToast(`更新包已就绪：退出 AiRoute 后双击 install-update.cmd（${result.folder}）`, 'success', 12000)
-    try { window.electronAPI.showItemInFolder(result.cmdPath) } catch {}
-    return true
+    stage.value = 'restarting'
+    return pollInstall()
   } catch (e) {
-    failInstall(e?.message || '无法生成覆盖安装脚本')
+    failInstall(e?.message || '无法开始安装')
     return false
   }
 }
@@ -283,9 +307,9 @@ async function oneClickUpdate() {
     showToast(`已是最新版本 v${info.value?.current || ''}`)
     return false
   }
-  // Windows 安装版不再走自动安装：下载 zip 后生成用户可双击的覆盖安装脚本。
+  // Windows 安装版：App 内下载 zip → 用户点「立即安装」→ detached cmd 覆盖安装。
   // macOS 仍走原有的原子替换 + 自动回滚。
-  if (isWinInstaller()) return prepareWindowsOverlay()
+  if (isWinInstaller()) return downloaded.value ? installWindowsUpdate() : downloadWindowsUpdate()
   const target = `v${info.value.latest}`
   const steps = '自动下载 → SHA-256 校验 → 备份当前版本 → 原子替换 → 回读校验 → 重启应用。\n' +
     '任一步失败会自动回滚到当前版本。升级期间请勿退出应用，进行中的请求会中断。'
@@ -384,6 +408,10 @@ async function syncDownloadState() {
       stage.value = 'downloading'
       percent.value = state.percent || 0
       pollDownload()
+    } else if (state.mode === 'install' && state.status === 'done' && /\.zip$/i.test(state.artifactPath || '') && state.sha256 && state.version) {
+      // 页面刷新 / 切回设置页：服务端还记着已下载的包，恢复成「立即安装」
+      downloaded.value = { version: state.version, artifactPath: state.artifactPath, sha256: state.sha256 }
+      if (stage.value === 'idle' || stage.value === 'error') stage.value = 'ready'
     } else if (state.mode === 'manual' && state.status === 'done' && state.savePath) {
       savedPath.value = state.savePath
     }
@@ -427,6 +455,8 @@ export function useUpdate() {
     downloading,
     installing,
     restarting,
+    ready,
+    downloaded,
     busy,
     supported,
     unsupportedReason,
@@ -434,7 +464,8 @@ export function useUpdate() {
     lastResult,
     runCheck,
     oneClickUpdate,
-    prepareWindowsOverlay,
+    downloadWindowsUpdate,
+    installWindowsUpdate,
     manualDownload,
     rollback,
     openFolder,

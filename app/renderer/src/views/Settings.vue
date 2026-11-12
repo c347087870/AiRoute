@@ -104,7 +104,10 @@
             <span v-if="info" class="badge" :class="info.hasUpdate ? 'info' : 'ok'">
               {{ info.hasUpdate ? '可升级到 v' + info.latest : '已是最新' }}
             </span>
-            <!-- 更新自动检测（useUpdate 每分钟轮询），这里只展示结果，不设手动检查按钮 -->
+            <!-- 自动检测每分钟一次；这里额外给一个立即检查的入口，排查网络/刚发版时不用等 -->
+            <AppButton variant="secondary" :disabled="checking || busy" @click="runCheck(false, true)">
+              {{ checking ? '检查中…' : '检查更新' }}
+            </AppButton>
             <span v-if="checking" class="config-hint inline">检查更新中…</span>
           </div>
         </div>
@@ -178,9 +181,9 @@ const { loadModelData, notifyTray } = useModel()
 // 更新功能共享状态与方法（与侧边栏提示条同源）
 const {
   info, checking, stage, stageText, percent, error, installError, rolledBack, savedPath,
-  downloading, busy, supported, unsupportedReason, backup, lastResult,
+  downloading, busy, supported, unsupportedReason, backup, lastResult, downloaded,
   oneClickUpdate, manualDownload, rollback, openFolder, openReleasePage, refreshInstallStatus,
-  isMacPlatform
+  runCheck, isMacPlatform
 } = useUpdate()
 
 // 本地版本号：优先取服务端 /api/system/status（打开页面就有，不依赖联网），
@@ -195,12 +198,22 @@ const currentVersion = computed(() => sysStatus.value?.version || info.value?.cu
 const BETA_MARKER = /-(alpha|beta|rc|next|dev)([.\-]|$)/i
 const releaseLine = computed(() => info.value?.line || sysStatus.value?.line || (BETA_MARKER.test(currentVersion.value) ? 'beta' : 'stable'))
 
-// Windows 安装版的更新方式：下载覆盖包 + 生成脚本，由用户退出应用后双击执行。
-// 不再走「自动退出 → 静默安装」那条在部分机器上跑不通的链路。
+// Windows 安装版的更新方式：App 内下载 zip → 用户点「立即安装」→ detached cmd 覆盖安装。
 const isWindowsOverlay = computed(() => info.value?.platform === 'win' && info.value?.installKind !== 'portable')
 
 // 更新按钮文案：按阶段展示当前动作，失败后变成重试
 const primaryLabel = computed(() => {
+  if (isWindowsOverlay.value) {
+    switch (stage.value) {
+      case 'downloading': return `下载中 ${percent.value}%`
+      case 'verifying': return '校验更新包…'
+      case 'replacing':
+      case 'installing': return '准备安装…'
+      case 'restarting': return '正在安装…'
+      case 'error': return `重试下载 v${info.value?.latest || ''}`
+      default: return downloaded.value ? `立即安装 v${info.value?.latest || ''}` : `下载更新包 v${info.value?.latest || ''}`
+    }
+  }
   switch (stage.value) {
     case 'downloading': return `下载中 ${percent.value}%`
     case 'verifying': return '校验更新包…'
@@ -208,16 +221,16 @@ const primaryLabel = computed(() => {
     case 'replacing': return '安装中…'
     case 'readback': return '回读校验…'
     case 'restarting': return '正在重启…'
-    case 'error': return isWindowsOverlay.value ? `重试下载 v${info.value?.latest || ''}` : `重试升级到 v${info.value?.latest || ''}`
-    default: return isWindowsOverlay.value ? `下载更新包 v${info.value?.latest || ''}` : `一键升级到 v${info.value?.latest || ''}`
+    case 'error': return `重试升级到 v${info.value?.latest || ''}`
+    default: return `一键升级到 v${info.value?.latest || ''}`
   }
 })
 
-// 安装方式提示：macOS 走原子替换 + 自动回滚；Windows 安装版走「下载覆盖包 + 用户双击脚本」；
+// 安装方式提示：macOS 走原子替换 + 自动回滚；Windows 安装版走「App 内下载 + 立即安装」；
 // Windows 便携版不参与覆盖安装，只能手动替换
 const installHint = computed(() => {
   if (isMacPlatform()) return '一键升级会下载 → SHA-256 校验 → 备份 → 原子替换 → 回读校验 → 重启；任一步失败自动回滚'
-  if (isWindowsOverlay.value) return '下载更新包 → SHA-256 校验 → 生成 install-update.cmd；退出 AiRoute 后双击脚本覆盖安装并重启（不跑安装器、不需要 UAC）。应用内下载失败时可在「Release 页面」用浏览器下载 zip，再拖到 install-update.cmd 上'
+  if (isWindowsOverlay.value) return '点「下载更新包」→ App 内下载并校验 SHA-256 → 点「立即安装」→ 应用退出 → 自动覆盖安装并重启（不跑安装器、不需要 UAC）。下载失败时可在「Release 页面」用浏览器下载 zip，再从更新文件夹手动执行'
   return '便携版不支持覆盖安装：请下载安装包后手动替换 exe。改用安装版（文件名带 -setup）即可使用覆盖更新'
 })
 

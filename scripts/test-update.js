@@ -762,7 +762,33 @@ test('manualCmd：调用同目录 apply-update.ps1，支持把 zip 拖到脚本�
   assert.match(cmd, /%~1/)
 })
 
-test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ README', () => {
+test('manualCmd（auto）：失败才 pause，成功时窗口直接退出', () => {
+  const cmd = helper.manualCmd('AiRoute-2.1.0-x64.zip', { auto: true })
+  assert.match(cmd, /apply-update\.ps1/)
+  assert.match(cmd, /if errorlevel 1 \(echo Update failed/)
+  assert.strictEqual(cmd.includes('Press any key'), false)
+})
+
+test('spawnAutoUpdater：detached cmd.exe 拉脚本（原生进程，不随 Electron 退出回收）', () => {
+  let seen = null
+  const result = helper.spawnAutoUpdater({
+    cmdPath: 'C:\\Users\\u\\AppData\\Roaming\\aiRoute\\updates-manual\\v2.2.0\\install-update-auto.cmd',
+    env: { ComSpec: 'C:\\Windows\\System32\\cmd.exe', SystemRoot: 'C:\\Windows' },
+    spawnFn: (file, args, opts) => {
+      seen = { file, args, opts }
+      return { pid: 1, unref() { seen.unrefed = true } }
+    }
+  })
+  assert.strictEqual(result.pid, 1)
+  assert.strictEqual(seen.unrefed, true)
+  assert.strictEqual(seen.file, 'C:\\Windows\\System32\\cmd.exe')
+  assert.deepStrictEqual(seen.args, ['/d', '/c', 'C:\\Users\\u\\AppData\\Roaming\\aiRoute\\updates-manual\\v2.2.0\\install-update-auto.cmd'])
+  assert.strictEqual(seen.opts.detached, true)
+  assert.strictEqual(seen.opts.stdio, 'ignore')
+  assert.strictEqual(seen.opts.windowsHide, false)
+})
+
+test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ auto cmd / README', () => {
   const { root, cleanup } = tempDir()
   try {
     const folder = path.join(root, 'updates')
@@ -776,6 +802,7 @@ test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ README', () => {
       version: '2.1.0'
     })
     assert.ok(fs.existsSync(result.cmdPath))
+    assert.ok(fs.existsSync(result.autoCmdPath))
     assert.ok(fs.existsSync(result.ps1Path))
     assert.ok(fs.existsSync(result.readmePath))
     const raw = fs.readFileSync(result.ps1Path)
@@ -783,6 +810,8 @@ test('writeManualUpdater：生成 ps1（BOM）/ cmd（ASCII）/ README', () => {
     assert.ok(raw.toString('utf8').includes('D:\\p'))
     const cmd = fs.readFileSync(result.cmdPath, 'utf8')
     assert.ok(/^[\x00-\x7F]*$/.test(cmd), 'cmd 内容必须是 ASCII（cmd.exe 按 OEM 代码页解析）')
+    const auto = fs.readFileSync(result.autoCmdPath, 'utf8')
+    assert.ok(auto.includes('if errorlevel 1'))
     assert.ok(fs.readFileSync(result.readmePath, 'utf8').includes('install-update.cmd'))
   } finally {
     cleanup()
