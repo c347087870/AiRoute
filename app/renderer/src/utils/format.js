@@ -1,7 +1,11 @@
-// 数字加千位分隔符，空值或非数字统一显示 0
+// 数字加千位分隔符，空值或非数字统一显示 0。
+// 只给整数部分分组：早期版本对整串做正则，小数位够长时会把逗号插进小数里
+// （71,376,719.73803 会变成 71,376,719.738,03），换算比这类浮点值一眼就是错的
 export function formatNumber(num) {
   if (num === null || num === undefined || num === '' || Number.isNaN(Number(num))) return '0'
-  return Number(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  const [integer, decimal] = String(Number(num)).split('.')
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return decimal ? `${grouped}.${decimal}` : grouped
 }
 
 // 大数字紧凑显示，用于坐标轴与窄空间：12345 -> 12.3k

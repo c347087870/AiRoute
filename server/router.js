@@ -2478,6 +2478,50 @@ const CREDIT_CHANNEL_LABELS = {
   'workbuddy-global': 'WorkBuddy 国际版',
 }
 
+// 账号名 / 账号 id 只用于展示：按渠道去插件取账号列表，20 秒内复用，
+// 避免面板 5 秒一轮的轮询每次都把所有渠道的 account.list 打一遍
+let accountNameCache = { at: 0, stamp: '', map: new Map() }
+
+async function resolveAccountNames(providers) {
+  const list = [...new Set((providers || []).filter(Boolean))].sort()
+  const stamp = list.join(',')
+  if (stamp === accountNameCache.stamp && Date.now() - accountNameCache.at < 20000) {
+    return accountNameCache.map
+  }
+  const nameMap = new Map()
+  for (const provider of list) {
+    try {
+      if (provider === 'workbuddy' || provider === 'workbuddy-global') {
+        const realm = provider === 'workbuddy-global' ? 'global' : 'cn'
+        for (const account of workbuddy.getRuntime()?.listAccounts() || []) {
+          if ((account.realm || 'cn') !== realm) continue
+          nameMap.set(`${provider}:${account.uid}`, {
+            accountId: account.uid,
+            name: account.nickname || String(account.uid).slice(0, 8),
+            todayTokens: Number(account.tokenUsageToday) || 0,
+          })
+        }
+      } else {
+        const reply = await channels.rpc({ method: 'account.list', payload: { provider } })
+        if (reply?.ok === true && Array.isArray(reply.value)) {
+          for (const account of reply.value) {
+            if (!account || !account.uid) continue
+            nameMap.set(`${provider}:${account.uid}`, {
+              accountId: account.id,
+              name: account.name || account.nickname || account.id,
+              todayTokens: Number(account.tokenUsageToday) || 0,
+            })
+          }
+        }
+      }
+    } catch {
+      /* 账号名只是展示信息，取不到就退回 uid */
+    }
+  }
+  accountNameCache = { at: Date.now(), stamp, map: nameMap }
+  return nameMap
+}
+
 app.get('/api/token-stats/scopes', async (req, res) => {
   try {
     const snapshot = tokenStats.getScopeStats()
@@ -2499,37 +2543,7 @@ app.get('/api/token-stats/scopes', async (req, res) => {
     })
 
     const accounts = Object.values(snapshot.accounts)
-    const nameMap = new Map()
-    const providers = [...new Set(accounts.map(item => item.channel))]
-    for (const provider of providers) {
-      try {
-        if (provider === 'workbuddy' || provider === 'workbuddy-global') {
-          const realm = provider === 'workbuddy-global' ? 'global' : 'cn'
-          for (const account of workbuddy.getRuntime()?.listAccounts() || []) {
-            if ((account.realm || 'cn') !== realm) continue
-            nameMap.set(`${provider}:${account.uid}`, {
-              accountId: account.uid,
-              name: account.nickname || String(account.uid).slice(0, 8),
-              todayTokens: Number(account.tokenUsageToday) || 0,
-            })
-          }
-        } else {
-          const reply = await channels.rpc({ method: 'account.list', payload: { provider } })
-          if (reply?.ok === true && Array.isArray(reply.value)) {
-            for (const account of reply.value) {
-              if (!account || !account.uid) continue
-              nameMap.set(`${provider}:${account.uid}`, {
-                accountId: account.id,
-                name: account.name || account.nickname || account.id,
-                todayTokens: Number(account.tokenUsageToday) || 0,
-              })
-            }
-          }
-        }
-      } catch {
-        /* 账号名只是展示信息，取不到就退回 uid */
-      }
-    }
+    const nameMap = await resolveAccountNames(accounts.map(item => item.channel))
 
     res.json({
       ok: true,
@@ -2540,6 +2554,37 @@ app.get('/api/token-stats/scopes', async (req, res) => {
         ...(nameMap.get(`${item.channel}:${item.uid}`) || {}),
         name: (nameMap.get(`${item.channel}:${item.uid}`) || {}).name || String(item.uid).slice(0, 8),
       })),
+    })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
+// 「渠道-账号-模型」三级明细：用量页的折线图与明细表都吃这一份。
+// 账号名在这里补齐（统计本身只认得 uid），渠道名与模型名在这里换成可读写法
+app.get('/api/token-stats/breakdown', async (req, res) => {
+  try {
+    const days = Math.min(60, Math.max(1, Number(req.query.days) || 30))
+    const data = tokenStats.getEntryBreakdown(days)
+    const nameMap = await resolveAccountNames(data.entries.map(item => item.channel))
+    res.json({
+      ok: true,
+      generatedAt: Date.now(),
+      days: data.days,
+      dates: data.dates,
+      entries: data.entries.map(item => {
+        const account = nameMap.get(`${item.channel}:${item.uid}`)
+        return {
+          key: item.key,
+          channel: item.channel,
+          channelName: CREDIT_CHANNEL_LABELS[item.channel] || item.channel,
+          uid: item.uid,
+          accountName: account?.name || (item.uid ? String(item.uid).slice(0, 8) : '未记录账号'),
+          model: item.model,
+          series: item.series,
+          totals: item.totals,
+        }
+      }),
     })
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })

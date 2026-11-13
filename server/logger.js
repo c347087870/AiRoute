@@ -121,6 +121,13 @@ function getLogs(options = {}) {
   return results
 }
 
+// 全部日志的原始记录（不按 taskKey 合并）：供统计回填补历史，一次读全量
+function readAllRawEntries() {
+  const out = []
+  for (const fileName of listLogFiles()) out.push(...readEntriesFromFile(fileName))
+  return out
+}
+
 // 日志中出现过的模型列表，供前端筛选下拉使用
 function getLoggedModels() {
   const models = new Set()
@@ -284,4 +291,4 @@ function getTotalSize() {
   return { totalSize, fileCount }
 }
 
-module.exports = { log, getLogs, clearLogs, getLoggedModels, getTotalSize }
+module.exports = { log, getLogs, clearLogs, getLoggedModels, getTotalSize, readAllRawEntries }

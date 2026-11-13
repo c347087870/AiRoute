@@ -29,6 +29,11 @@ let statsCache = {
   // scope = { byDay: { day: stat }, byMonth: { month: stat }, total: stat }
   byChannel: {},
   byAccount: {},
+  // 渠道·账号·模型三级明细：键为 `渠道|uid|模型`，按日留存。
+  // 用量页要能按「渠道-账号-模型」看逐日消耗，渠道/账号两级聚合推不出这个组合
+  byEntry: {},
+  // 日志回填只做一次：记录回填当天，避免每次启动都把日志重算一遍造成重复计数
+  entryBackfillDay: '',
   // 余额快照基线：{ "trae:uid": { day, usedTotal, remaining, at } }
   // 用于没有逐请求积分的渠道（Trae）按「累计已用」差分算今日消耗
   balanceBaseline: {},
@@ -102,6 +107,8 @@ function loadStats() {
         byModel: normalizeStatMap(data.byModel),
         byChannel: normalizeScopeMap(data.byChannel),
         byAccount: normalizeScopeMap(data.byAccount),
+        byEntry: normalizeScopeMap(data.byEntry),
+        entryBackfillDay: typeof data.entryBackfillDay === 'string' ? data.entryBackfillDay : '',
         balanceBaseline: data.balanceBaseline && typeof data.balanceBaseline === 'object' ? data.balanceBaseline : {},
         requests: Array.isArray(data.requests) ? data.requests.slice(0, MAX_REQUEST_RECORDS) : []
       }
@@ -167,12 +174,39 @@ function accumulate(target, usage) {
   if (usage.credits) target.credits = (target.credits || 0) + usage.credits
 }
 
-// 模型引用 → 渠道：channels/trae/xxx → trae；channels/workbuddy/xxx → workbuddy；
-// 其它 provider（openai/xxx）按第一段算，没有账号归因
+// 模型引用 → 渠道 + 模型名，渠道统一小写：
+// 新版本写 channels/workbuddy/xxx，老版本写 WorkBuddy/xxx，两者必须归到同一个渠道，
+// 否则同一个账号的历史会被拆成两条线
+function parseModelRef(model) {
+  const parts = String(model || '').split('/').filter(Boolean)
+  if (!parts.length) return { channel: 'unknown', model: 'unknown' }
+  if (parts[0] === 'channels' && parts.length >= 3) {
+    return { channel: parts[1].toLowerCase(), model: parts.slice(2).join('/') }
+  }
+  return { channel: parts[0].toLowerCase(), model: parts.slice(1).join('/') || parts[0] }
+}
+
 function channelOf(model) {
-  const parts = String(model || '').split('/')
-  if (parts[0] === 'channels' && parts.length >= 3) return parts[1]
-  return parts[0] || 'unknown'
+  return parseModelRef(model).channel
+}
+
+// 三级明细的键：`渠道|uid|模型`。uid 可能为空（部分渠道的日志不带账号），
+// 用固定分隔符切片，模型名里带 / 也不会切错
+const ENTRY_SEP = '|'
+
+function entryKeyOf(channel, uid, model) {
+  return `${channel}${ENTRY_SEP}${uid || ''}${ENTRY_SEP}${model}`
+}
+
+function parseEntryKey(key) {
+  const first = key.indexOf(ENTRY_SEP)
+  const second = key.indexOf(ENTRY_SEP, first + 1)
+  if (first < 0 || second < 0) return { channel: key, uid: '', model: '' }
+  return {
+    channel: key.slice(0, first),
+    uid: key.slice(first + 1, second),
+    model: key.slice(second + 1)
+  }
 }
 
 function ensureScope(map, key) {
@@ -263,11 +297,14 @@ function recordTokens(model, usage, timestamp = Date.now()) {
   accumulate(statsCache.byHour[hourKey], normalized)
   accumulate(statsCache.byModel[statKey], normalized)
 
-  // 渠道 / 账号维度：账号来自插件 usage.uid（Trae / Qoder / WorkBuddy 都会带）
-  const channel = channelOf(statKey)
+  // 渠道 / 账号 / 「渠道·账号·模型」三级维度：账号来自插件 usage.uid
+  // （Trae / Qoder / WorkBuddy 都会带；没带账号的请求记到空 uid 那一档）
+  const ref = parseModelRef(statKey)
+  const channel = ref.channel
   accumulateScope(ensureScope(statsCache.byChannel, channel), timestamp, normalized)
   const uid = typeof usage?.uid === 'string' ? usage.uid : ''
   if (uid) accumulateScope(ensureScope(statsCache.byAccount, `${channel}:${uid}`), timestamp, normalized)
+  accumulateScope(ensureScope(statsCache.byEntry, entryKeyOf(channel, uid, ref.model)), timestamp, normalized)
 
   statsCache.requests.unshift({
     timestamp,
@@ -347,7 +384,7 @@ function cleanupOldData(retentionDays = RETENTION_DAYS) {
   for (const key of Object.keys(statsCache.byMonth)) {
     if (key < cutoffMonthKey) { delete statsCache.byMonth[key]; cleaned = true }
   }
-  for (const map of [statsCache.byChannel, statsCache.byAccount]) {
+  for (const map of [statsCache.byChannel, statsCache.byAccount, statsCache.byEntry]) {
     for (const scope of Object.values(map)) {
       if (!scope || typeof scope !== 'object') continue
       for (const key of Object.keys(scope.byDay || {})) {
@@ -373,15 +410,18 @@ function getAllStats() {
     byModel: statsCache.byModel,
     byChannel: statsCache.byChannel,
     byAccount: statsCache.byAccount,
+    byEntry: statsCache.byEntry,
     recentRequests: statsCache.requests.slice(0, 50)
   }
 }
 
-// 清空全部统计（不可恢复）：五个维度归零并立即落盘，同时清掉待落盘定时器避免回写旧数据
+// 清空全部统计（不可恢复）：各维度归零并立即落盘，同时清掉待落盘定时器避免回写旧数据
+// 回填标记保留成「已回填」：清空是用户的明确意图，重启后不该再从日志把历史捞回来
 function clearAllStats() {
   statsCache = {
     byDay: {}, byMonth: {}, byHour: {}, byModel: {},
-    byChannel: {}, byAccount: {}, balanceBaseline: {}, requests: []
+    byChannel: {}, byAccount: {}, byEntry: {}, entryBackfillDay: getDayKey(Date.now()),
+    balanceBaseline: {}, requests: []
   }
   if (saveTimer) {
     clearTimeout(saveTimer)
@@ -709,6 +749,75 @@ function getAccountToday(channel, uid) {
   return periods.day
 }
 
+// 「渠道-账号-模型」三级明细的逐日序列：用量页的筛选、折线图、明细表都吃这一份。
+// 固定输出最近 N 天（含今天），没数据的日期补 0，前端不用自己对齐日期
+function getEntryBreakdown(days = 30) {
+  const dates = []
+  const today = new Date()
+  for (let offset = days - 1; offset >= 0; offset--) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - offset)
+    dates.push(getDayKey(date.getTime()))
+  }
+
+  const entries = []
+  for (const [key, scope] of Object.entries(statsCache.byEntry)) {
+    const totals = periodView(sumStats(dates.map(day => scope.byDay?.[day])))
+    if (totals.count === 0 && totals.total === 0) continue
+    entries.push({
+      ...parseEntryKey(key),
+      key,
+      totals,
+      series: dates.map(day => {
+        const stat = periodView(scope.byDay?.[day])
+        return {
+          date: day,
+          tokens: stat.total,
+          input: stat.input,
+          output: stat.output,
+          cacheRead: stat.cacheRead,
+          cacheWrite: stat.cacheWrite,
+          credits: stat.creditsUsed,
+          count: stat.count
+        }
+      })
+    })
+  }
+  entries.sort((a, b) => b.totals.total - a.totals.total)
+  return { days, dates, entries }
+}
+
+// 三级明细是新增维度，升级前的历史只存在于请求日志里（逐次记录 model / uid / token / 积分）。
+// 首次启动回填一次，页面才不会只剩今天以后的数据；回填标记写进统计文件，重启不重复算
+function backfillEntriesFromLogs() {
+  if (statsCache.entryBackfillDay) return
+  let raw = []
+  try {
+    raw = require('./logger').readAllRawEntries()
+  } catch {
+    return
+  }
+  for (const entry of raw) {
+    const timestamp = Date.parse(entry?.timestamp || '')
+    if (!Number.isFinite(timestamp)) continue
+    const input = toNumber(entry.inputTokens)
+    const output = toNumber(entry.outputTokens)
+    const cacheRead = toNumber(entry.cacheReadTokens)
+    const cacheWrite = toNumber(entry.cacheWriteTokens)
+    const credits = toNumber(entry.credits)
+    if (!input && !output && !cacheRead && !cacheWrite && !credits) continue
+    const ref = parseModelRef(entry.model)
+    const uid = entry.uid ? String(entry.uid) : ''
+    accumulateScope(
+      ensureScope(statsCache.byEntry, entryKeyOf(ref.channel, uid, ref.model)),
+      timestamp,
+      { input, output, cacheRead, cacheWrite, ...credits > 0 ? { credits } : {} }
+    )
+  }
+  statsCache.entryBackfillDay = getDayKey(Date.now())
+  saveStats()
+}
+
 function getHourlyDetailForDay(dateStr) {  const details = []
 
   for (let hour = 0; hour < 24; hour++) {
@@ -734,6 +843,7 @@ function getHourlyDetailForDay(dateStr) {  const details = []
 }
 
 loadStats()
+backfillEntriesFromLogs()
 
 // 每天凌晨清理一次过期数据
 const now = new Date()
@@ -771,6 +881,7 @@ module.exports = {
   getScopeStats,
   getScopePeriods,
   getAccountToday,
+  getEntryBreakdown,
   channelOf,
   cleanupOldData,
   saveStats,
