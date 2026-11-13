@@ -2418,13 +2418,26 @@ app.put('/api/workbuddy/config', (req, res) => {
   }
 })
 
-app.get('/api/logs', (req, res) => {
-  res.json(logger.getLogs({
+// 日志里的账号只有 uid，账号名在这里补齐（日志页与用量页共用同一套解析），
+// 前端不用再单独拉一次账号池、也不会把 Trae / Qoder 的账号显示成 uid 前 8 位
+app.get('/api/logs', async (req, res) => {
+  const rows = logger.getLogs({
     limit: req.query.limit,
     model: req.query.model || '',
     status: req.query.status || '',
     keyword: req.query.keyword || ''
-  }))
+  })
+  try {
+    const nameMap = await resolveAccountNames(rows.map(row => tokenStats.channelOf(row.model)))
+    for (const row of rows) {
+      if (!row.uid) continue
+      const account = nameMap.get(`${tokenStats.channelOf(row.model)}:${row.uid}`)
+      if (account?.name) row.accountName = account.name
+    }
+  } catch {
+    /* 账号名只是展示信息，取不到就退回 uid */
+  }
+  res.json(rows)
 })
 
 app.get('/api/logs/models', (req, res) => {
@@ -2493,7 +2506,9 @@ async function resolveAccountNames(providers) {
     try {
       if (provider === 'workbuddy' || provider === 'workbuddy-global') {
         const realm = provider === 'workbuddy-global' ? 'global' : 'cn'
-        for (const account of workbuddy.getRuntime()?.listAccounts() || []) {
+        // 用模块导出的 listAccounts（内部 ensure 运行时），getRuntime() 返回的实例上
+        // 没有这个方法，之前调它一直是 undefined → 昵称永远取不到，界面只剩 uid 前 8 位
+        for (const account of workbuddy.listAccounts() || []) {
           if ((account.realm || 'cn') !== realm) continue
           nameMap.set(`${provider}:${account.uid}`, {
             accountId: account.uid,

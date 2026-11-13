@@ -1,5 +1,26 @@
 <template>
   <div class="usage-stats">
+    <div class="card stats-filter">
+      <div class="filter-row">
+        <SegmentedTabs v-model="days" :options="dayOptions" label="统计时间范围" />
+        <span class="filter-sep"></span>
+        <select v-model="channel" class="filter-select" title="按渠道筛选">
+          <option value="">全部渠道</option>
+          <option v-for="item in channelOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+        </select>
+        <select v-model="account" class="filter-select" :disabled="!channel" :title="channel ? '按账号筛选' : '先选渠道'">
+          <option value="">全部账号</option>
+          <option v-for="item in accountOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+        </select>
+        <select v-model="model" class="filter-select" :disabled="!account" :title="account ? '按模型筛选' : '先选账号'">
+          <option value="">全部模型</option>
+          <option v-for="item in modelOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+        </select>
+        <AppButton class="filter-clear" variant="danger" :disabled="clearing" @click="clearStats">清空</AppButton>
+      </div>
+      <div class="filter-hint">{{ groupHint }}</div>
+    </div>
+
     <div class="summary-cards">
       <div class="card summary-card">
         <div class="summary-label">近 {{ days }} 天 Token</div>
@@ -23,30 +44,11 @@
       </div>
     </div>
 
-    <div class="card stats-toolbar">
-      <SegmentedTabs v-model="days" :options="dayOptions" label="统计时间范围" />
-      <div class="filter-bar">
-        <select v-model="channel" class="filter-select" title="按渠道筛选">
-          <option value="">全部渠道</option>
-          <option v-for="item in channelOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
-        </select>
-        <select v-model="account" class="filter-select" :disabled="!channel" :title="channel ? '按账号筛选' : '先选渠道'">
-          <option value="">全部账号</option>
-          <option v-for="item in accountOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
-        </select>
-        <select v-model="model" class="filter-select" :disabled="!account" :title="account ? '按模型筛选' : '先选账号'">
-          <option value="">全部模型</option>
-          <option v-for="item in modelOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
-        </select>
-      </div>
-      <span class="toolbar-hint">{{ groupHint }}</span>
-      <AppButton variant="danger" :disabled="clearing" @click="clearStats">清空</AppButton>
-    </div>
-
     <div class="chart-grid">
       <div class="card">
         <TrendChart
           :title="`${groupLabel}每日 Token`"
+          :summary="`合计 ${formatCnNumber(summary.tokens)}`"
           :labels="dateLabels"
           :series="tokenSeries"
           :format-value="formatCnNumber"
@@ -56,6 +58,7 @@
       <div class="card">
         <TrendChart
           :title="`${groupLabel}每日缓存命中率`"
+          :summary="`加权 ${formatPercent(summary.cacheHitRate)}`"
           :labels="dateLabels"
           :series="cacheSeries"
           :format-value="formatPercent"
@@ -65,6 +68,7 @@
       <div class="card">
         <TrendChart
           :title="`${groupLabel}每日积分消耗`"
+          :summary="`合计 ${formatCredit(summary.credits)}`"
           :labels="dateLabels"
           :series="creditSeries"
           :format-value="formatCredit"
@@ -74,6 +78,7 @@
       <div class="card">
         <TrendChart
           :title="`${groupLabel}每 100 积分 ≈ Token`"
+          :summary="`综合 ${summary.ratio}`"
           :labels="dateLabels"
           :series="ratioSeries"
           :format-value="formatRatio"
@@ -277,27 +282,53 @@ function sum(list) {
 
 const shownGroups = computed(() => groups.value.slice(0, MAX_SERIES))
 
-function buildSeries(pick) {
+// 每条线的区间合计：图例上直接给出数字，不用悬停也能横向比较
+function groupTotals(group) {
+  return {
+    tokens: sum(group.tokens),
+    input: sum(group.input),
+    cacheRead: sum(group.cacheRead),
+    credits: sum(group.credits),
+  }
+}
+
+function buildSeries(pick, summarize) {
   return shownGroups.value.map((group, index) => ({
     key: group.key,
     label: group.label,
     color: PALETTE[index % PALETTE.length],
     values: group.tokens.map((_, i) => pick(group, i)),
+    summary: summarize(groupTotals(group)),
   }))
 }
 
-const tokenSeries = computed(() => buildSeries((group, i) => group.tokens[i]))
+const tokenSeries = computed(() => buildSeries(
+  (group, i) => group.tokens[i],
+  totals => formatCnNumber(totals.tokens)
+))
 
 // 命中率按「读 ÷（未命中输入 + 读）」算，与概览卡片同一口径；没有输入的日期留空断线
-const cacheSeries = computed(() => buildSeries((group, i) => {
-  const cacheable = group.input[i] + group.cacheRead[i]
-  return cacheable > 0 ? (group.cacheRead[i] / cacheable) * 100 : null
-}))
+const cacheSeries = computed(() => buildSeries(
+  (group, i) => {
+    const cacheable = group.input[i] + group.cacheRead[i]
+    return cacheable > 0 ? (group.cacheRead[i] / cacheable) * 100 : null
+  },
+  totals => {
+    const cacheable = totals.input + totals.cacheRead
+    return formatPercent(cacheable > 0 ? (totals.cacheRead / cacheable) * 100 : null)
+  }
+))
 
-const creditSeries = computed(() => buildSeries((group, i) => group.credits[i]))
+const creditSeries = computed(() => buildSeries(
+  (group, i) => group.credits[i],
+  totals => formatCredit(totals.credits)
+))
 
 // 换算比：当天没有积分消耗就留空，避免把 0 画成一条贴底直线
-const ratioSeries = computed(() => buildSeries((group, i) => (group.credits[i] > 0 ? (group.tokens[i] / group.credits[i]) * 100 : null)))
+const ratioSeries = computed(() => buildSeries(
+  (group, i) => (group.credits[i] > 0 ? (group.tokens[i] / group.credits[i]) * 100 : null),
+  totals => (totals.credits > 0 ? formatRatio((totals.tokens / totals.credits) * 100) : '-')
+))
 
 const summary = computed(() => {
   let tokens = 0
@@ -431,18 +462,32 @@ async function clearStats() {
   font-size: var(--fs-xs);
   color: var(--text-3);
 }
-.stats-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 12px 16px;
+.stats-filter {
+  padding: 14px 16px;
   margin-bottom: 16px;
 }
-.toolbar-hint {
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.filter-sep {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: var(--border-1);
+}
+.filter-select {
+  min-width: 152px;
+}
+.filter-clear {
+  margin-left: auto;
+}
+.filter-hint {
+  margin-top: 9px;
   font-size: var(--fs-xs);
   color: var(--text-3);
-  margin-left: auto;
 }
 .chart-grid {
   display: grid;

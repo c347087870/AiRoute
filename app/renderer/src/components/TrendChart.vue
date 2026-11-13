@@ -2,12 +2,15 @@
   <div class="trend-chart">
     <div class="chart-head">
       <span class="chart-title">{{ title }}</span>
+      <span v-if="summary" class="chart-summary">{{ summary }}</span>
       <span v-if="unit" class="chart-unit">{{ unit }}</span>
     </div>
     <div v-if="hasData" class="chart-body">
       <div class="legend">
-        <span v-for="item in series" :key="item.key" class="legend-item" :title="item.label">
-          <i :style="{ background: item.color }"></i>{{ item.label }}
+        <span v-for="item in series" :key="item.key" class="legend-item" :title="`${item.label}：${item.summary || ''}`">
+          <i :style="{ background: item.color }"></i>
+          <span class="legend-label">{{ item.label }}</span>
+          <b v-if="item.summary" class="legend-value">{{ item.summary }}</b>
         </span>
       </div>
       <div class="plot-grid">
@@ -91,9 +94,11 @@ import { computed, ref } from 'vue'
 
 const props = defineProps({
   title: { type: String, default: '趋势' },
+  // 卡片右上角的区间合计（如「合计 44.6亿」），没有就不显示
+  summary: { type: String, default: '' },
   // X 轴刻度文案（如 10/15），长度与每条序列的 values 一致
   labels: { type: Array, default: () => [] },
-  // [{ key, label, color, values: (number|null)[] }]；null 表示该点无数据，折线断开
+  // [{ key, label, color, values: (number|null)[], summary? }]；null 表示该点无数据，折线断开
   series: { type: Array, default: () => [] },
   formatValue: { type: Function, default: value => String(value ?? 0) },
   // 坐标轴刻度用的紧凑格式，默认与提示框一致
@@ -238,6 +243,14 @@ function onMove(event) {
   font-weight: 600;
   color: var(--text-1);
 }
+.chart-summary {
+  margin-left: auto;
+  padding-left: 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .chart-unit {
   font-size: var(--fs-xs);
   color: var(--text-3);
@@ -257,10 +270,18 @@ function onMove(event) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  max-width: 320px;
+  max-width: 100%;
+}
+.legend-label {
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.legend-value {
+  color: var(--text-1);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .legend-item i {
   flex: none;
