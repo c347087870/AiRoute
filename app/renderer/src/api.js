@@ -91,6 +91,11 @@ export function getTokenScopes() {
   return api.get('/api/token-stats/scopes').then(r => r.data)
 }
 
+// 「渠道-账号-模型」三级明细：逐日（今天 / 昨天按小时）token / 缓存 / 积分，用量页用
+export function getTokenBreakdown(days = 30, offset = 0) {
+  return api.get(`/api/token-stats/breakdown?days=${Number(days) || 30}&offset=${Number(offset) || 0}`).then(r => r.data)
+}
+
 // 状态面板四个时间维度（当日 / 本月 / 近三月 / 本年），一次请求取回。
 // 月维度由服务端按月汇总桶聚合，前端不再自己把按日明细加起来
 export function getTokenStatsRange() {

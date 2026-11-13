@@ -252,6 +252,52 @@ check('尝试链：最多 4 个候选，兜底模型补在末尾', () => {
   }
 })
 
+check('激活模型优先：把当前模型提到链头，重复的不再出现第二次', () => {
+  const a = { ref: 'channels/a' }
+  const b = { ref: 'channels/b' }
+  const c = { ref: 'channels/c' }
+  const chain = [a, b, c]
+
+  assert.deepEqual(auto.prioritize(chain, c).map(x => x.ref), ['channels/c', 'channels/a', 'channels/b'])
+  assert.deepEqual(auto.prioritize(chain, { ref: 'channels/d' }).map(x => x.ref), ['channels/d', 'channels/a', 'channels/b', 'channels/c'])
+  assert.deepEqual(auto.prioritize(chain, null).map(x => x.ref), ['channels/a', 'channels/b', 'channels/c'], '没激活模型时保持策略顺序')
+  assert.deepEqual(chain.map(x => x.ref), ['channels/a', 'channels/b', 'channels/c'], '原链不该被就地改动')
+})
+
+check('失败切换：先同渠道换模型，再按成绩换渠道', () => {
+  const ch = (ref, provider, id) => ({ entry: { ref, providerName: provider, providerType: 'channel', model: { id } } })
+  const ranked = [
+    ch('channels/workbuddy/a', 'channels', 'workbuddy/a'),
+    ch('channels/trae/b', 'channels', 'trae/b'),
+    ch('channels/trae/c', 'channels', 'trae/c'),
+    ch('channels/qodercn/d', 'channels', 'qodercn/d'),
+    ch('channels/qodercn/e', 'channels', 'qodercn/e'),
+    ch('channels/qodercn/f', 'channels', 'qodercn/f'),
+    { entry: { ref: 'deepseek/x', providerName: 'deepseek', model: { id: 'x' } } }
+  ]
+  const primary = { ref: 'channels/trae/b', providerName: 'channels', providerType: 'channel', model: { id: 'trae/b' } }
+
+  // 同渠道（trae）的 c 排第一；其余渠道按各自最好成绩的先后，每渠道最多 2 个
+  assert.deepEqual(
+    auto.orderFailover(ranked, primary),
+    ['channels/trae/c', 'channels/workbuddy/a', 'channels/qodercn/d', 'channels/qodercn/e', 'deepseek/x']
+  )
+  // 首选自己不会再出现一次
+  assert.ok(!auto.orderFailover(ranked, primary).includes('channels/trae/b'))
+  // 总数上限
+  assert.deepEqual(auto.orderFailover(ranked, primary, { maxTotal: 3 }), ['channels/trae/c', 'channels/workbuddy/a', 'channels/qodercn/d'])
+})
+
+check('失败切换：普通 Provider 的渠道键就是 Provider 名', () => {
+  const ranked = [
+    { entry: { ref: 'p1/a', providerName: 'p1', model: { id: 'a' } } },
+    { entry: { ref: 'p1/b', providerName: 'p1', model: { id: 'b' } } },
+    { entry: { ref: 'p2/c', providerName: 'p2', model: { id: 'c' } } }
+  ]
+  assert.deepEqual(auto.orderFailover(ranked, { ref: 'p1/a', providerName: 'p1', model: { id: 'a' } }), ['p1/b', 'p2/c'])
+  assert.deepEqual(auto.orderFailover([], { ref: 'p1/a', providerName: 'p1', model: { id: 'a' } }), [])
+})
+
 check('尝试链：兜底与候选重复时不重复追加', () => {
   const config = { channels: { type: 'channel', models: [{ id: 'only', displayName: 'Only · 免费' }] } }
   auto.resetStatsCache()

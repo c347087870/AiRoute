@@ -29,6 +29,9 @@ const modelHealthAudit = require('./model-health-audit')
 const accountHealth = require('./account-health')
 // 「这次失败算谁的」判定（客户端取消 vs 上游卡死），见 server/failure-class.js
 const { isAbortFailure, classifyChannelFailure, stallMessage, CHANNEL_FIRST_CHUNK_TIMEOUT_MS } = require('./failure-class')
+// 自动换模型的预算：单个候选一次超时就是 60 秒级，候选串太长会把「自动切换」
+// 变成「卡死不响应」。超过这个时长就不再换新候选，直接返回最后一条错误
+const FAILOVER_BUDGET_MS = 120000
 const {
   getConfig,
   saveConfig,
@@ -96,7 +99,11 @@ function saveFallback(fallback) {
   fs.writeJsonSync(FALLBACK_PATH, fallback, { spaces: 2 })
 }
 
-// 构建本次请求要尝试的模型链：主模型 + 兜底模型
+// 构建本次请求要尝试的模型链：
+//   auto 客户端 → 激活模型（没激活就是策略第一名）
+//   普通客户端 → state.current（= auto 时走意图规则）
+// 后面依次接：同渠道的其它模型 → 其它渠道（按策略分）→ 兜底模型。
+// 一个渠道全挂了会自动换下一个渠道，不需要人工切换。
 function buildProviderChain(config, state, fallbackData, body) {
   // 失活的模型不参与建链：它在 /v1/models 里已经不播报了，这里再放进来只会让
   // 每个请求先撞一次已知会失败的墙。被跳过的引用原样带出去 —— 建链为空时
@@ -111,39 +118,43 @@ function buildProviderChain(config, state, fallbackData, body) {
     return { live, skippedOffline }
   }
 
-  // 客户端点名了 auto 伪模型（/v1/models 只播报 auto 一个）：这次请求按
-  // 服务端配置的策略挑模型，与面板里的激活模型无关。其它 model 值照旧被忽略
+  // 客户端点名了 auto 伪模型（/v1/models 只播报 auto 一个）：这次请求按面板里的
+  // 激活模型走，没激活（current = auto）时用服务端策略挑第一名。其它 model 值照旧被忽略
   // —— 保持「切换只在 AiRoute 里做」。
   const requested = typeof body?.model === 'string' ? body.model.trim() : ''
-  if (autoStrategy.isAutoId(requested)) {
-    const strategy = autoStrategy.getStrategy()
-    const chain = autoStrategy.buildChain(config, strategy, fallbackData.model)
-    if (chain.length) {
-      const { live, skippedOffline } = dropOffline(chain)
-      // 候选全失活时返回空链：不能让已失活的候选继续顶上去
-      return {
-        chain: live,
-        primaryRef: (live[0] || chain[0]).ref,
-        autoModel: autoStrategy.AUTO_MODELS[0],
-        skippedOffline
-      }
-    }
-  }
+  const autoRequest = autoStrategy.isAutoId(requested)
+  const strategy = autoStrategy.getStrategy()
 
-  const chain = []
   let requestedRef = state.current
-
-  if (requestedRef === 'auto') {
+  if (autoRequest) {
+    requestedRef = state.current && !autoStrategy.isAutoId(state.current)
+      ? state.current
+      : (autoStrategy.buildChain(config, strategy, '')[0] || {}).ref
+  } else if (requestedRef === 'auto') {
     const routed = engine.resolveModel(body)
     requestedRef = routed || firstAvailableRef(config)
   }
 
-  const primary = resolveRef(config, requestedRef)
+  const chain = []
+  const primary = requestedRef ? resolveRef(config, requestedRef) : null
   if (primary) chain.push(primary)
+
+  // 失败自动切换的候选：同渠道全试完 → 其它渠道（按策略分，渠道间轮流取）→ 兜底模型。
+  // 换渠道不等于换 Provider：渠道包里 trae / workbuddy / qodercn 都在同一个 Provider 下
+  if (primary) {
+    const ranked = autoStrategy.rankCandidates(models.listModelRefs(config), strategy, autoStrategy.readStats())
+    for (const ref of autoStrategy.orderFailover(ranked, primary)) {
+      const resolved = resolveRef(config, ref)
+      if (resolved) chain.push(resolved)
+    }
+  } else if (autoRequest) {
+    // 激活模型解析不出来（被删了）时退回纯策略链，别让请求直接失败
+    for (const item of autoStrategy.buildChain(config, strategy, '')) chain.push(item)
+  }
 
   if (fallbackData.model) {
     const fb = resolveRef(config, fallbackData.model)
-    if (fb && fb.ref !== primary?.ref) chain.push(fb)
+    if (fb && !chain.some(entry => entry.ref === fb.ref)) chain.push(fb)
   }
 
   const { live, skippedOffline } = dropOffline(chain)
@@ -209,6 +220,7 @@ async function handleRequest(req, res) {
 
   const startTime = Date.now()
   let lastError = null
+  let tried = 0
   let activeUpstreamStream = null // 当前活跃的通用 Provider 上游响应流（流式分支注册，重试时覆盖）
   // 在途计数（auto-least-conn 的唯一数据源）：派发给哪个候选就记在它头上，
   // 换下一个候选或请求收尾时释放。必须覆盖**所有**转发请求 —— 只统计 auto 请求的话，
@@ -245,6 +257,12 @@ async function handleRequest(req, res) {
     releaseCurrent()
     // close 之后不能再占用下一候选：此时不会有第二次 close 来释放它。
     if (clientGone(req, res)) return
+    // 响应已经开始往客户端写了（流式首帧发出）就不能再换模型：
+    // 第二个响应只会叠到同一条连接上，客户端拿到的是两段拼起来的垃圾
+    if (res.headersSent || res.writableEnded) return
+    // 换模型的预算：单个候选动辄 60s 超时，一路串下去会把「自动切换」变成「卡死不动」
+    if (tried > 0 && Date.now() - startTime > FAILOVER_BUDGET_MS) break
+    tried++
     releaseHeld = autoStrategy.beginAttempt(entry.ref)
     const provider = entry.provider
     const isFallback = entry.ref !== primaryRef
@@ -2418,13 +2436,26 @@ app.put('/api/workbuddy/config', (req, res) => {
   }
 })
 
-app.get('/api/logs', (req, res) => {
-  res.json(logger.getLogs({
+// 日志里的账号只有 uid，账号名在这里补齐（日志页与用量页共用同一套解析），
+// 前端不用再单独拉一次账号池、也不会把 Trae / Qoder 的账号显示成 uid 前 8 位
+app.get('/api/logs', async (req, res) => {
+  const rows = logger.getLogs({
     limit: req.query.limit,
     model: req.query.model || '',
     status: req.query.status || '',
     keyword: req.query.keyword || ''
-  }))
+  })
+  try {
+    const nameMap = await resolveAccountNames(rows.map(row => tokenStats.channelOf(row.model)))
+    for (const row of rows) {
+      if (!row.uid) continue
+      const account = nameMap.get(`${tokenStats.channelOf(row.model)}:${row.uid}`)
+      if (account?.name) row.accountName = account.name
+    }
+  } catch {
+    /* 账号名只是展示信息，取不到就退回 uid */
+  }
+  res.json(rows)
 })
 
 app.get('/api/logs/models', (req, res) => {
@@ -2478,6 +2509,52 @@ const CREDIT_CHANNEL_LABELS = {
   'workbuddy-global': 'WorkBuddy 国际版',
 }
 
+// 账号名 / 账号 id 只用于展示：按渠道去插件取账号列表，20 秒内复用，
+// 避免面板 5 秒一轮的轮询每次都把所有渠道的 account.list 打一遍
+let accountNameCache = { at: 0, stamp: '', map: new Map() }
+
+async function resolveAccountNames(providers) {
+  const list = [...new Set((providers || []).filter(Boolean))].sort()
+  const stamp = list.join(',')
+  if (stamp === accountNameCache.stamp && Date.now() - accountNameCache.at < 20000) {
+    return accountNameCache.map
+  }
+  const nameMap = new Map()
+  for (const provider of list) {
+    try {
+      if (provider === 'workbuddy' || provider === 'workbuddy-global') {
+        const realm = provider === 'workbuddy-global' ? 'global' : 'cn'
+        // 用模块导出的 listAccounts（内部 ensure 运行时），getRuntime() 返回的实例上
+        // 没有这个方法，之前调它一直是 undefined → 昵称永远取不到，界面只剩 uid 前 8 位
+        for (const account of workbuddy.listAccounts() || []) {
+          if ((account.realm || 'cn') !== realm) continue
+          nameMap.set(`${provider}:${account.uid}`, {
+            accountId: account.uid,
+            name: account.nickname || String(account.uid).slice(0, 8),
+            todayTokens: Number(account.tokenUsageToday) || 0,
+          })
+        }
+      } else {
+        const reply = await channels.rpc({ method: 'account.list', payload: { provider } })
+        if (reply?.ok === true && Array.isArray(reply.value)) {
+          for (const account of reply.value) {
+            if (!account || !account.uid) continue
+            nameMap.set(`${provider}:${account.uid}`, {
+              accountId: account.id,
+              name: account.name || account.nickname || account.id,
+              todayTokens: Number(account.tokenUsageToday) || 0,
+            })
+          }
+        }
+      }
+    } catch {
+      /* 账号名只是展示信息，取不到就退回 uid */
+    }
+  }
+  accountNameCache = { at: Date.now(), stamp, map: nameMap }
+  return nameMap
+}
+
 app.get('/api/token-stats/scopes', async (req, res) => {
   try {
     const snapshot = tokenStats.getScopeStats()
@@ -2499,37 +2576,7 @@ app.get('/api/token-stats/scopes', async (req, res) => {
     })
 
     const accounts = Object.values(snapshot.accounts)
-    const nameMap = new Map()
-    const providers = [...new Set(accounts.map(item => item.channel))]
-    for (const provider of providers) {
-      try {
-        if (provider === 'workbuddy' || provider === 'workbuddy-global') {
-          const realm = provider === 'workbuddy-global' ? 'global' : 'cn'
-          for (const account of workbuddy.getRuntime()?.listAccounts() || []) {
-            if ((account.realm || 'cn') !== realm) continue
-            nameMap.set(`${provider}:${account.uid}`, {
-              accountId: account.uid,
-              name: account.nickname || String(account.uid).slice(0, 8),
-              todayTokens: Number(account.tokenUsageToday) || 0,
-            })
-          }
-        } else {
-          const reply = await channels.rpc({ method: 'account.list', payload: { provider } })
-          if (reply?.ok === true && Array.isArray(reply.value)) {
-            for (const account of reply.value) {
-              if (!account || !account.uid) continue
-              nameMap.set(`${provider}:${account.uid}`, {
-                accountId: account.id,
-                name: account.name || account.nickname || account.id,
-                todayTokens: Number(account.tokenUsageToday) || 0,
-              })
-            }
-          }
-        }
-      } catch {
-        /* 账号名只是展示信息，取不到就退回 uid */
-      }
-    }
+    const nameMap = await resolveAccountNames(accounts.map(item => item.channel))
 
     res.json({
       ok: true,
@@ -2540,6 +2587,42 @@ app.get('/api/token-stats/scopes', async (req, res) => {
         ...(nameMap.get(`${item.channel}:${item.uid}`) || {}),
         name: (nameMap.get(`${item.channel}:${item.uid}`) || {}).name || String(item.uid).slice(0, 8),
       })),
+    })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
+// 「渠道-账号-模型」三级明细：用量页的折线图与明细表都吃这一份。
+// 账号名在这里补齐（统计本身只认得 uid），渠道名与模型名在这里换成可读写法
+app.get('/api/token-stats/breakdown', async (req, res) => {
+  try {
+    const days = Math.min(60, Math.max(1, Number(req.query.days) || 30))
+    // dayOffset：0 = 到今天为止，1 = 到昨天为止（「昨天」这个维度）
+    const dayOffset = Math.min(30, Math.max(0, Number(req.query.offset) || 0))
+    const data = tokenStats.getEntryBreakdown(days, dayOffset)
+    const nameMap = await resolveAccountNames(data.entries.map(item => item.channel))
+    res.json({
+      ok: true,
+      generatedAt: Date.now(),
+      days: data.days,
+      dayOffset: data.dayOffset,
+      granularity: data.granularity,
+      dates: data.dates,
+      labels: data.labels,
+      entries: data.entries.map(item => {
+        const account = nameMap.get(`${item.channel}:${item.uid}`)
+        return {
+          key: item.key,
+          channel: item.channel,
+          channelName: CREDIT_CHANNEL_LABELS[item.channel] || item.channel,
+          uid: item.uid,
+          accountName: account?.name || (item.uid ? String(item.uid).slice(0, 8) : '未记录账号'),
+          model: item.model,
+          series: item.series,
+          totals: item.totals,
+        }
+      }),
     })
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })

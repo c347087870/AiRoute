@@ -64,7 +64,7 @@
               <td class="nowrap">{{ formatTime(log.timestamp) }}</td>
               <td class="input-cell" :title="log.input || ''">{{ formatInput(log.input) }}</td>
               <td class="nowrap">{{ log.model }}</td>
-              <td class="nowrap token-cell text-muted">{{ accountLabel(log.uid) }}</td>
+              <td class="nowrap token-cell text-muted">{{ accountLabel(log) }}</td>
               <td>
                 <span :class="log.status === 200 ? 'text-green' : 'text-red'">
                   {{ log.status }}
@@ -126,7 +126,7 @@
           <tbody>
             <tr v-for="(e, i) in creditEntries" :key="i">
               <td class="nowrap">{{ formatTime(e.time) }}</td>
-              <td class="nowrap token-cell text-muted">{{ accountLabel(e.uid) }}</td>
+              <td class="nowrap token-cell text-muted">{{ accountLabel(e) }}</td>
               <td class="token-cell" :class="deltaClass(e.delta)">{{ creditDeltaText(e.delta) }}</td>
               <td class="token-cell text-purple">{{ formatNumber(e.after) }}</td>
               <td class="text-muted">余额 {{ formatNumber(e.before) }} → {{ formatNumber(e.after) }}</td>
@@ -222,12 +222,14 @@ function degradedTitle(log) {
   return `重试：${log.error || '中途出现失败后恢复'}`
 }
 
-// 账号列显示名：优先账号池昵称，未命中（账号已删或昵称为空）回退 uid 前 8 位，无 uid 显示 -
-function accountLabel(uid) {
-  if (!uid) return '-'
-  const hit = accounts.value.find(a => a.uid === uid)
+// 账号列显示名：优先服务端补好的账号名（覆盖 Trae / Qoder 等所有渠道），
+// 次选账号池昵称，都没有才回退 uid 前 8 位，无 uid 显示 -
+function accountLabel(log) {
+  if (!log || !log.uid) return '-'
+  if (log.accountName) return log.accountName
+  const hit = accounts.value.find(a => a.uid === log.uid)
   if (hit && hit.nickname) return hit.nickname
-  return String(uid).slice(0, 8)
+  return String(log.uid).slice(0, 8)
 }
 
 // 加载日志；服务端已按任务合并（一次输入 + 其工具循环 = 一条记录）。

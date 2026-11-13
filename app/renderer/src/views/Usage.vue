@@ -5,8 +5,7 @@
       <slot name="toolbar" />
     </div>
 
-    <UsageOverview v-if="tab === 'overview'" />
-    <TokenStats v-else-if="tab === 'stats'" />
+    <UsageStats v-if="tab === 'stats'" />
     <Logs v-else />
   </div>
 </template>
@@ -15,25 +14,24 @@
 import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
-import UsageOverview from './UsageOverview.vue'
-import TokenStats from './TokenStats.vue'
+import UsageStats from './UsageStats.vue'
 import Logs from './Logs.vue'
 
 const route = useRoute()
 const router = useRouter()
+// 概览与用量统计已合并成一张页：统计（时间维度 + 渠道/账号/模型下钻）与请求日志
 const tabs = [
-  { value: 'overview', label: '概览' },
   { value: 'stats', label: '用量统计' },
   { value: 'logs', label: '请求日志' },
 ]
 const valid = new Set(tabs.map(item => item.value))
-const tab = ref(valid.has(String(route.query.tab || '')) ? String(route.query.tab) : 'overview')
+const tab = ref(valid.has(String(route.query.tab || '')) ? String(route.query.tab) : 'stats')
 
 watch(tab, value => {
   router.replace({ path: '/usage', query: { tab: value } })
 })
 watch(() => route.query.tab, value => {
-  const next = valid.has(String(value || '')) ? String(value) : 'overview'
+  const next = valid.has(String(value || '')) ? String(value) : 'stats'
   if (next !== tab.value) tab.value = next
 })
 </script>

@@ -275,15 +275,26 @@ check('按渠道测试：只在指定渠道的模型里挑候选', async () => {
   }
 })
 
-check('运行时没有的模型：透出 404，而不是 500', async () => {
-  // AiRoute 按「当前模型」路由，请求体里的 model 不参与选源
+check('运行时没有的模型：无路可退时透出 404，而不是 500', async () => {
+  // AiRoute 按「当前模型」路由，请求体里的 model 不参与选源。
+  // 自动切换上线后，只要还有别的候选就会换过去，所以这里把候选收成只剩这一个，
+  // 才能验证「谁都接不住」时的错误分类
+  const modelsFile = path.join(dataDir, 'models.json')
+  const backup = fs.readFileSync(modelsFile)
+  fs.writeFileSync(modelsFile, JSON.stringify({
+    channels: { type: 'channel', displayName: '账号渠道（10 家）', models: [{ id: 'gemini/missing' }] }
+  }, null, 2))
   fs.writeFileSync(path.join(dataDir, 'state.json'), JSON.stringify({ current: 'channels/gemini/missing' }))
-  const res = await request('POST', '/v1/chat/completions', {
-    model: 'channels/gemini/missing',
-    messages: [{ role: 'user', content: 'hi' }]
-  })
-  assert.equal(res.status, 404, res.text)
-  assert.match(res.text, /渠道未提供模型/)
+  try {
+    const res = await request('POST', '/v1/chat/completions', {
+      model: 'channels/gemini/missing',
+      messages: [{ role: 'user', content: 'hi' }]
+    })
+    assert.equal(res.status, 404, res.text)
+    assert.match(res.text, /渠道未提供模型/)
+  } finally {
+    fs.writeFileSync(modelsFile, backup)
+  }
 })
 
 check('流式断流：补错误帧 + [DONE]，不换源也不崩', async () => {

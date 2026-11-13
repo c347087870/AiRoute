@@ -256,6 +256,22 @@ async function main() {
   fs.writeFileSync(path.join(tmpDir, 'fallback.json'), JSON.stringify({ model: '' }))
   fs.writeFileSync(path.join(tmpDir, 'server-config.json'), JSON.stringify({ port: gwPort }))
 
+  // 临时把配置缩减成「只剩这些 Provider」：自动切换上线后，只要还有别的可用模型，
+  // 请求就不会失败 —— 要验证「全部都挂了」时的错误信封，得先把退路收掉
+  const withOnlyProviders = async (keep, fn) => {
+    const file = path.join(tmpDir, 'models.json')
+    const backup = fs.readFileSync(file)
+    const all = JSON.parse(backup.toString())
+    const next = {}
+    for (const name of keep) if (all[name]) next[name] = all[name]
+    fs.writeFileSync(file, JSON.stringify(next, null, 2))
+    try {
+      return await fn()
+    } finally {
+      fs.writeFileSync(file, backup)
+    }
+  }
+
   const gw = startGateway(tmpDir, gwPort)
   const base = `http://127.0.0.1:${gwPort}`
 
@@ -420,6 +436,17 @@ async function main() {
       assert.strictEqual(r.status, 200)
       const cur = await fetchJson(`${base}/api/state`)
       assert.strictEqual(cur.json.current, 'mock-provider/mock-small')
+
+      // 切到小杯后发一个 auto 请求：链头必须是激活模型，而不是策略链头（配置顺序里是大杯）
+      const chat = await fetchJson(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] })
+      })
+      assert.strictEqual(chat.status, 200)
+      const logs = await fetchJson(`${base}/api/logs?limit=1`)
+      assert.strictEqual(logs.json[0].model, 'mock-provider/mock-small', 'auto 应当先试激活模型')
+
       // 切回大杯，后续链路断言用
       await fetchJson(`${base}/api/state`, {
         method: 'POST',
@@ -672,10 +699,32 @@ async function main() {
       }
     })
 
+    await check('主模型连不上 → 不配兜底也能自动换下一个模型', async () => {
+      // 这条用例专门验证「失败自动切换」本身：兜底模型留空，chain 要靠候选池自己接上
+      const setState = ref => fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: ref })
+      })
+      try {
+        await setState('fail-provider/dead')
+        const r = await fetchJson(`${base}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'auto-failover-probe' }] })
+        })
+        assert.strictEqual(r.status, 200, `应自动换模型而不是直接失败：${r.text.slice(0, 200)}`)
+        const logs = await fetchJson(`${base}/api/logs?limit=1`)
+        assert.notStrictEqual(logs.json[0].model, 'fail-provider/dead', '真正服务这次请求的不该是挂掉的那个模型')
+        assert.strictEqual(logs.json[0].fallback, true, '换模型要在日志里标成降级')
+      } finally {
+        await setState('mock-provider/mock-large')
+      }
+    })
+
     // ==================== 模型失活 ====================
     group('6.5 模型失活（连续失败 → 下线 → 手动恢复）')
-
-    await check('连续 3 次失败 → 模型失活、请求被拒、恢复后回来', async () => {
+    await check('连续 3 次失败 → 模型失活，后续请求自动换模型', async () => {
       const setState = ref => fetchJson(`${base}/api/state`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -699,13 +748,15 @@ async function main() {
         assert.strictEqual(record.offline, true)
         assert.strictEqual(record.reason, 'errors')
 
-        const blocked = await fetchJson(`${base}/v1/chat/completions`, {
+        // 失活之后：首选被跳过，请求自动落到别的模型上，不再整个失败
+        const afterOffline = await fetchJson(`${base}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'after-offline' }] })
         })
-        assert.strictEqual(blocked.status, 500)
-        assert.match(blocked.json.error, /失活/, '错误文案要说清是失活，而不是「没配置」')
+        assert.strictEqual(afterOffline.status, 200, '首选失活时应自动换下一个模型')
+        const afterLogs = await fetchJson(`${base}/api/logs?limit=1`)
+        assert.notStrictEqual(afterLogs.json[0].model, 'fail-provider/dead', '失活的模型不该再被尝试')
 
         const revived = await fetchJson(`${base}/api/model-health/revive`, {
           method: 'POST',
@@ -713,6 +764,9 @@ async function main() {
           body: JSON.stringify({ ref: 'fail-provider/dead' })
         })
         assert.strictEqual(revived.status, 200)
+        const afterRevive = await fetchJson(`${base}/api/model-health`)
+        const revivedRecord = afterRevive.json.models.find(item => item.ref === 'fail-provider/dead')
+        assert.strictEqual(revivedRecord.offline, false, '恢复后台账应标回可用')
       } finally {
         await setState('mock-provider/mock-large')
       }
@@ -753,11 +807,18 @@ async function main() {
     })
 
     await check('并发优先策略：并发的两个请求摊到不同模型上', async () => {
-      // 策略是全局一档：先把「并发优先」选上，再用 auto 这个模型名发请求
+      // 策略是全局一档：先把「并发优先」选上，再用 auto 这个模型名发请求。
+      // 激活模型要切回 auto —— 激活了具体模型时链头固定是它（不再由策略分流），
+      // 那是有意为之的行为，这条用例只验证策略本身
       await fetchJson(`${base}/api/auto-strategy`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ strategy: 'connections' })
+      })
+      await fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: 'auto' })
       })
       const before = mock.requests.filter(q => q.url.includes('/chat/completions')).length
       const call = () => fetchJson(`${base}/v1/chat/completions`, {
@@ -781,11 +842,16 @@ async function main() {
       assert.strictEqual(landed.length, 2, `应有两次上游请求：${landed}`)
       assert.notStrictEqual(landed[0], landed[1], `并发的两条请求应落到不同模型：${landed}`)
 
-      // 复位
+      // 复位：策略回综合，激活模型回大杯（后续用例按它断言）
       await fetchJson(`${base}/api/auto-strategy`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ strategy: 'balanced' })
+      })
+      await fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: 'mock-provider/mock-large' })
       })
     })
 
@@ -799,11 +865,11 @@ async function main() {
       })
       assert.strictEqual(sw.status, 200, `切换失败：${sw.text}`)
       try {
-        const r = await fetchJson(`${base}/v1/chat/completions`, {
+        const r = await withOnlyProviders(['no-key-provider'], () => fetchJson(`${base}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'no-key-probe' }] })
-        })
+        }))
         assert.strictEqual(r.status, 500)
         assert.ok(String(r.json.detail || '').includes('API Key'))
       } finally {
@@ -823,11 +889,11 @@ async function main() {
       })
       assert.strictEqual(sw.status, 200)
       try {
-        const r = await fetchJson(`${base}/v1/messages`, {
+        const r = await withOnlyProviders(['no-key-provider'], () => fetchJson(`${base}/v1/messages`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ model: 'x', max_tokens: 10, messages: [{ role: 'user', content: 'no-key-probe-2' }] })
-        })
+        }))
         assert.strictEqual(r.status, 500)
         assert.strictEqual(r.json.type, 'error')
         assert.ok(r.json.error && typeof r.json.error.message === 'string')
