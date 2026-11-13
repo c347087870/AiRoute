@@ -365,6 +365,66 @@ function prioritize(chain, preferred) {
   return [preferred, ...list.filter(item => item && item.ref !== preferred.ref)]
 }
 
+// 渠道键：渠道包里模型 id 的前缀才是「渠道」（trae / workbuddy / qodercn），
+// 普通 Provider 用它自己的名字
+function channelKeyOf(entry) {
+  const id = entry?.model?.id || ''
+  const type = entry?.providerType || entry?.provider?.type || ''
+  if (type === 'channel') {
+    const idx = id.indexOf('/')
+    if (idx > 0) return id.slice(0, idx)
+  }
+  return entry?.providerName || ''
+}
+
+/**
+ * 失败自动切换的候选顺序（不含首选模型）：
+ *   1. 同渠道的其它模型 —— 跨模型比跨渠道便宜，先在本渠道内换
+ *   2. 其它渠道 —— 按各自最好成绩的先后排队，每个渠道先取 1~2 个探路
+ *
+ * @param {Array} ranked rankCandidates 的结果（已按策略排序）
+ * @param {Object} primary 首选模型（listModelRefs / resolveRef 的返回）
+ * @param {Object} [options] maxSameChannel 同渠道最多换几个、maxOtherChannel 每个其它渠道取几个、maxTotal 总数上限
+ * @returns {string[]} 候选 ref 列表，按尝试顺序
+ */
+function orderFailover(ranked, primary, options = {}) {
+  const out = []
+  if (!primary || !primary.ref || !Array.isArray(ranked)) return out
+  const maxSameChannel = Number(options.maxSameChannel) || 4
+  const maxOtherChannel = Number(options.maxOtherChannel) || 2
+  const maxTotal = Number(options.maxTotal) || 8
+  const primaryChannel = channelKeyOf(primary)
+  const seen = new Set([primary.ref])
+
+  const push = item => {
+    const ref = item?.entry?.ref
+    if (!ref || seen.has(ref) || out.length >= maxTotal) return false
+    seen.add(ref)
+    out.push(ref)
+    return true
+  }
+
+  // 1) 同渠道：全部试完再换渠道
+  for (const item of ranked) {
+    if (out.length >= maxSameChannel) break
+    if (channelKeyOf(item.entry) !== primaryChannel) continue
+    push(item)
+  }
+
+  // 2) 其它渠道：按渠道最好成绩的先后，每个渠道先放几个进去
+  const perChannel = new Map()
+  for (const item of ranked) {
+    if (out.length >= maxTotal) break
+    const key = channelKeyOf(item.entry)
+    if (key === primaryChannel) continue
+    const used = perChannel.get(key) || 0
+    if (used >= maxOtherChannel) continue
+    if (push(item)) perChannel.set(key, used + 1)
+  }
+
+  return out
+}
+
 /**
  * 给 auto 伪模型生成这次请求的尝试链。
  * 尾巴上按配置的兜底模型补一位 —— 用户显式配了「主模型挂了用哪个」，
@@ -407,6 +467,8 @@ module.exports = {
   rankCandidates,
   buildChain,
   prioritize,
+  orderFailover,
+  channelKeyOf,
   beginAttempt,
   getInFlight,
   resetInFlight,

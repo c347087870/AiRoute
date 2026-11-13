@@ -29,6 +29,9 @@ const modelHealthAudit = require('./model-health-audit')
 const accountHealth = require('./account-health')
 // 「这次失败算谁的」判定（客户端取消 vs 上游卡死），见 server/failure-class.js
 const { isAbortFailure, classifyChannelFailure, stallMessage, CHANNEL_FIRST_CHUNK_TIMEOUT_MS } = require('./failure-class')
+// 自动换模型的预算：单个候选一次超时就是 60 秒级，候选串太长会把「自动切换」
+// 变成「卡死不响应」。超过这个时长就不再换新候选，直接返回最后一条错误
+const FAILOVER_BUDGET_MS = 120000
 const {
   getConfig,
   saveConfig,
@@ -96,7 +99,11 @@ function saveFallback(fallback) {
   fs.writeJsonSync(FALLBACK_PATH, fallback, { spaces: 2 })
 }
 
-// 构建本次请求要尝试的模型链：主模型 + 兜底模型
+// 构建本次请求要尝试的模型链：
+//   auto 客户端 → 激活模型（没激活就是策略第一名）
+//   普通客户端 → state.current（= auto 时走意图规则）
+// 后面依次接：同渠道的其它模型 → 其它渠道（按策略分）→ 兜底模型。
+// 一个渠道全挂了会自动换下一个渠道，不需要人工切换。
 function buildProviderChain(config, state, fallbackData, body) {
   // 失活的模型不参与建链：它在 /v1/models 里已经不播报了，这里再放进来只会让
   // 每个请求先撞一次已知会失败的墙。被跳过的引用原样带出去 —— 建链为空时
@@ -111,45 +118,43 @@ function buildProviderChain(config, state, fallbackData, body) {
     return { live, skippedOffline }
   }
 
-  // 客户端点名了 auto 伪模型（/v1/models 只播报 auto 一个）：这次请求按
-  // 服务端配置的策略挑模型，与面板里的激活模型无关。其它 model 值照旧被忽略
+  // 客户端点名了 auto 伪模型（/v1/models 只播报 auto 一个）：这次请求按面板里的
+  // 激活模型走，没激活（current = auto）时用服务端策略挑第一名。其它 model 值照旧被忽略
   // —— 保持「切换只在 AiRoute 里做」。
   const requested = typeof body?.model === 'string' ? body.model.trim() : ''
-  if (autoStrategy.isAutoId(requested)) {
-    const strategy = autoStrategy.getStrategy()
-    const chain = autoStrategy.buildChain(config, strategy, fallbackData.model)
-    if (chain.length) {
-      // 面板里激活了具体模型就先试它（挂了再按策略往下走）：auto 客户端发的是 auto，
-      // 不看这个的话「模型来源里切换模型」对真实客户端完全无效
-      const preferred = state.current && !autoStrategy.isAutoId(state.current)
-        ? resolveRef(config, state.current)
-        : null
-      const planned = autoStrategy.prioritize(chain, preferred)
-      const { live, skippedOffline } = dropOffline(planned)
-      // 候选全失活时返回空链：不能让已失活的候选继续顶上去
-      return {
-        chain: live,
-        primaryRef: (live[0] || planned[0]).ref,
-        autoModel: autoStrategy.AUTO_MODELS[0],
-        skippedOffline
-      }
-    }
-  }
+  const autoRequest = autoStrategy.isAutoId(requested)
+  const strategy = autoStrategy.getStrategy()
 
-  const chain = []
   let requestedRef = state.current
-
-  if (requestedRef === 'auto') {
+  if (autoRequest) {
+    requestedRef = state.current && !autoStrategy.isAutoId(state.current)
+      ? state.current
+      : (autoStrategy.buildChain(config, strategy, '')[0] || {}).ref
+  } else if (requestedRef === 'auto') {
     const routed = engine.resolveModel(body)
     requestedRef = routed || firstAvailableRef(config)
   }
 
-  const primary = resolveRef(config, requestedRef)
+  const chain = []
+  const primary = requestedRef ? resolveRef(config, requestedRef) : null
   if (primary) chain.push(primary)
+
+  // 失败自动切换的候选：同渠道全试完 → 其它渠道（按策略分，渠道间轮流取）→ 兜底模型。
+  // 换渠道不等于换 Provider：渠道包里 trae / workbuddy / qodercn 都在同一个 Provider 下
+  if (primary) {
+    const ranked = autoStrategy.rankCandidates(models.listModelRefs(config), strategy, autoStrategy.readStats())
+    for (const ref of autoStrategy.orderFailover(ranked, primary)) {
+      const resolved = resolveRef(config, ref)
+      if (resolved) chain.push(resolved)
+    }
+  } else if (autoRequest) {
+    // 激活模型解析不出来（被删了）时退回纯策略链，别让请求直接失败
+    for (const item of autoStrategy.buildChain(config, strategy, '')) chain.push(item)
+  }
 
   if (fallbackData.model) {
     const fb = resolveRef(config, fallbackData.model)
-    if (fb && fb.ref !== primary?.ref) chain.push(fb)
+    if (fb && !chain.some(entry => entry.ref === fb.ref)) chain.push(fb)
   }
 
   const { live, skippedOffline } = dropOffline(chain)
@@ -215,6 +220,7 @@ async function handleRequest(req, res) {
 
   const startTime = Date.now()
   let lastError = null
+  let tried = 0
   let activeUpstreamStream = null // 当前活跃的通用 Provider 上游响应流（流式分支注册，重试时覆盖）
   // 在途计数（auto-least-conn 的唯一数据源）：派发给哪个候选就记在它头上，
   // 换下一个候选或请求收尾时释放。必须覆盖**所有**转发请求 —— 只统计 auto 请求的话，
@@ -251,6 +257,12 @@ async function handleRequest(req, res) {
     releaseCurrent()
     // close 之后不能再占用下一候选：此时不会有第二次 close 来释放它。
     if (clientGone(req, res)) return
+    // 响应已经开始往客户端写了（流式首帧发出）就不能再换模型：
+    // 第二个响应只会叠到同一条连接上，客户端拿到的是两段拼起来的垃圾
+    if (res.headersSent || res.writableEnded) return
+    // 换模型的预算：单个候选动辄 60s 超时，一路串下去会把「自动切换」变成「卡死不动」
+    if (tried > 0 && Date.now() - startTime > FAILOVER_BUDGET_MS) break
+    tried++
     releaseHeld = autoStrategy.beginAttempt(entry.ref)
     const provider = entry.provider
     const isFallback = entry.ref !== primaryRef
