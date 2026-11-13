@@ -353,6 +353,19 @@ function rankCandidates(refs, strategy, stats) {
 }
 
 /**
+ * 把「当前激活模型」提到链头：面板里点了谁就先试谁，挂了再按策略往下走。
+ *
+ * 之前 auto 完全无视 state.current —— 客户端只发 auto，于是「模型来源里切换模型」
+ * 对任何真实客户端都不生效，切了也还是策略链头那个。已有同引用时去重提前，
+ * 避免一次请求把同一个模型试两遍。
+ */
+function prioritize(chain, preferred) {
+  const list = Array.isArray(chain) ? chain : []
+  if (!preferred || !preferred.ref) return list
+  return [preferred, ...list.filter(item => item && item.ref !== preferred.ref)]
+}
+
+/**
  * 给 auto 伪模型生成这次请求的尝试链。
  * 尾巴上按配置的兜底模型补一位 —— 用户显式配了「主模型挂了用哪个」，
  * 策略挑了 4 个都挂的时候没理由把它丢掉。
@@ -393,6 +406,7 @@ module.exports = {
   saveStrategy,
   rankCandidates,
   buildChain,
+  prioritize,
   beginAttempt,
   getInFlight,
   resetInFlight,

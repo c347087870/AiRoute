@@ -252,6 +252,18 @@ check('尝试链：最多 4 个候选，兜底模型补在末尾', () => {
   }
 })
 
+check('激活模型优先：把当前模型提到链头，重复的不再出现第二次', () => {
+  const a = { ref: 'channels/a' }
+  const b = { ref: 'channels/b' }
+  const c = { ref: 'channels/c' }
+  const chain = [a, b, c]
+
+  assert.deepEqual(auto.prioritize(chain, c).map(x => x.ref), ['channels/c', 'channels/a', 'channels/b'])
+  assert.deepEqual(auto.prioritize(chain, { ref: 'channels/d' }).map(x => x.ref), ['channels/d', 'channels/a', 'channels/b', 'channels/c'])
+  assert.deepEqual(auto.prioritize(chain, null).map(x => x.ref), ['channels/a', 'channels/b', 'channels/c'], '没激活模型时保持策略顺序')
+  assert.deepEqual(chain.map(x => x.ref), ['channels/a', 'channels/b', 'channels/c'], '原链不该被就地改动')
+})
+
 check('尝试链：兜底与候选重复时不重复追加', () => {
   const config = { channels: { type: 'channel', models: [{ id: 'only', displayName: 'Only · 免费' }] } }
   auto.resetStatsCache()

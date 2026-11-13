@@ -375,6 +375,9 @@
             @update:model-value="pickStrategy"
           />
         </div>
+        <div class="ch-strategy-note">
+          激活了具体模型时，Auto 会先试它，挂了再按策略挑；想完全交给策略，把激活模型切回 Auto
+        </div>
       </div>
       <div v-else class="ch-strategy-empty">
         策略选项读取失败：当前运行的服务可能是旧版本，重启 AiRoute 后再试
@@ -2695,6 +2698,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.ch-strategy-note {
+  margin-top: 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .ch-strategy-title {

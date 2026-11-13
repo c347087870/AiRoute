@@ -420,6 +420,17 @@ async function main() {
       assert.strictEqual(r.status, 200)
       const cur = await fetchJson(`${base}/api/state`)
       assert.strictEqual(cur.json.current, 'mock-provider/mock-small')
+
+      // 切到小杯后发一个 auto 请求：链头必须是激活模型，而不是策略链头（配置顺序里是大杯）
+      const chat = await fetchJson(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] })
+      })
+      assert.strictEqual(chat.status, 200)
+      const logs = await fetchJson(`${base}/api/logs?limit=1`)
+      assert.strictEqual(logs.json[0].model, 'mock-provider/mock-small', 'auto 应当先试激活模型')
+
       // 切回大杯，后续链路断言用
       await fetchJson(`${base}/api/state`, {
         method: 'POST',
@@ -753,11 +764,18 @@ async function main() {
     })
 
     await check('并发优先策略：并发的两个请求摊到不同模型上', async () => {
-      // 策略是全局一档：先把「并发优先」选上，再用 auto 这个模型名发请求
+      // 策略是全局一档：先把「并发优先」选上，再用 auto 这个模型名发请求。
+      // 激活模型要切回 auto —— 激活了具体模型时链头固定是它（不再由策略分流），
+      // 那是有意为之的行为，这条用例只验证策略本身
       await fetchJson(`${base}/api/auto-strategy`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ strategy: 'connections' })
+      })
+      await fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: 'auto' })
       })
       const before = mock.requests.filter(q => q.url.includes('/chat/completions')).length
       const call = () => fetchJson(`${base}/v1/chat/completions`, {
@@ -781,11 +799,16 @@ async function main() {
       assert.strictEqual(landed.length, 2, `应有两次上游请求：${landed}`)
       assert.notStrictEqual(landed[0], landed[1], `并发的两条请求应落到不同模型：${landed}`)
 
-      // 复位
+      // 复位：策略回综合，激活模型回大杯（后续用例按它断言）
       await fetchJson(`${base}/api/auto-strategy`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ strategy: 'balanced' })
+      })
+      await fetchJson(`${base}/api/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ current: 'mock-provider/mock-large' })
       })
     })
 

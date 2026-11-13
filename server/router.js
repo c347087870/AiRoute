@@ -119,11 +119,17 @@ function buildProviderChain(config, state, fallbackData, body) {
     const strategy = autoStrategy.getStrategy()
     const chain = autoStrategy.buildChain(config, strategy, fallbackData.model)
     if (chain.length) {
-      const { live, skippedOffline } = dropOffline(chain)
+      // 面板里激活了具体模型就先试它（挂了再按策略往下走）：auto 客户端发的是 auto，
+      // 不看这个的话「模型来源里切换模型」对真实客户端完全无效
+      const preferred = state.current && !autoStrategy.isAutoId(state.current)
+        ? resolveRef(config, state.current)
+        : null
+      const planned = autoStrategy.prioritize(chain, preferred)
+      const { live, skippedOffline } = dropOffline(planned)
       // 候选全失活时返回空链：不能让已失活的候选继续顶上去
       return {
         chain: live,
-        primaryRef: (live[0] || chain[0]).ref,
+        primaryRef: (live[0] || planned[0]).ref,
         autoModel: autoStrategy.AUTO_MODELS[0],
         skippedOffline
       }
