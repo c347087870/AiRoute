@@ -54,6 +54,14 @@
             vector-effect="non-scaling-stroke"
           />
         </svg>
+        <template v-if="hasData">
+          <span
+            v-for="dot in staticDots"
+            :key="`static-${dot.key}`"
+            class="dot dot-static"
+            :style="{ left: `${dot.x}%`, bottom: `${dot.y}%`, background: dot.color }"
+          ></span>
+        </template>
         <template v-if="hoverIndex >= 0">
           <span
             v-for="dot in hoverDots"
@@ -145,6 +153,9 @@ function xPercent(index) {
 }
 
 function yPercent(value) {
+  // null / undefined 是「这一刻没有数据」，不能当 0：Number(null) === 0，
+  // 否则断点会被画成掉到 0 的假数据，点也会铺在基线上
+  if (value === null || value === undefined || value === '') return null
   const number = Number(value)
   if (!Number.isFinite(number)) return null
   return Math.min(100, Math.max(0, (number / max.value) * 100))
@@ -179,6 +190,27 @@ const hoverDots = computed(() => {
     const y = yPercent(item.values?.[hoverIndex.value])
     if (y === null) continue
     out.push({ key: item.key, color: item.color, x: xPercent(hoverIndex.value), y })
+  }
+  return out
+})
+
+// 点太少时（今天 / 昨天 / 近 3 天）折线画不出来，直接把点画出来；
+// 长区间里只有单点数据的序列也一样，否则那条线在图上完全看不见。
+// 细粒度图上值为 0 的时段不画点，否则基线上会铺满一排没信息量的圆点
+const staticDots = computed(() => {
+  const out = []
+  const showAll = props.labels.length <= 3
+  for (const item of props.series) {
+    const values = item.values || []
+    const filled = values.filter(value => value !== null && value !== undefined && Number.isFinite(Number(value)))
+    const singlePoint = !showAll && filled.length === 1
+    values.forEach((value, index) => {
+      const y = yPercent(value)
+      if (y === null) return
+      if (singlePoint || (showAll && Number(value) > 0)) {
+        out.push({ key: `${item.key}-${index}`, color: item.color, x: xPercent(index), y })
+      }
+    })
   }
   return out
 })
@@ -339,6 +371,12 @@ function onMove(event) {
   border-radius: 50%;
   box-shadow: 0 0 0 2px var(--bg-card);
   pointer-events: none;
+}
+.dot-static {
+  width: 6px;
+  height: 6px;
+  margin: 0 0 -3px -3px;
+  opacity: 0.9;
 }
 .x-axis {
   position: relative;

@@ -2580,13 +2580,18 @@ app.get('/api/token-stats/scopes', async (req, res) => {
 app.get('/api/token-stats/breakdown', async (req, res) => {
   try {
     const days = Math.min(60, Math.max(1, Number(req.query.days) || 30))
-    const data = tokenStats.getEntryBreakdown(days)
+    // dayOffset：0 = 到今天为止，1 = 到昨天为止（「昨天」这个维度）
+    const dayOffset = Math.min(30, Math.max(0, Number(req.query.offset) || 0))
+    const data = tokenStats.getEntryBreakdown(days, dayOffset)
     const nameMap = await resolveAccountNames(data.entries.map(item => item.channel))
     res.json({
       ok: true,
       generatedAt: Date.now(),
       days: data.days,
+      dayOffset: data.dayOffset,
+      granularity: data.granularity,
       dates: data.dates,
+      labels: data.labels,
       entries: data.entries.map(item => {
         const account = nameMap.get(`${item.channel}:${item.uid}`)
         return {

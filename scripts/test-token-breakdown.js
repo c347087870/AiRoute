@@ -100,7 +100,10 @@ test('实时记录：带 uid 的请求按渠道·账号·模型落桶', () => {
   assert.ok(entry, '应记录出 qodercn|q1|dfmodel')
   assert.equal(entry.totals.total, 60)
   assert.equal(entry.totals.creditsUsed, 1.25)
-  assert.equal(entry.series[0].date, todayKey)
+  // 今天这个维度按小时出点，数据应落在当前小时那一格
+  const hourIndex = new Date().getHours()
+  assert.equal(entry.series[hourIndex].date, `${todayKey}-${pad2(hourIndex)}`)
+  assert.equal(entry.series[hourIndex].tokens, 60)
 })
 
 test('实时记录：不带 uid 的请求不丢，进空账号档', () => {
@@ -108,6 +111,27 @@ test('实时记录：不带 uid 的请求不丢，进空账号档', () => {
   const entry = entryOf(tokenStats.getEntryBreakdown(1), 'deepseek', '', 'deepseek-flash')
   assert.ok(entry, '应记录出 deepseek||deepseek-flash')
   assert.equal(entry.totals.total, 6)
+})
+
+test('今天 / 昨天：按小时出 24 个点，数据落在对应小时', () => {
+  const at = new Date()
+  at.setHours(9, 30, 0, 0)
+  tokenStats.recordTokens('channels/workbuddy/hourly-model', { input: 5, output: 5, cacheRead: 0, cacheWrite: 0, credits: 1, uid: 'u2' }, at.getTime())
+
+  const todayView = tokenStats.getEntryBreakdown(1, 0)
+  assert.equal(todayView.granularity, 'hour')
+  assert.equal(todayView.labels.length, 24)
+  assert.equal(todayView.labels[9], '09:00')
+  const entry = entryOf(todayView, 'workbuddy', 'u2', 'hourly-model')
+  assert.ok(entry, '应记录出 workbuddy|u2|hourly-model')
+  assert.equal(entry.series[9].tokens, 10)
+  assert.equal(entry.totals.total, 10)
+
+  // 昨天同一时刻没有数据，不该把今天的小时串过去
+  const yesterdayView = tokenStats.getEntryBreakdown(1, 1)
+  assert.equal(yesterdayView.granularity, 'hour')
+  assert.equal(yesterdayView.labels.length, 24)
+  assert.equal(entryOf(yesterdayView, 'workbuddy', 'u2', 'hourly-model'), undefined)
 })
 
 test('回填只做一次：重新加载不会把日志再算一遍', () => {

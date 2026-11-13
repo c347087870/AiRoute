@@ -79,7 +79,8 @@ function normalizeStatMap(map) {
   return out
 }
 
-// 渠道 / 账号 scope：{ byDay, byMonth, total }
+// 渠道 / 账号 / 三级明细 scope：{ byDay, byMonth, byHour, total }
+// byHour 只有三级明细在写（「今天 / 昨天」要按小时画图），渠道/账号两级留空不占地方
 function normalizeScopeMap(map) {
   const out = {}
   if (!map || typeof map !== 'object') return out
@@ -88,6 +89,7 @@ function normalizeScopeMap(map) {
     out[key] = {
       byDay: normalizeStatMap(scope.byDay),
       byMonth: normalizeStatMap(scope.byMonth),
+      byHour: normalizeStatMap(scope.byHour),
       total: normalizeStatObj(scope.total)
     }
   }
@@ -210,7 +212,7 @@ function parseEntryKey(key) {
 }
 
 function ensureScope(map, key) {
-  if (!map[key]) map[key] = { byDay: {}, byMonth: {}, total: initStatObj() }
+  if (!map[key]) map[key] = { byDay: {}, byMonth: {}, byHour: {}, total: initStatObj() }
   return map[key]
 }
 
@@ -304,7 +306,11 @@ function recordTokens(model, usage, timestamp = Date.now()) {
   accumulateScope(ensureScope(statsCache.byChannel, channel), timestamp, normalized)
   const uid = typeof usage?.uid === 'string' ? usage.uid : ''
   if (uid) accumulateScope(ensureScope(statsCache.byAccount, `${channel}:${uid}`), timestamp, normalized)
-  accumulateScope(ensureScope(statsCache.byEntry, entryKeyOf(channel, uid, ref.model)), timestamp, normalized)
+  const entryScope = ensureScope(statsCache.byEntry, entryKeyOf(channel, uid, ref.model))
+  accumulateScope(entryScope, timestamp, normalized)
+  // 三级明细额外留按小时桶：「今天 / 昨天」两个维度要按小时画图（只保留最近两天）
+  if (!entryScope.byHour[hourKey]) entryScope.byHour[hourKey] = initStatObj()
+  accumulate(entryScope.byHour[hourKey], normalized)
 
   statsCache.requests.unshift({
     timestamp,
@@ -374,6 +380,11 @@ function cleanupOldData(retentionDays = RETENTION_DAYS) {
   monthCutoff.setMonth(monthCutoff.getMonth() - MONTH_RETENTION_MONTHS)
   const cutoffMonthKey = getMonthKey(monthCutoff.getTime())
 
+  // 按小时桶只服务「今天 / 昨天」
+  const hourCutoff = new Date()
+  hourCutoff.setDate(hourCutoff.getDate() - 1)
+  const hourCutoffDayKey = getDayKey(hourCutoff.getTime())
+
   let cleaned = false
   for (const key of Object.keys(statsCache.byDay)) {
     if (key < cutoffDayKey) { delete statsCache.byDay[key]; cleaned = true }
@@ -392,6 +403,10 @@ function cleanupOldData(retentionDays = RETENTION_DAYS) {
       }
       for (const key of Object.keys(scope.byMonth || {})) {
         if (key < cutoffMonthKey) { delete scope.byMonth[key]; cleaned = true }
+      }
+      // 按小时桶只服务「今天 / 昨天」，留两天就够，多留会按 24 倍膨胀
+      for (const key of Object.keys(scope.byHour || {})) {
+        if (key.slice(0, 10) < hourCutoffDayKey) { delete scope.byHour[key]; cleaned = true }
       }
     }
   }
@@ -749,29 +764,41 @@ function getAccountToday(channel, uid) {
   return periods.day
 }
 
-// 「渠道-账号-模型」三级明细的逐日序列：用量页的筛选、折线图、明细表都吃这一份。
-// 固定输出最近 N 天（含今天），没数据的日期补 0，前端不用自己对齐日期
-function getEntryBreakdown(days = 30) {
-  const dates = []
-  const today = new Date()
-  for (let offset = days - 1; offset >= 0; offset--) {
-    const date = new Date(today)
-    date.setDate(date.getDate() - offset)
-    dates.push(getDayKey(date.getTime()))
+// 「渠道-账号-模型」三级明细的序列：用量页的筛选、折线图、明细表都吃这一份。
+// days=1 时按小时出 24 个点（今天 / 昨天要看当天走势），其余按天；没数据补 0，
+// 前端不用自己对齐时间轴
+function getEntryBreakdown(days = 30, dayOffset = 0) {
+  const end = new Date()
+  end.setDate(end.getDate() - Math.max(0, dayOffset))
+  const hourly = days === 1
+
+  const buckets = []
+  if (hourly) {
+    const dayKey = getDayKey(end.getTime())
+    for (let hour = 0; hour < 24; hour++) {
+      buckets.push({ key: `${dayKey}-${pad2(hour)}`, label: `${pad2(hour)}:00` })
+    }
+  } else {
+    for (let i = days - 1; i >= 0; i--) {
+      const date = new Date(end)
+      date.setDate(date.getDate() - i)
+      buckets.push({ key: getDayKey(date.getTime()), label: `${pad2(date.getMonth() + 1)}/${pad2(date.getDate())}` })
+    }
   }
 
+  const bucketStat = (scope, bucket) => periodView(hourly ? scope.byHour?.[bucket.key] : scope.byDay?.[bucket.key])
   const entries = []
   for (const [key, scope] of Object.entries(statsCache.byEntry)) {
-    const totals = periodView(sumStats(dates.map(day => scope.byDay?.[day])))
+    const totals = periodView(sumStats(buckets.map(bucket => (hourly ? scope.byHour?.[bucket.key] : scope.byDay?.[bucket.key]))))
     if (totals.count === 0 && totals.total === 0) continue
     entries.push({
       ...parseEntryKey(key),
       key,
       totals,
-      series: dates.map(day => {
-        const stat = periodView(scope.byDay?.[day])
+      series: buckets.map(bucket => {
+        const stat = bucketStat(scope, bucket)
         return {
-          date: day,
+          date: bucket.key,
           tokens: stat.total,
           input: stat.input,
           output: stat.output,
@@ -784,7 +811,14 @@ function getEntryBreakdown(days = 30) {
     })
   }
   entries.sort((a, b) => b.totals.total - a.totals.total)
-  return { days, dates, entries }
+  return {
+    days,
+    dayOffset: Math.max(0, dayOffset),
+    granularity: hourly ? 'hour' : 'day',
+    dates: buckets.map(bucket => bucket.key),
+    labels: buckets.map(bucket => bucket.label),
+    entries
+  }
 }
 
 // 三级明细是新增维度，升级前的历史只存在于请求日志里（逐次记录 model / uid / token / 积分）。
@@ -808,11 +842,15 @@ function backfillEntriesFromLogs() {
     if (!input && !output && !cacheRead && !cacheWrite && !credits) continue
     const ref = parseModelRef(entry.model)
     const uid = entry.uid ? String(entry.uid) : ''
-    accumulateScope(
-      ensureScope(statsCache.byEntry, entryKeyOf(ref.channel, uid, ref.model)),
-      timestamp,
-      { input, output, cacheRead, cacheWrite, ...credits > 0 ? { credits } : {} }
-    )
+    const normalized = { input, output, cacheRead, cacheWrite, ...credits > 0 ? { credits } : {} }
+    const scope = ensureScope(statsCache.byEntry, entryKeyOf(ref.channel, uid, ref.model))
+    accumulateScope(scope, timestamp, normalized)
+    // 按小时桶只回填最近两天（今天 / 昨天要能立刻看到走势），更早的不补，避免文件膨胀
+    if (timestamp >= Date.now() - 2 * 86400000) {
+      const hourKey = getHourKey(timestamp)
+      if (!scope.byHour[hourKey]) scope.byHour[hourKey] = initStatObj()
+      accumulate(scope.byHour[hourKey], normalized)
+    }
   }
   statsCache.entryBackfillDay = getDayKey(Date.now())
   saveStats()

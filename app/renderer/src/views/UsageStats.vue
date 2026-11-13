@@ -1,9 +1,10 @@
 <template>
   <div class="usage-stats">
     <div class="card stats-filter">
-      <div class="filter-row">
-        <SegmentedTabs v-model="days" :options="dayOptions" label="统计时间范围" />
-        <span class="filter-sep"></span>
+      <div class="filter-row filter-time">
+        <SegmentedTabs v-model="range" :options="rangeOptions" label="统计时间范围" />
+      </div>
+      <div class="filter-row filter-dims">
         <select v-model="channel" class="filter-select" title="按渠道筛选">
           <option value="">全部渠道</option>
           <option v-for="item in channelOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
@@ -23,12 +24,12 @@
 
     <div class="summary-cards">
       <div class="card summary-card">
-        <div class="summary-label">近 {{ days }} 天 Token</div>
+        <div class="summary-label">{{ rangeLabel }} Token</div>
         <div class="summary-value">{{ formatCnNumber(summary.tokens) }}</div>
         <div class="summary-sub">请求 {{ formatNumber(summary.count) }} 次</div>
       </div>
       <div class="card summary-card">
-        <div class="summary-label">近 {{ days }} 天积分</div>
+        <div class="summary-label">{{ rangeLabel }}积分</div>
         <div class="summary-value text-orange">{{ formatCredit(summary.credits) }}</div>
         <div class="summary-sub">按渠道 · 账号逐次累加</div>
       </div>
@@ -47,7 +48,7 @@
     <div class="chart-grid">
       <div class="card">
         <TrendChart
-          :title="`${groupLabel}每日 Token`"
+          :title="`${groupLabel}${pointLabel} Token`"
           :summary="`合计 ${formatCnNumber(summary.tokens)}`"
           :labels="dateLabels"
           :series="tokenSeries"
@@ -57,7 +58,7 @@
       </div>
       <div class="card">
         <TrendChart
-          :title="`${groupLabel}每日缓存命中率`"
+          :title="`${groupLabel}${pointLabel}缓存命中率`"
           :summary="`加权 ${formatPercent(summary.cacheHitRate)}`"
           :labels="dateLabels"
           :series="cacheSeries"
@@ -67,7 +68,7 @@
       </div>
       <div class="card">
         <TrendChart
-          :title="`${groupLabel}每日积分消耗`"
+          :title="`${groupLabel}${pointLabel}积分消耗`"
           :summary="`合计 ${formatCredit(summary.credits)}`"
           :labels="dateLabels"
           :series="creditSeries"
@@ -93,7 +94,7 @@
 
     <div class="section">
       <h2 class="section-title">
-        明细（近 {{ days }} 天合计）
+        明细（{{ rangeLabel }}合计）
         <span class="title-meta">{{ tableRows.length }} 组 渠道 · 账号 · 模型</span>
       </h2>
       <div class="card">
@@ -169,24 +170,37 @@ import AppButton from '../components/AppButton.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
 import TrendChart from '../components/TrendChart.vue'
 
-const dayOptions = [
-  { value: '7', label: '近 7 天' },
-  { value: '30', label: '近 30 天' },
-]
+// 时间维度：今天 / 昨天按小时出图（各 24 个点），其余按天
+const RANGES = {
+  today: { days: 1, offset: 0, label: '今天', hint: '今天' },
+  yesterday: { days: 1, offset: 1, label: '昨天', hint: '昨天' },
+  '3d': { days: 3, offset: 0, label: '近 3 天', hint: '近 3 天' },
+  '7d': { days: 7, offset: 0, label: '近 7 天', hint: '近 7 天' },
+  '30d': { days: 30, offset: 0, label: '近 30 天', hint: '近 30 天' },
+}
+const rangeOptions = Object.keys(RANGES).map(value => ({ value, label: RANGES[value].label }))
 
 const PALETTE = ['#7c5cff', '#2f9d78', '#d98b32', '#3b82f6', '#e05252', '#8b5cf6', '#14b8a6', '#64748b', '#d946ef', '#0ea5e9']
 const MAX_SERIES = 10
 
-const days = ref('30')
+const range = ref('30d')
 const channel = ref('')
 const account = ref('')
 const model = ref('')
 const loading = ref(false)
 const clearing = ref(false)
 const dates = ref([])
+const labels = ref([])
+const granularity = ref('day')
 const entries = ref([])
 
-const dateLabels = computed(() => dates.value.map(date => `${date.slice(5, 7)}/${date.slice(8, 10)}`))
+const currentRange = computed(() => RANGES[range.value] || RANGES['30d'])
+const rangeLabel = computed(() => currentRange.value.label)
+// 今天 / 昨天按小时出点，标题里的「每日」要跟着变成「每小时」
+const pointLabel = computed(() => (granularity.value === 'hour' ? '每小时' : '每日'))
+const dateLabels = computed(() => labels.value.length
+  ? labels.value
+  : dates.value.map(date => `${date.slice(5, 7)}/${date.slice(8, 10)}`))
 
 const channelOptions = computed(() => {
   const seen = new Map()
@@ -399,8 +413,10 @@ function creditText(row) {
 async function load() {
   loading.value = true
   try {
-    const data = await getTokenBreakdown(Number(days.value))
+    const data = await getTokenBreakdown(currentRange.value.days, currentRange.value.offset)
     dates.value = Array.isArray(data?.dates) ? data.dates : []
+    labels.value = Array.isArray(data?.labels) ? data.labels : []
+    granularity.value = data?.granularity === 'hour' ? 'hour' : 'day'
     entries.value = Array.isArray(data?.entries) ? data.entries : []
   } finally {
     loading.value = false
@@ -415,7 +431,7 @@ watch(channel, () => {
 watch(account, () => {
   model.value = ''
 })
-watch(days, load)
+watch(range, load)
 onMounted(load)
 usePageActions({ live: true })
 usePolling(load, 10000)
@@ -472,11 +488,9 @@ async function clearStats() {
   gap: 10px;
   flex-wrap: wrap;
 }
-.filter-sep {
-  width: 1px;
-  height: 22px;
-  margin: 0 2px;
-  background: var(--border-1);
+/* 时间维度单独一行，维度筛选另起一行 */
+.filter-row + .filter-row {
+  margin-top: 12px;
 }
 .filter-select {
   min-width: 152px;
