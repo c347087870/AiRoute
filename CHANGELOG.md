@@ -2,6 +2,28 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.2.2] - 2026-11-17
+
+签到按官方业务码判定、出站请求补齐官方客户端身份头：WorkBuddy 签到现在读业务码而不是猜文案，上游换个说法不再误报失败；发往第一方域的所有请求补上 `X-Client-Version` / `X-Client-Platform` / `X-Client-Product`，客户端版本号从 5.5.4 对齐到已安装的 5.11.3。Trae 签到补 `req_source` 与官方错误码分类。
+
+### 修复
+
+- **WorkBuddy 签到只认文案**：原来匹配 `msg` 里的「已签到 / already」，上游换个说法就报 `code=1001 msg=...` 失败。改为按官方 `mapCheckinStatus` 的码判——1001 今日已领（幂等，不算失败）、1002 该账号不参与、1003 活动已结束，文案只作兜底
+- **没有 `code` 字段被当失败**：官方是 `code && code!==0` 才进错误分支，响应里没有 `code` 算成功；此前 AiRoute 会把它报成失败
+- **Trae 漏认官方鉴权码**：原来只认 `1001`，官方 IDE 3.4.20 的分类表里 `1002` 同样是鉴权失败，漏了就不会提示「重新登录」而只报「签到失败」。现在 1001 / 1002 归一到同一处置（1001 有真机抓包为证，两个都保留），另补 `9090` 活动不可用、`9102` 未签到、`4001` 参数异常，`9090` 归到「未开通」而不是报错
+
+### 调整
+
+- **补第一方域身份头**：官方 `main/client-identity.js` 把 `X-Client-Version`（应用版本）、`X-Client-Platform`（windows / macos / linux）、`X-Client-Product`（国内 `WorkBuddy`、国际 `WorkBuddy-AI`）注入到第一方 origin 的**所有**请求上。后两个是 5.11 才新增的，缺了就是明显的旧客户端特征。chat / refresh 走 `commonHeaders`、签到与余额走 `billingHeaders`，两处都接上；产品名按国内 / 国际分别取值，渠道派发与账号选择逻辑未动
+- **客户端版本 5.5.4 → 5.11.3**：UA 的 `WorkBuddy/<ver>`、`X-IDE-Version`、`X-Client-Version` 同源，落后 5 个小版本会造出「UA 旧、头新」这种真实客户端不存在的组合，比不加更显眼。桌面事件链版本（`DEFAULT_DESKTOP_VERSION`、`tasks.js`）同步到 5.11.3（官方 `ideVersion = appVersion`）
+- **Trae 领取请求补 `req_source`**：官方 `mb()` 对 status 与 claim 都发 `{req_source:1}`，此前 claim 发 `{}`
+
+### 测试
+
+- `test-workbuddy` 280 → **288** 项：签到分类 3 项（按码幂等、不参与、活动结束，含「无 code 也算成功」）、身份头 5 项（国内 / 国际产品名、平台归一、版本跟随）
+- `test-trae-credits` 18 → **20** 项：1002 鉴权别名、官方码常量
+- 全部套件通过：`test-workbuddy` 288、`test-trae-credits` 20、`test-update` 46、`test-channels` 11、`test-version-sync` 7、`test-channel-plugins` 13、`test-trae-relay` 20、`test-qoder-optimizations` 11、`verify-channels` 8，e2e 冒烟全过
+
 ## [2.2.1] - 2026-11-13
 
 请求失败自动换模型、用量页重做：一个渠道连不上就换同渠道其它模型、再换下一个渠道，不用手动切换；用量统计合并概览，可按「渠道 · 账号 · 模型」看逐日 Token / 缓存命中 / 积分 / 100 积分≈Token，折线图悬停给出具体数值。

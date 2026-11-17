@@ -130,6 +130,22 @@ check('状态：1001 鉴权失效要能识别', () => {
   assert.equal(parsed.checkedIn, false)
 })
 
+check('状态：1002 也是鉴权失效（官方 IDE 3.4.20 的 k0 分类码）', () => {
+  const parsed = protocol.parseCheckinStatus({ code: 1002, enable: false, checked_in: false })
+  assert.equal(parsed.ok, false)
+  assert.equal(protocol.CHECKIN_AUTH_CODES.has(parsed.code), true, '1002 必须归到鉴权失效')
+  // 两套码都要认，不能只留一个
+  assert.equal(protocol.CHECKIN_AUTH_CODES.has(1001), true)
+  assert.equal(protocol.CHECKIN_AUTH_CODES.has(1002), true)
+})
+
+check('业务码常量与官方分类表一致', () => {
+  assert.equal(protocol.CHECKIN_CODE_UNAVAILABLE, 9090)
+  assert.equal(protocol.CHECKIN_CODE_NOT_SIGNED, 9102)
+  assert.equal(protocol.CHECKIN_CODE_PARAMETERS, 4001)
+  assert.equal(protocol.CHECKIN_AUTH_CODES.has(protocol.CHECKIN_CODE_UNAVAILABLE), false, '9090 不是鉴权问题')
+})
+
 check('状态：缺字段不抛栈，按「没签过 + 金额 0」处理', () => {
   const parsed = protocol.parseCheckinStatus({})
   assert.equal(parsed.checkedIn, false)

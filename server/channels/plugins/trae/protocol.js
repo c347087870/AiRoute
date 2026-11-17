@@ -578,10 +578,23 @@ function readBusinessCode(body) {
 }
 
 // 签到业务码。每类对应不同的处置方式，**不能一律当成功**。
+// 鉴权码有两套并存，都要认：
+//   · 1001 —— checkin_credits/status 实测返回（message: "not able to authenticate you"）
+//   · 1002 —— 官方 IDE 3.4.20 的 k0() 分类表（out/main.js）与 i18n
+//             `trae-work.checkin.error.1002`（暂时无法验证账号，请重新登录后再试）
+// 其余官方分类（k0）：9090 → unavailable / 9102 → not_signed / 4001 → parameters
+// 1005 / 9074 是历史实测补充（官方分类表里没有）
 const CHECKIN_CODE_OK = 0
-const CHECKIN_CODE_AUTH = 1001        // 鉴权失效 → 需要重新登录
-const CHECKIN_CODE_PLAN_LIMIT = 1005  // 当前套餐不参与签到（免费/企业号常见）
-const CHECKIN_CODE_BUSY = 9074        // 「签到人数过多」→ 稍后再试，不是永久失败
+const CHECKIN_CODE_AUTH = 1001 // 鉴权失效（实测码）→ 需要重新登录
+const CHECKIN_CODE_AUTH_OFFICIAL = 1002 // 鉴权失效（官方分类码）→ 同上
+const CHECKIN_CODE_UNAVAILABLE = 9090 // 活动暂不可用（官方 unavailable）
+const CHECKIN_CODE_NOT_SIGNED = 9102 // 未签到（官方 not_signed）
+const CHECKIN_CODE_PARAMETERS = 4001 // 请求参数异常（官方 parameters）
+const CHECKIN_CODE_PLAN_LIMIT = 1005 // 当前套餐不参与签到（历史实测补充）
+const CHECKIN_CODE_BUSY = 9074 // 「签到人数过多」→ 稍后再试（历史实测补充）
+
+// 两个鉴权码归一到同一处置
+const CHECKIN_AUTH_CODES = new Set([CHECKIN_CODE_AUTH, CHECKIN_CODE_AUTH_OFFICIAL])
 
 function parseCheckinStatus(body) {
   const code = readBusinessCode(body)
@@ -1170,6 +1183,11 @@ module.exports = {
   readBusinessCode,
   CHECKIN_CODE_OK,
   CHECKIN_CODE_AUTH,
+  CHECKIN_CODE_AUTH_OFFICIAL,
+  CHECKIN_AUTH_CODES,
+  CHECKIN_CODE_UNAVAILABLE,
+  CHECKIN_CODE_NOT_SIGNED,
+  CHECKIN_CODE_PARAMETERS,
   CHECKIN_CODE_PLAN_LIMIT,
   CHECKIN_CODE_BUSY,
   buildCredential,

@@ -725,6 +725,41 @@ async function main() {
     assert.strictEqual(errors.isAlreadyCheckin(400, '{"code":10000,"msg":"server error"}'), false)
   })
 
+  // 官方 5.11.3 mapCheckinStatus：1001 已领 / 1002 不参与 / 1003 活动结束。
+  // 必须按 code 判，不能只认文案（上游文案会变，码不会）。
+  test('签到响应：按官方业务码分类（1001/1002/1003）', () => {
+    const ok = clientMod.classifyCheckinBody({ code: 0 })
+    assert.strictEqual(ok.ok, true)
+    assert.strictEqual(ok.already, undefined)
+
+    const alreadyCode = clientMod.classifyCheckinBody({ code: 1001 })
+    assert.strictEqual(alreadyCode.ok, true, '1001 是幂等成功，不是失败')
+    assert.strictEqual(alreadyCode.already, true)
+
+    const notEligible = clientMod.classifyCheckinBody({ code: 1002, msg: 'not eligible' })
+    assert.strictEqual(notEligible.ok, false)
+    assert.match(notEligible.message, /not eligible|不参与/)
+
+    const ended = clientMod.classifyCheckinBody({ code: 1003 })
+    assert.strictEqual(ended.ok, false)
+    assert.match(ended.message, /结束|ended/i)
+  })
+
+  test('签到响应：码不认识时回落文案判幂等', () => {
+    const viaMsg = clientMod.classifyCheckinBody({ code: 9999, msg: '今日已签到，明日再来' })
+    assert.strictEqual(viaMsg.ok, true)
+    assert.strictEqual(viaMsg.already, true)
+    // 字符串码（网关会回 "1001"）
+    assert.strictEqual(clientMod.classifyCheckinBody({ code: '1001' }).already, true)
+    // 完全认不出：失败，不能报成功
+    assert.strictEqual(clientMod.classifyCheckinBody({ code: 9999, msg: 'boom' }).ok, false)
+  })
+
+  test('签到响应：无 code 字段按官方口径算成功（官方是 code && code!==0 才报错）', () => {
+    assert.strictEqual(clientMod.classifyCheckinBody({}).ok, true)
+    assert.strictEqual(clientMod.classifyCheckinBody(null).ok, true)
+  })
+
   test('gateway_hint 按错误类型映射（未覆盖形态为空）', () => {
     assert.ok(errors.gatewayHint(K.SOFT_RATE, '').includes('rate limited'))
     assert.ok(errors.gatewayHint(K.MODEL_BLOCKED, '').includes('no such model'))
@@ -1410,7 +1445,7 @@ async function main() {
 
   test('UA 三段式（CN 固定 WorkBuddy 标识）', () => {
     const ua = headersMod.userAgent({ uid: 'u' })
-    assert.strictEqual(ua, 'WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1')
+    assert.strictEqual(ua, `WorkBuddy/${constants.DEFAULT_CLIENT_VERSION} WorkBuddy/${constants.DEFAULT_CLIENT_VERSION} CLI/2.137.1`)
   })
 
   test('chat 请求头永不携带 X-Refresh-Token', () => {
@@ -1418,6 +1453,53 @@ async function main() {
     assert.ok(!('X-Refresh-Token' in h))
     assert.strictEqual(h['X-CodeBuddy-Request'], '1')
     assert.ok(h.Authorization.startsWith('Bearer '))
+  })
+
+  // 官方 5.11.3 main/client-identity.js：三个身份头注入到第一方 origin 的所有请求。
+  // 5.9.4 只有 X-Client-Version；Platform/Product 是 5.11 新增，缺了就是明显的旧客户端特征。
+  test('客户端身份头：三件套齐全且版本与 UA 同源', () => {
+    const h = headersMod.clientIdentityHeaders(makeAuth('u9'), {})
+    assert.strictEqual(h['X-Client-Version'], constants.DEFAULT_CLIENT_VERSION)
+    assert.strictEqual(h['X-Client-Product'], 'WorkBuddy')
+    assert.ok(['windows', 'macos', 'linux'].includes(h['X-Client-Platform']), '平台段必须是官方三种取值之一')
+    // 与 UA 的版本段一致（避免「UA 旧、头新」自相矛盾）
+    const ua = headersMod.userAgent(makeAuth('u9'), {})
+    assert.ok(ua.startsWith(`WorkBuddy/${h['X-Client-Version']} `))
+  })
+
+  test('客户端身份头：平台映射与官方 toWorkbuddyClientPlatform 一致', () => {
+    assert.strictEqual(headersMod.clientPlatformOf('win32'), 'windows')
+    assert.strictEqual(headersMod.clientPlatformOf('darwin'), 'macos')
+    assert.strictEqual(headersMod.clientPlatformOf('linux'), 'linux')
+    // 认不出的平台不发该头，而不是瞎填
+    assert.strictEqual(headersMod.clientPlatformOf('aix'), '')
+    assert.deepStrictEqual(headersMod.clientIdentityHeaders(makeAuth('u9'), { clientPlatform: 'aix' })['X-Client-Platform'], undefined)
+  })
+
+  test('客户端身份头：国际版产品名与国内版隔离', () => {
+    const cn = headersMod.clientIdentityHeaders(makeAuth('u9'), {})
+    const gl = headersMod.clientIdentityHeaders(makeAuth('u9', { realm: 'global' }), {})
+    assert.strictEqual(cn['X-Client-Product'], 'WorkBuddy')
+    assert.strictEqual(gl['X-Client-Product'], 'WorkBuddy-AI')
+    assert.notStrictEqual(cn['X-Client-Product'], gl['X-Client-Product'], 'realm 不得互相污染')
+  })
+
+  test('客户端身份头：chat 与 billing 两域都要带（官方是 origin 级注入）', () => {
+    for (const [name, h] of [
+      ['chat', headersMod.chatHeaders(makeAuth('u9'), {}, {})],
+      ['billing', headersMod.billingHeaders(makeAuth('u9'), {})]
+    ]) {
+      assert.strictEqual(h['X-Client-Version'], constants.DEFAULT_CLIENT_VERSION, `${name} 缺 X-Client-Version`)
+      assert.strictEqual(h['X-Client-Product'], 'WorkBuddy', `${name} 缺 X-Client-Product`)
+      assert.ok(h['X-Client-Platform'], `${name} 缺 X-Client-Platform`)
+    }
+  })
+
+  test('客户端身份头：identity.clientVersion 覆盖时三处同步', () => {
+    const opts = { identity: { clientVersion: '9.9.9' } }
+    const h = headersMod.clientIdentityHeaders(makeAuth('u9'), opts)
+    assert.strictEqual(h['X-Client-Version'], '9.9.9')
+    assert.ok(headersMod.userAgent(makeAuth('u9'), opts).startsWith('WorkBuddy/9.9.9 '))
   })
 
   // ==================== 9. 模块接口完整性 ====================
@@ -2775,10 +2857,10 @@ async function main() {
     assert.ok(uaG.includes('WorkBuddy AI/'), `国际版 UA 应含 WorkBuddy AI 平台段，实际 ${uaG}`)
     assert.ok(!/WorkBuddy\/[\d.]+ WorkBuddy\//.test(uaG), '不应出现国内版的双 WorkBuddy 段')
     const uaC = headersMod.userAgent(cn, {})
-    assert.ok(uaC.includes('WorkBuddy/5.5.4 WorkBuddy/'), '国内版保持三段式')
+    assert.ok(uaC.includes(`WorkBuddy/${constants.DEFAULT_CLIENT_VERSION} WorkBuddy/`), '国内版保持三段式')
     // billing 域 UA 同样按区域切
     assert.ok(headersMod.billingUA({}, gl).includes('WorkBuddy AI'))
-    assert.strictEqual(headersMod.billingUA({}, cn), 'WorkBuddy/5.5.4')
+    assert.strictEqual(headersMod.billingUA({}, cn), `WorkBuddy/${constants.DEFAULT_CLIENT_VERSION}`)
   })
 
   test('国际版 Accept-Language / Origin 按区域切', () => {
@@ -2944,7 +3026,7 @@ async function main() {
     // 国内版 OAuth 不受影响
     assert.strictEqual(headersMod.chatBaseOf(null, cnOpts), 'https://copilot.tencent.com')
     assert.strictEqual(headersMod.originRefererOf(null, cnOpts), 'https://www.codebuddy.cn')
-    assert.ok(headersMod.userAgent(null, cnOpts).includes('WorkBuddy/5.5.4 WorkBuddy/'))
+    assert.ok(headersMod.userAgent(null, cnOpts).includes(`WorkBuddy/${constants.DEFAULT_CLIENT_VERSION} WorkBuddy/`))
     // 无区域信息（旧调用）回落国内版，且不抛错
     assert.strictEqual(headersMod.chatBaseOf(null, {}), 'https://copilot.tencent.com')
     assert.strictEqual(headersMod.chatBaseOf(undefined, undefined), 'https://copilot.tencent.com')

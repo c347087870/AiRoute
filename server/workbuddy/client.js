@@ -370,6 +370,32 @@ async function sendBillingPaths(auth, opts, paths, data) {
   return last
 }
 
+// 签到响应体分类（纯函数，便于离线用例钉住业务码口径）。
+// 官方 5.11.3 的 mapCheckinStatus 是 switch(code){1001,1002,1003}，
+// 不靠文案；这里保持同序：先业务码，再文案兜底，最后才是未识别失败。
+function classifyCheckinBody(env) {
+  // 官方口径：响应里没有 code 字段（或 code 为 0）都算成功
+  // （官方是 `e?.code && e.code!==0` 才进错误分支，undefined 会被当成功）
+  if (!env || env.code === undefined || env.code === null) return { ok: true, message: '签到成功' }
+  if (Number(env.code) === 0) return { ok: true, message: '签到成功' }
+  const code = Number(env.code)
+  const msg = String(env.msg || '')
+  if (code === C.CHECKIN_CODE_ALREADY_CLAIMED) {
+    return { ok: true, message: '今日已签到', already: true }
+  }
+  if (code === C.CHECKIN_CODE_NOT_ELIGIBLE) {
+    return { ok: false, message: msg || '该账号不参与签到活动', kind: errMod.ERR_KIND.CLIENT }
+  }
+  if (code === C.CHECKIN_CODE_EVENT_ENDED) {
+    return { ok: false, message: msg || '签到活动已结束', kind: errMod.ERR_KIND.CLIENT }
+  }
+  // 文案兜底：上游改码但文案没变时仍能识别幂等
+  if (errMod.ALREADY_CHECKIN_MARKERS.some(m => msg.toLowerCase().includes(m.toLowerCase()))) {
+    return { ok: true, message: '今日已签到', already: true }
+  }
+  return { ok: false, message: `code=${env.code} msg=${msg}` }
+}
+
 // 每日签到：返回 { ok, message, kind }
 async function dailyCheckin(auth, opts = {}) {
   let res
@@ -391,14 +417,7 @@ async function dailyCheckin(auth, opts = {}) {
   } catch {
     /* 非 JSON 视为成功 */
   }
-  if (env && Number(env.code) !== 0) {
-    const msg = String(env.msg || '')
-    if (errMod.ALREADY_CHECKIN_MARKERS.some(m => msg.toLowerCase().includes(m.toLowerCase()))) {
-      return { ok: true, message: '今日已签到', already: true }
-    }
-    return { ok: false, message: `code=${env.code} msg=${msg}` }
-  }
-  return { ok: true, message: '签到成功' }
+  return classifyCheckinBody(env)
 }
 
 // ===== 余额观察者 =====
@@ -1084,6 +1103,7 @@ module.exports = {
   chatStream,
   readAll,
   dailyCheckin,
+  classifyCheckinBody,
   userResource,
   resourcePackages,
   setCreditObserver,
