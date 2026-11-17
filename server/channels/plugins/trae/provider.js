@@ -1181,7 +1181,7 @@ function createTrae({ dataDir, logger = console, credentials, login, settings, v
     })
     if (!status.ok) throw new TraeError(`签到状态查询失败（HTTP ${status.status}）`, 'HTTP_ERROR', status.status)
     const before = protocol.parseCheckinStatus(await status.json().catch(() => ({})))
-    if (before.code === protocol.CHECKIN_CODE_AUTH) {
+    if (protocol.CHECKIN_AUTH_CODES.has(before.code)) {
       throw new TraeError('Trae 签到鉴权失败，请重新登录', 'AUTH', 401)
     }
     if (before.checkedIn) {
@@ -1192,16 +1192,18 @@ function createTrae({ dataDir, logger = console, credentials, login, settings, v
     // 活动未开启（免费 / 企业套餐）：不是失败，如实说「未开通」，免得天天报红
     if (!before.enabled) return { outcome: 'ineligible', message: '该账号未开通签到活动' }
 
+    // 领取也带 req_source：官方 mb() 对 status/claim 两者都发 {req_source:u}
     const claim = await request(`${protocol.UG_HOST}${protocol.CHECKIN_CLAIM_PATH}`, {
-      method: 'POST', headers, body: {},
+      method: 'POST', headers, body: { req_source: 1 },
     })
     const claimed = protocol.parseClaimResponse(await claim.json().catch(() => ({})))
     if (!claim.ok) throw new TraeError(`签到失败（HTTP ${claim.status}）`, 'HTTP_ERROR', claim.status)
     if (!claimed.ok) {
-      if (claimed.code === protocol.CHECKIN_CODE_AUTH) {
+      if (protocol.CHECKIN_AUTH_CODES.has(claimed.code)) {
         throw new TraeError('Trae 签到鉴权失败，请重新登录', 'AUTH', 401)
       }
-      if (claimed.code === protocol.CHECKIN_CODE_PLAN_LIMIT) {
+      if (claimed.code === protocol.CHECKIN_CODE_PLAN_LIMIT ||
+          claimed.code === protocol.CHECKIN_CODE_UNAVAILABLE) {
         return { outcome: 'ineligible', message: claimed.message || '当前套餐不参与签到' }
       }
       // 9074「签到人数过多」也走这里：可重试的失败，不要报成成功

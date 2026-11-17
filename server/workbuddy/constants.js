@@ -33,11 +33,27 @@ const ORIGIN_REFERER_CN = 'https://www.codebuddy.cn' // 出站 Origin/Referer �
 const ORIGIN_REFERER_GLOBAL = GLOBAL_BASE // 国际版 Origin/Referer 基础域
 
 // ===== 版本号（可被配置覆盖）=====
-const DEFAULT_CLIENT_VERSION = '5.5.4' // UA 的 WorkBuddy/<ver> 与 X-IDE-Version
+// 2026-11-17：跟随已安装客户端 5.11.3（原 5.5.4 落后 5 个小版本）。
+// X-Client-Version 与 UA 的 WorkBuddy/<ver> 同源，落后版本会让「UA 旧、头新」自相矛盾。
+const DEFAULT_CLIENT_VERSION = '5.11.3' // UA 的 WorkBuddy/<ver>、X-IDE-Version 与 X-Client-Version
 const DEFAULT_CLI_VERSION = '2.137.1' // UA 的 CLI/<ver> 段
 const DEFAULT_IDE_VERSION = '4.12.0' // 使用端身份 codebuddy 的 UA 版本段（CodeBuddyIDE/<ver> 与 CodeBuddy/<ver>）
-const DEFAULT_DESKTOP_VERSION = '5.5.6' // 桌面端事件链版本段（桌面 UA 两段 + 事件体 ideVersion/extVersion）
+const DEFAULT_DESKTOP_VERSION = '5.11.3' // 桌面端事件链版本段（官方 ideVersion = appVersion）
 const CODEBUDDY_CLI_UA = 'CLI/2.63.2 CodeBuddy/2.63.2' // OAuth 设备授权流程 UA
+
+// ===== 签到业务码（官方 5.11.3 mapCheckinStatus，按 code 判而非文案）=====
+// 官方：switch(code){1001→AlreadyClaimed, 1002→NotEligible, 1003→EventEnded, default→UnknownBizError}
+const CHECKIN_CODE_ALREADY_CLAIMED = 1001 // 今日已领（幂等，不算失败）
+const CHECKIN_CODE_NOT_ELIGIBLE = 1002 // 该账号不参与签到活动
+const CHECKIN_CODE_EVENT_ENDED = 1003 // 活动已结束
+
+// ===== 第一方 API origin 的客户端身份头（官方 main/client-identity.js）=====
+// 官方把这三个头注入到「第一方 origin」（product.json 的 endpoint）的所有请求上：
+//   X-Client-Version = electron.app.getVersion()
+//   X-Client-Platform = windows / macos / linux（由 process.platform 归一）
+//   X-Client-Product  = product.json 的 applicationName
+const CLIENT_IDENTITY_PRODUCT = 'WorkBuddy'
+const CLIENT_IDENTITY_PRODUCT_GLOBAL = 'WorkBuddy-AI' // 国际版 productName；官方 toSafeHeaderValue 把空格归一成 '-'
 
 // ===== 路径 =====
 const CHAT_COMPLETIONS_PATH = '/v2/chat/completions' // 聊天唯一出站路径
@@ -212,6 +228,11 @@ module.exports = {
   DEFAULT_IDE_VERSION,
   DEFAULT_DESKTOP_VERSION,
   CODEBUDDY_CLI_UA,
+  CHECKIN_CODE_ALREADY_CLAIMED,
+  CHECKIN_CODE_NOT_ELIGIBLE,
+  CHECKIN_CODE_EVENT_ENDED,
+  CLIENT_IDENTITY_PRODUCT,
+  CLIENT_IDENTITY_PRODUCT_GLOBAL,
   CHAT_COMPLETIONS_PATH,
   TOKEN_REFRESH_PATH,
   REPORT_PATH,

@@ -158,6 +158,33 @@ function validTraceID(s) {
   return /^[0-9a-fA-F]+$/.test(v)
 }
 
+// ===== 第一方 origin 的客户端身份头（官方 main/client-identity.js）=====
+// 官方把这组头通过 origin 拦截器注入到「第一方 origin」（product.json 的 endpoint）的
+// **所有** 请求上——chat / billing / refresh / growth 全在同一个域，因此都要带。
+// 平台段官方取 process.platform 归一（windows / macos / linux），这里跟随本机真实平台。
+function clientPlatformOf(value = process.platform) {
+  const s = String(value || '').toLowerCase()
+  if (s.includes('darwin') || s.includes('mac')) return 'macos'
+  if (s.includes('win')) return 'windows'
+  if (s.includes('linux')) return 'linux'
+  return ''
+}
+
+function clientIdentityHeaders(account, opts = {}) {
+  const headers = {}
+  // 版本段与 UA 的 WorkBuddy/<ver> 同源，避免「UA 旧、头新」自相矛盾
+  const version = idv(opts, 'clientVersion') || C.DEFAULT_CLIENT_VERSION
+  if (version) headers['X-Client-Version'] = version
+  const platform = clientPlatformOf(opts.clientPlatform)
+  if (platform) headers['X-Client-Platform'] = platform
+  // 产品名对应「该区域官方客户端的 applicationName」：国内 WorkBuddy，国际 WorkBuddy AI
+  // （官方 toSafeHeaderValue 会把空格归一成 '-'，故国际版发 WorkBuddy-AI）
+  headers['X-Client-Product'] = isGlobalAccount(account, opts)
+    ? C.CLIENT_IDENTITY_PRODUCT_GLOBAL
+    : C.CLIENT_IDENTITY_PRODUCT
+  return headers
+}
+
 // 公共请求头（所有 API 共享）
 function commonHeaders(account, opts = {}) {
   const origin = originRefererOf(account, opts)
@@ -171,6 +198,7 @@ function commonHeaders(account, opts = {}) {
     'X-CodeBuddy-Request': '1', // 官方风控闸门头，所有 API 必带
     'Accept-Language': acceptLanguage(opts, account)
   }
+  Object.assign(headers, clientIdentityHeaders(account, opts))
   const uid = account?.uid || ''
   if (uid) {
     headers['X-Machine-ID'] = deriveAccountStableID(uid, 'machine')
@@ -278,6 +306,8 @@ function billingHeaders(account, opts = {}) {
   }
   const deviceToken = resolveDeviceToken(account, opts)
   if (deviceToken) headers['X-Device-Token'] = deviceToken
+  // billing 域同属第一方 origin，身份头与 chat 一致
+  Object.assign(headers, clientIdentityHeaders(account, opts))
   return headers
 }
 
@@ -428,6 +458,8 @@ module.exports = {
   acceptLanguage,
   originRefererOf,
   commonHeaders,
+  clientIdentityHeaders,
+  clientPlatformOf,
   conversationHeaders,
   chatHeaders,
   billingHeaders,

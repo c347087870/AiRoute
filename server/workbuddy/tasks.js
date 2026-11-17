@@ -40,7 +40,7 @@ const MP_TASK_CODES = new Set([
 ])
 const MP_OPEN_DAY_ACTIVITY_ID = 'school_open_day_2026' // 校园日 activityId（与开学季同活动关联）
 
-const DESKTOP_VERSION = '5.5.6' // 桌面指纹版本号（默认值；identity.desktopVersion 可覆盖）
+const DESKTOP_VERSION = '5.11.3' // 桌面指纹版本号（默认值；identity.desktopVersion 可覆盖）
 const WEB_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36' // Web 事件体浏览器 UA（默认值；identity.webUA 可覆盖）
 
